@@ -7,6 +7,18 @@ struct BranchInfo: Identifiable, Equatable {
     let upstream: String?
     let isCurrent: Bool
     let isRemote: Bool
+    let ahead: Int
+    let behind: Int
+
+    init(name: String, shortHash: String, upstream: String?, isCurrent: Bool, isRemote: Bool, ahead: Int = 0, behind: Int = 0) {
+        self.name = name
+        self.shortHash = shortHash
+        self.upstream = upstream
+        self.isCurrent = isCurrent
+        self.isRemote = isRemote
+        self.ahead = ahead
+        self.behind = behind
+    }
 }
 
 struct RemoteInfo: Identifiable, Equatable {

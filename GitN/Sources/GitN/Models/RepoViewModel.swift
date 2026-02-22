@@ -26,6 +26,7 @@ final class RepoViewModel {
     var selectedDiffFile: DiffFile?
 
     var fileStatuses: [FileStatus] = []
+    var selectedFilePaths: Set<String> = []
     var commitSummary: String = ""
     var commitDescription: String = ""
 
@@ -39,6 +40,86 @@ final class RepoViewModel {
     var showTerminal = true
     var isLoading = false
     var collapsedSections: Set<String> = []
+
+    // MARK: - File Context Menu Actions
+
+    func discardChanges(paths: [String]) async {
+        for path in paths {
+            do { try await git.discardFileChanges(path: path) } catch {}
+        }
+        do { fileStatuses = try await git.status() } catch {}
+        if let file = selectedDiffFile {
+            await selectDiffFile(file, context: currentDiffContext)
+        }
+    }
+
+    func addToGitignore(pattern: String) async {
+        do {
+            try await git.addToGitignore(pattern: pattern)
+            await loadAll()
+        } catch {
+            showToast(title: "Ignore failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func deleteFiles(paths: [String]) async {
+        for path in paths {
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            try? FileManager.default.removeItem(atPath: fullPath)
+        }
+        do { fileStatuses = try await git.status() } catch {}
+        await refreshAfterPatchAction()
+    }
+
+    func showInFinder(path: String) {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        NSWorkspace.shared.selectFile(fullPath, inFileViewerRootedAtPath: "")
+    }
+
+    func copyFilePaths(_ paths: [String]) {
+        let text = paths.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    func createPatch(paths: [String]) async {
+        var patchContent = ""
+        for path in paths {
+            do {
+                let diff = try await git.unstagedFileDiff(path: path)
+                if !diff.isEmpty { patchContent += diff + "\n" }
+            } catch {}
+        }
+        guard !patchContent.isEmpty else {
+            showToast(title: "No changes", detail: "No diff to create patch from", style: .info)
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(patchContent, forType: .string)
+        showToast(title: "Patch copied", detail: "\(paths.count) file(s) patch copied to clipboard", style: .success)
+    }
+
+    func stageFiles(_ paths: [String]) async {
+        for path in paths { do { try await git.stageFile(path) } catch {} }
+        do { fileStatuses = try await git.status() } catch {}
+    }
+
+    func unstageFiles(_ paths: [String]) async {
+        for path in paths { do { try await git.unstageFile(path) } catch {} }
+        do { fileStatuses = try await git.status() } catch {}
+    }
+
+    func toggleFileSelection(_ path: String, isMulti: Bool) {
+        if isMulti {
+            if selectedFilePaths.contains(path) {
+                selectedFilePaths.remove(path)
+            } else {
+                selectedFilePaths.insert(path)
+            }
+        } else {
+            selectedFilePaths = [path]
+        }
+    }
 
     // MARK: - Rebase Conflict State
     var rebaseState: RebaseState?

@@ -174,10 +174,16 @@ struct DetailPanelView: View {
 
     // MARK: - Staged / Unstaged split list
 
+    private func selectedOrSingle(_ path: String) -> [String] {
+        if viewModel.selectedFilePaths.contains(path) && viewModel.selectedFilePaths.count > 1 {
+            return Array(viewModel.selectedFilePaths)
+        }
+        return [path]
+    }
+
     private var stagingFileList: some View {
         ScrollView {
             VStack(spacing: 0) {
-                // Staged section
                 stagingSectionHeader(
                     title: "已暂存",
                     count: stagedFiles.count,
@@ -196,11 +202,18 @@ struct DetailPanelView: View {
                 ForEach(stagedFiles) { file in
                     StagingFileRow(
                         file: file,
-                        isSelected: viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged,
+                        isSelected: viewModel.selectedFilePaths.contains(file.path)
+                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
                         isStaged: true,
                         onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
                         onToggle: { Task { await viewModel.unstageFile(file.path) } }
                     )
+                    .onTapGesture {
+                        let isMulti = NSEvent.modifierFlags.contains(.command)
+                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                    }
+                    .contextMenu { stagedFileContextMenu(file) }
                     .draggable(file.path)
                 }
                 .onDrop(of: [.text], isTargeted: nil) { providers in
@@ -209,7 +222,6 @@ struct DetailPanelView: View {
 
                 Divider().padding(.vertical, 2)
 
-                // Unstaged section
                 stagingSectionHeader(
                     title: "未暂存",
                     count: unstagedFiles.count,
@@ -222,11 +234,18 @@ struct DetailPanelView: View {
                 ForEach(unstagedFiles) { file in
                     StagingFileRow(
                         file: file,
-                        isSelected: viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged,
+                        isSelected: viewModel.selectedFilePaths.contains(file.path)
+                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
                         isStaged: false,
                         onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
                         onToggle: { Task { await viewModel.stageFile(file.path) } }
                     )
+                    .onTapGesture {
+                        let isMulti = NSEvent.modifierFlags.contains(.command)
+                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                    }
+                    .contextMenu { unstagedFileContextMenu(file) }
                     .draggable(file.path)
                 }
                 .onDrop(of: [.text], isTargeted: nil) { providers in
@@ -235,6 +254,89 @@ struct DetailPanelView: View {
             }
         }
         .frame(maxHeight: 240)
+    }
+
+    // MARK: - Staged File Context Menu
+
+    @ViewBuilder
+    private func stagedFileContextMenu(_ file: FileStatus) -> some View {
+        let paths = selectedOrSingle(file.path)
+
+        Button("Unstage") {
+            Task { await viewModel.unstageFiles(paths) }
+        }
+
+        Divider()
+
+        Button("File History") {}
+
+        Divider()
+
+        Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
+
+        Button("Copy file path") { viewModel.copyFilePaths(paths) }
+
+        Button("Create patch from file changes") {
+            Task { await viewModel.createPatch(paths: paths) }
+        }
+
+        Divider()
+
+        Button("Delete file", role: .destructive) {
+            Task { await viewModel.deleteFiles(paths: paths) }
+        }
+    }
+
+    // MARK: - Unstaged File Context Menu
+
+    @ViewBuilder
+    private func unstagedFileContextMenu(_ file: FileStatus) -> some View {
+        let paths = selectedOrSingle(file.path)
+
+        Button("Stage") {
+            Task { await viewModel.stageFiles(paths) }
+        }
+
+        Button("Discard changes") {
+            Task { await viewModel.discardChanges(paths: paths) }
+        }
+
+        Menu("Ignore") {
+            Button("Ignore \(file.path)") {
+                Task { await viewModel.addToGitignore(pattern: file.path) }
+            }
+            if let ext = file.path.split(separator: ".").last, ext.count < 10 {
+                Button("Ignore *.\(ext)") {
+                    Task { await viewModel.addToGitignore(pattern: "*.\(ext)") }
+                }
+            }
+            if file.path.contains("/") {
+                let dir = (file.path as NSString).deletingLastPathComponent
+                Button("Ignore \(dir)/") {
+                    Task { await viewModel.addToGitignore(pattern: "\(dir)/") }
+                }
+            }
+        }
+
+        Divider()
+
+        Button("File History") {}
+
+        Divider()
+
+        Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
+
+        Button("Copy file path") { viewModel.copyFilePaths(paths) }
+
+        Button("Create patch from file changes") {
+            Task { await viewModel.createPatch(paths: paths) }
+        }
+
+        Divider()
+
+        Button("Delete file", role: .destructive) {
+            Task { await viewModel.deleteFiles(paths: paths) }
+        }
     }
 
     private func stagingSectionHeader(title: String, count: Int, allSelected: Bool, onToggle: @escaping () -> Void) -> some View {

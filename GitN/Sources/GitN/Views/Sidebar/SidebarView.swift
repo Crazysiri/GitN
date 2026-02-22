@@ -414,7 +414,9 @@ struct SidebarView: View {
                 SidebarBranchRow(
                     name: branch.name,
                     isCurrent: branch.isCurrent,
-                    icon: "arrow.triangle.branch"
+                    icon: "arrow.triangle.branch",
+                    ahead: branch.ahead,
+                    behind: branch.behind
                 )
                 .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
                 .contextMenu {
@@ -628,6 +630,8 @@ struct SidebarBranchRow: View {
     let name: String
     let isCurrent: Bool
     let icon: String
+    var ahead: Int = 0
+    var behind: Int = 0
 
     @State private var isHovering = false
 
@@ -644,6 +648,10 @@ struct SidebarBranchRow: View {
 
             Spacer()
 
+            if ahead > 0 || behind > 0 {
+                aheadBehindBadge
+            }
+
             if isCurrent {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.caption2)
@@ -659,5 +667,28 @@ struct SidebarBranchRow: View {
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
+    }
+
+    private var aheadBehindBadge: some View {
+        HStack(spacing: 2) {
+            if ahead > 0 {
+                HStack(spacing: 1) {
+                    Text("\(ahead)")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 7, weight: .bold))
+                }
+                .foregroundStyle(.secondary)
+            }
+            if behind > 0 {
+                HStack(spacing: 1) {
+                    Text("\(behind)")
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 7, weight: .bold))
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
     }
 }

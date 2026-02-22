@@ -148,16 +148,30 @@ actor GitService {
 
             var upstream: OpaquePointer?
             var upstreamName: String?
+            var ahead: Int = 0
+            var behind: Int = 0
             if git_branch_upstream(&upstream, ref) == 0, let upstream {
                 var uname: UnsafePointer<CChar>?
                 git_branch_name(&uname, upstream)
                 upstreamName = uname.map(String.init(cString:))
+
+                if let localOid = git_reference_target(ref),
+                   let upstreamOid = git_reference_target(upstream) {
+                    var a: Int = 0, b: Int = 0
+                    var localCopy = localOid.pointee
+                    var upstreamCopy = upstreamOid.pointee
+                    if git_graph_ahead_behind(&a, &b, repo, &localCopy, &upstreamCopy) == 0 {
+                        ahead = a
+                        behind = b
+                    }
+                }
                 git_reference_free(upstream)
             }
 
             result.append(BranchInfo(
                 name: name, shortHash: shortHash,
-                upstream: upstreamName, isCurrent: isHead, isRemote: false
+                upstream: upstreamName, isCurrent: isHead, isRemote: false,
+                ahead: ahead, behind: behind
             ))
         }
         return result
@@ -1289,6 +1303,32 @@ actor GitService {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    // MARK: - File Actions
+
+    func discardFileChanges(path: String) async throws {
+        try await runGit(["checkout", "--", path])
+    }
+
+    func addToGitignore(pattern: String) async throws {
+        let gitignorePath = (repoPath as NSString).appendingPathComponent(".gitignore")
+        let fm = FileManager.default
+
+        var existing = ""
+        if fm.fileExists(atPath: gitignorePath),
+           let data = fm.contents(atPath: gitignorePath),
+           let str = String(data: data, encoding: .utf8) {
+            existing = str
+        }
+
+        let newContent: String
+        if existing.hasSuffix("\n") || existing.isEmpty {
+            newContent = existing + pattern + "\n"
+        } else {
+            newContent = existing + "\n" + pattern + "\n"
+        }
+        try newContent.write(toFile: gitignorePath, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Rebase Conflict Detection & Resolution
