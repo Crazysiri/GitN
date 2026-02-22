@@ -179,7 +179,7 @@ struct SidebarView: View {
                         .font(.caption)
                         .foregroundStyle(.primary)
                 }
-                .padding(.leading, 12)
+                .padding(.leading, 24)
                 .contextMenu {
                     Button {
                         editingRemote = remote
@@ -213,7 +213,8 @@ struct SidebarView: View {
             ForEach(viewModel.tags, id: \.self) { tag in
                 Label(tag, systemImage: "tag")
                     .font(.caption)
-                    .padding(.horizontal, 16)
+                    .padding(.leading, 28)
+                    .padding(.trailing, 12)
                     .padding(.vertical, 2)
             }
         }
@@ -238,7 +239,8 @@ struct SidebarView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
+                .padding(.leading, 28)
+                .padding(.trailing, 12)
                 .padding(.vertical, 2)
             }
         }
@@ -257,7 +259,8 @@ struct SidebarView: View {
             ForEach(viewModel.submodules) { sub in
                 Label(sub.name, systemImage: "shippingbox")
                     .font(.caption)
-                    .padding(.horizontal, 16)
+                    .padding(.leading, 28)
+                    .padding(.trailing, 12)
                     .padding(.vertical, 2)
             }
         }
@@ -369,7 +372,8 @@ struct SidebarBranchRow: View {
                     .foregroundStyle(.green)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
         .padding(.vertical, 3)
         .background(
             RoundedRectangle(cornerRadius: 4)
