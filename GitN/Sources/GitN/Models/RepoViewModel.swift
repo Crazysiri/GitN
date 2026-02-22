@@ -853,31 +853,30 @@ final class RepoViewModel {
         conflictOutputLines = output
     }
 
-    func takeOursForRegion(_ regionIndex: Int) {
-        guard let sides = conflictSides, regionIndex < sides.markers.count else { return }
-        rebuildOutput(preferOurs: true, regionIndex: regionIndex)
+    struct RegionChoice: Equatable {
+        var oursChecked: Bool
+        var theirsChecked: Bool
     }
 
-    func takeTheirsForRegion(_ regionIndex: Int) {
-        guard let sides = conflictSides, regionIndex < sides.markers.count else { return }
-        rebuildOutput(preferOurs: false, regionIndex: regionIndex)
-    }
+    var regionChoices: [Int: RegionChoice] = [:]
 
-    var regionChoices: [Int: Bool] = [:]
-
-    func takeOurs(_ regionIndex: Int) {
-        regionChoices[regionIndex] = true
+    func toggleOurs(_ regionIndex: Int) {
+        var choice = regionChoices[regionIndex] ?? RegionChoice(oursChecked: false, theirsChecked: false)
+        choice.oursChecked.toggle()
+        regionChoices[regionIndex] = choice
         rebuildOutputFromChoices()
     }
 
-    func takeTheirs(_ regionIndex: Int) {
-        regionChoices[regionIndex] = false
+    func toggleTheirs(_ regionIndex: Int) {
+        var choice = regionChoices[regionIndex] ?? RegionChoice(oursChecked: false, theirsChecked: false)
+        choice.theirsChecked.toggle()
+        regionChoices[regionIndex] = choice
         rebuildOutputFromChoices()
     }
 
-    private func rebuildOutput(preferOurs: Bool, regionIndex: Int) {
-        regionChoices[regionIndex] = preferOurs
-        rebuildOutputFromChoices()
+    func resetConflictChoices() {
+        regionChoices = [:]
+        buildInitialOutput()
     }
 
     private func rebuildOutputFromChoices() {
@@ -892,16 +891,26 @@ final class RepoViewModel {
             var handledRegion = false
             for (i, marker) in sides.markers.enumerated() {
                 if marker.oursRange.lowerBound == oursIdx {
-                    let useOurs = regionChoices[i] ?? true
-                    if useOurs {
+                    let choice = regionChoices[i]
+                    let includeOurs = choice?.oursChecked ?? false
+                    let includeTheirs = choice?.theirsChecked ?? false
+
+                    if includeOurs {
                         for j in marker.oursRange {
                             if j < oursLines.count { output.append(oursLines[j]) }
                         }
-                    } else {
+                    }
+                    if includeTheirs {
                         for j in marker.theirsRange {
                             if j < theirsLines.count { output.append(theirsLines[j]) }
                         }
                     }
+                    if !includeOurs && !includeTheirs {
+                        for j in marker.oursRange {
+                            if j < oursLines.count { output.append(oursLines[j]) }
+                        }
+                    }
+
                     oursIdx = marker.oursRange.upperBound
                     handledRegion = true
                     break

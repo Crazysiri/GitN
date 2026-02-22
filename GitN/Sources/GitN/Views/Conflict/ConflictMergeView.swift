@@ -5,7 +5,6 @@ struct ConflictMergeView: View {
     let viewModel: RepoViewModel
     @State private var currentConflictIndex = 0
     @State private var scrollOffset: CGPoint = .zero
-    @State private var isUserScrolling = false
 
     private var file: ConflictFile? { viewModel.conflictMergeFile }
     private var sides: ConflictSides? { viewModel.conflictSides }
@@ -106,10 +105,10 @@ struct ConflictMergeView: View {
                 lines: sides?.oursContent.components(separatedBy: "\n") ?? [],
                 conflictRegions: sides?.markers ?? [],
                 side: .ours,
-                highlightColor: .blue,
+                highlightColor: NSColor.systemBlue,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
-                onToggleRegion: { idx in toggleRegion(idx, side: .ours) }
+                onToggleRegion: { idx in viewModel.toggleOurs(idx) }
             )
         }
         .background(Color(.textBackgroundColor))
@@ -123,10 +122,10 @@ struct ConflictMergeView: View {
                 lines: sides?.theirsContent.components(separatedBy: "\n") ?? [],
                 conflictRegions: sides?.markers ?? [],
                 side: .theirs,
-                highlightColor: .orange,
+                highlightColor: NSColor.systemOrange,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
-                onToggleRegion: { idx in toggleRegion(idx, side: .theirs) }
+                onToggleRegion: { idx in viewModel.toggleTheirs(idx) }
             )
         }
         .background(Color(.textBackgroundColor))
@@ -138,6 +137,35 @@ struct ConflictMergeView: View {
                 Text("Output")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
+
+                if totalConflicts > 0 {
+                    HStack(spacing: 4) {
+                        Text("conflict \(currentConflictIndex + 1) of \(totalConflicts)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Button(action: { navigateConflict(-1) }) {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 10))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .disabled(currentConflictIndex <= 0)
+
+                        Button(action: { navigateConflict(1) }) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .disabled(currentConflictIndex >= totalConflicts - 1)
+                    }
+                }
+
+                Button("Reset") {
+                    viewModel.resetConflictChoices()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -145,14 +173,11 @@ struct ConflictMergeView: View {
 
             Divider()
 
-            SyncedScrollCodeView(
+            OutputScrollCodeView(
                 lines: viewModel.conflictOutputLines,
-                conflictRegions: [],
-                side: nil,
-                highlightColor: .clear,
-                regionChoices: [:],
-                scrollOffset: $scrollOffset,
-                onToggleRegion: { _ in }
+                conflictSides: sides,
+                regionChoices: viewModel.regionChoices,
+                scrollOffset: $scrollOffset
             )
         }
         .background(Color(.textBackgroundColor))
@@ -182,36 +207,16 @@ struct ConflictMergeView: View {
         guard newIdx >= 0, newIdx < totalConflicts else { return }
         currentConflictIndex = newIdx
     }
-
-    private func toggleRegion(_ regionIndex: Int, side: ConflictSide) {
-        let currentChoice = viewModel.regionChoices[regionIndex]
-        switch side {
-        case .ours:
-            if currentChoice == true {
-                viewModel.regionChoices.removeValue(forKey: regionIndex)
-                viewModel.takeOurs(regionIndex)
-            } else {
-                viewModel.takeOurs(regionIndex)
-            }
-        case .theirs:
-            if currentChoice == false {
-                viewModel.regionChoices.removeValue(forKey: regionIndex)
-                viewModel.takeTheirs(regionIndex)
-            } else {
-                viewModel.takeTheirs(regionIndex)
-            }
-        }
-    }
 }
 
-// MARK: - Synced Scroll Code View (NSScrollView-based for scroll synchronization)
+// MARK: - Synced Scroll Code View (ours/theirs panels)
 
 struct SyncedScrollCodeView: NSViewRepresentable {
     let lines: [String]
     let conflictRegions: [ConflictRegion]
-    let side: ConflictSide?
-    let highlightColor: Color
-    let regionChoices: [Int: Bool]
+    let side: ConflictSide
+    let highlightColor: NSColor
+    let regionChoices: [Int: RepoViewModel.RegionChoice]
     @Binding var scrollOffset: CGPoint
     let onToggleRegion: (Int) -> Void
 
@@ -223,12 +228,10 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
 
-        let contentView = CodeContentView(frame: .zero)
-        contentView.translatesAutoresizingMaskIntoConstraints = false
+        let contentView = SideCodeContentView(frame: .zero)
         scrollView.documentView = contentView
 
         context.coordinator.scrollView = scrollView
-
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.scrollViewDidScroll(_:)),
@@ -236,31 +239,27 @@ struct SyncedScrollCodeView: NSViewRepresentable {
             object: scrollView.contentView
         )
         scrollView.contentView.postsBoundsChangedNotifications = true
-
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let contentView = scrollView.documentView as? CodeContentView else { return }
+        guard let contentView = scrollView.documentView as? SideCodeContentView else { return }
 
-        let nsHighlight = NSColor(highlightColor)
         contentView.configure(
-            lines: lines,
-            conflictRegions: conflictRegions,
-            side: side,
-            highlightColor: nsHighlight,
-            regionChoices: regionChoices,
+            lines: lines, conflictRegions: conflictRegions, side: side,
+            highlightColor: highlightColor, regionChoices: regionChoices,
             onToggleRegion: onToggleRegion
         )
+
+        let lineH = SideCodeContentView.lineHeight
+        let contentHeight = CGFloat(lines.count) * lineH + 16
+        let contentWidth = max(scrollView.bounds.width, estimateWidth())
+        contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
         contentView.needsDisplay = true
 
-        let contentHeight = CGFloat(lines.count) * CodeContentView.lineHeight + 16
-        let contentWidth = max(scrollView.bounds.width, estimateWidth(lines))
-        contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
-
         if !context.coordinator.isScrolling {
-            let currentOrigin = scrollView.contentView.bounds.origin
-            if abs(currentOrigin.y - scrollOffset.y) > 1 || abs(currentOrigin.x - scrollOffset.x) > 1 {
+            let cur = scrollView.contentView.bounds.origin
+            if abs(cur.y - scrollOffset.y) > 1 || abs(cur.x - scrollOffset.x) > 1 {
                 context.coordinator.isSyncing = true
                 scrollView.contentView.scroll(to: scrollOffset)
                 scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -269,13 +268,11 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    private func estimateWidth(_ lines: [String]) -> CGFloat {
+    private func estimateWidth() -> CGFloat {
         let maxLen = lines.reduce(0) { max($0, $1.count) }
-        return CGFloat(maxLen) * 7.2 + 60
+        return CGFloat(maxLen) * 7.2 + 80
     }
 
     final class Coordinator: NSObject {
@@ -283,10 +280,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var isSyncing = false
         var isScrolling = false
-
-        init(_ parent: SyncedScrollCodeView) {
-            self.parent = parent
-        }
+        init(_ parent: SyncedScrollCodeView) { self.parent = parent }
 
         @objc func scrollViewDidScroll(_ notification: Notification) {
             guard !isSyncing, let scrollView else { return }
@@ -300,27 +294,102 @@ struct SyncedScrollCodeView: NSViewRepresentable {
     }
 }
 
-// MARK: - Code Content View (custom NSView for rendering lines)
+// MARK: - Output Scroll Code View
 
-final class CodeContentView: NSView {
+struct OutputScrollCodeView: NSViewRepresentable {
+    let lines: [String]
+    let conflictSides: ConflictSides?
+    let regionChoices: [Int: RepoViewModel.RegionChoice]
+    @Binding var scrollOffset: CGPoint
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.autohidesScrollers = true
+
+        let contentView = OutputCodeContentView(frame: .zero)
+        scrollView.documentView = contentView
+
+        context.coordinator.scrollView = scrollView
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.scrollViewDidScroll(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let contentView = scrollView.documentView as? OutputCodeContentView else { return }
+        contentView.configure(lines: lines, conflictSides: conflictSides, regionChoices: regionChoices)
+
+        let lineH = OutputCodeContentView.lineHeight
+        let contentHeight = CGFloat(lines.count) * lineH + 16
+        let contentWidth = max(scrollView.bounds.width, estimateWidth())
+        contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
+        contentView.needsDisplay = true
+
+        if !context.coordinator.isScrolling {
+            let cur = scrollView.contentView.bounds.origin
+            if abs(cur.y - scrollOffset.y) > 1 || abs(cur.x - scrollOffset.x) > 1 {
+                context.coordinator.isSyncing = true
+                scrollView.contentView.scroll(to: scrollOffset)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+                context.coordinator.isSyncing = false
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    private func estimateWidth() -> CGFloat {
+        let maxLen = lines.reduce(0) { max($0, $1.count) }
+        return CGFloat(maxLen) * 7.2 + 80
+    }
+
+    final class Coordinator: NSObject {
+        var parent: OutputScrollCodeView
+        weak var scrollView: NSScrollView?
+        var isSyncing = false
+        var isScrolling = false
+        init(_ parent: OutputScrollCodeView) { self.parent = parent }
+
+        @objc func scrollViewDidScroll(_ notification: Notification) {
+            guard !isSyncing, let scrollView else { return }
+            isScrolling = true
+            let origin = scrollView.contentView.bounds.origin
+            DispatchQueue.main.async {
+                self.parent.scrollOffset = origin
+                self.isScrolling = false
+            }
+        }
+    }
+}
+
+// MARK: - Side Code Content View (ours/theirs with checkboxes)
+
+final class SideCodeContentView: NSView {
     static let lineHeight: CGFloat = 17
-    static let lineNumWidth: CGFloat = 40
-    static let checkboxWidth: CGFloat = 20
+    private static let lineNumWidth: CGFloat = 40
+    private static let checkboxSize: CGFloat = 14
 
     private var lines: [String] = []
     private var conflictRegions: [ConflictRegion] = []
-    private var side: ConflictSide?
-    private var highlightColor: NSColor = .clear
-    private var regionChoices: [Int: Bool] = [:]
+    private var side: ConflictSide = .ours
+    private var highlightColor: NSColor = .systemBlue
+    private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var onToggleRegion: ((Int) -> Void)?
-    private var trackingArea: NSTrackingArea?
+
+    override var isFlipped: Bool { true }
 
     func configure(
-        lines: [String],
-        conflictRegions: [ConflictRegion],
-        side: ConflictSide?,
-        highlightColor: NSColor,
-        regionChoices: [Int: Bool],
+        lines: [String], conflictRegions: [ConflictRegion], side: ConflictSide,
+        highlightColor: NSColor, regionChoices: [Int: RepoViewModel.RegionChoice],
         onToggleRegion: @escaping (Int) -> Void
     ) {
         self.lines = lines
@@ -337,111 +406,96 @@ final class CodeContentView: NSView {
 
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         let lineNumFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        let lineNumColor = NSColor.secondaryLabelColor.withAlphaComponent(0.5)
-        let separatorColor = NSColor.separatorColor.withAlphaComponent(0.3)
-
-        let lineHeight = Self.lineHeight
-        let lineNumWidth = Self.lineNumWidth
+        let lineH = Self.lineHeight
+        let lnW = Self.lineNumWidth
 
         let visibleRect = self.visibleRect
-        let startLine = max(0, Int(visibleRect.minY / lineHeight) - 1)
-        let endLine = min(lines.count, Int(visibleRect.maxY / lineHeight) + 2)
+        let startLine = max(0, Int(visibleRect.minY / lineH) - 1)
+        let endLine = min(lines.count, Int(visibleRect.maxY / lineH) + 2)
 
         for i in startLine..<endLine {
-            let y = CGFloat(i) * lineHeight
-            let lineRect = NSRect(x: 0, y: y, width: bounds.width, height: lineHeight)
+            let y = CGFloat(i) * lineH
+            let lineRect = NSRect(x: 0, y: y, width: bounds.width, height: lineH)
+            let regionIdx = conflictRegionIndex(for: i)
+            let isConflict = regionIdx != nil
+            let isChecked: Bool = {
+                guard let ri = regionIdx, let choice = regionChoices[ri] else { return false }
+                return side == .ours ? choice.oursChecked : choice.theirsChecked
+            }()
 
-            if let regionIdx = conflictRegionIndex(for: i) {
-                let isChosen: Bool
-                if let choice = regionChoices[regionIdx] {
-                    isChosen = (side == .ours && choice == true) || (side == .theirs && choice == false)
-                } else {
-                    isChosen = false
-                }
-
-                ctx.setFillColor(highlightColor.withAlphaComponent(isChosen ? 0.15 : 0.06).cgColor)
+            if isConflict {
+                ctx.setFillColor(highlightColor.withAlphaComponent(isChecked ? 0.15 : 0.06).cgColor)
                 ctx.fill(lineRect)
+            }
 
-                let isFirstLine = isFirstLineOfRegion(i, regionIdx)
-                if isFirstLine && side != nil {
-                    let checkX: CGFloat = 2
-                    let checkY = y + (lineHeight - 14) / 2
-                    let checkRect = NSRect(x: checkX, y: checkY, width: 14, height: 14)
+            // Checkbox for first line of each conflict region
+            if isConflict, let ri = regionIdx, isFirstLineOfRegion(i, ri) {
+                let ckX: CGFloat = 3
+                let ckY = y + (lineH - Self.checkboxSize) / 2
+                let ckRect = NSRect(x: ckX, y: ckY, width: Self.checkboxSize, height: Self.checkboxSize)
+                let path = CGPath(roundedRect: ckRect.insetBy(dx: 1, dy: 1), cornerWidth: 2, cornerHeight: 2, transform: nil)
 
-                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.6).cgColor)
-                    ctx.setLineWidth(1.0)
-                    let path = CGPath(roundedRect: checkRect.insetBy(dx: 1, dy: 1), cornerWidth: 2, cornerHeight: 2, transform: nil)
+                if isChecked {
+                    ctx.setFillColor(highlightColor.withAlphaComponent(0.3).cgColor)
                     ctx.addPath(path)
-
-                    if isChosen {
-                        ctx.setFillColor(highlightColor.withAlphaComponent(0.3).cgColor)
-                        ctx.fillPath()
-                        ctx.addPath(path)
-                        ctx.strokePath()
-
-                        let checkmark = NSAttributedString(
-                            string: "\u{2713}",
-                            attributes: [
-                                .font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                                .foregroundColor: highlightColor
-                            ]
-                        )
-                        checkmark.draw(at: NSPoint(x: checkX + 2, y: checkY))
-                    } else {
-                        ctx.strokePath()
-                    }
+                    ctx.fillPath()
+                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.8).cgColor)
+                    ctx.setLineWidth(1.0)
+                    ctx.addPath(path)
+                    ctx.strokePath()
+                    let checkAttrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 10, weight: .bold),
+                        .foregroundColor: highlightColor
+                    ]
+                    let check = NSAttributedString(string: "\u{2713}", attributes: checkAttrs)
+                    check.draw(at: NSPoint(x: ckX + 2, y: ckY))
+                } else {
+                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.5).cgColor)
+                    ctx.setLineWidth(1.0)
+                    ctx.addPath(path)
+                    ctx.strokePath()
                 }
             }
 
-            // Separator
-            ctx.setStrokeColor(separatorColor.cgColor)
+            // Separator line
+            ctx.setStrokeColor(NSColor.separatorColor.withAlphaComponent(0.3).cgColor)
             ctx.setLineWidth(0.5)
-            ctx.move(to: CGPoint(x: lineNumWidth + 2, y: y))
-            ctx.addLine(to: CGPoint(x: lineNumWidth + 2, y: y + lineHeight))
+            ctx.move(to: CGPoint(x: lnW + 2, y: y))
+            ctx.addLine(to: CGPoint(x: lnW + 2, y: y + lineH))
             ctx.strokePath()
 
             // Line number
-            let lineNumStr = NSAttributedString(
+            let numStr = NSAttributedString(
                 string: "\(i + 1)",
-                attributes: [.font: lineNumFont, .foregroundColor: lineNumColor]
+                attributes: [.font: lineNumFont, .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.5)]
             )
-            let numSize = lineNumStr.size()
-            lineNumStr.draw(at: NSPoint(x: lineNumWidth - numSize.width - 4, y: y + (lineHeight - numSize.height) / 2))
+            let numSz = numStr.size()
+            numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
 
-            // Content
+            // Content text
             guard i < lines.count else { continue }
-            let content = lines[i].isEmpty ? " " : lines[i]
-            let textColor: NSColor = .labelColor
+            let text = lines[i].isEmpty ? " " : lines[i]
+            let textX: CGFloat = lnW + 8 + (isConflict ? 20 : 0)
             let contentStr = NSAttributedString(
-                string: content,
-                attributes: [.font: font, .foregroundColor: textColor]
+                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
             )
-            let textX = lineNumWidth + 8 + (side != nil && conflictRegionIndex(for: i) != nil ? Self.checkboxWidth : 0)
-            let textSize = contentStr.size()
-            contentStr.draw(at: NSPoint(x: textX, y: y + (lineHeight - textSize.height) / 2))
+            let textSz = contentStr.size()
+            contentStr.draw(at: NSPoint(x: textX, y: y + (lineH - textSz.height) / 2))
         }
     }
 
     override func mouseDown(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        let lineIdx = Int(location.y / Self.lineHeight)
-        guard lineIdx >= 0, lineIdx < lines.count else { return }
-
-        if let regionIdx = conflictRegionIndex(for: lineIdx), isFirstLineOfRegion(lineIdx, regionIdx) {
-            if location.x < Self.lineNumWidth {
-                onToggleRegion?(regionIdx)
-                needsDisplay = true
-                return
-            }
+        let loc = convert(event.locationInWindow, from: nil)
+        let lineIdx = Int(loc.y / Self.lineHeight)
+        guard lineIdx >= 0, lineIdx < lines.count else { super.mouseDown(with: event); return }
+        if let ri = conflictRegionIndex(for: lineIdx), isFirstLineOfRegion(lineIdx, ri), loc.x < Self.lineNumWidth {
+            onToggleRegion?(ri)
+            return
         }
-
         super.mouseDown(with: event)
     }
 
-    override var isFlipped: Bool { true }
-
     private func conflictRegionIndex(for lineIdx: Int) -> Int? {
-        guard let side else { return nil }
         for (i, region) in conflictRegions.enumerated() {
             let range = side == .ours ? region.oursRange : region.theirsRange
             if range.contains(lineIdx) { return i }
@@ -450,8 +504,152 @@ final class CodeContentView: NSView {
     }
 
     private func isFirstLineOfRegion(_ lineIdx: Int, _ regionIdx: Int) -> Bool {
-        guard let side else { return false }
         let range = side == .ours ? conflictRegions[regionIdx].oursRange : conflictRegions[regionIdx].theirsRange
         return range.lowerBound == lineIdx
+    }
+}
+
+// MARK: - Output Code Content View (with A/B origin markers)
+
+final class OutputCodeContentView: NSView {
+    static let lineHeight: CGFloat = 17
+    private static let lineNumWidth: CGFloat = 40
+    private static let originBadgeWidth: CGFloat = 18
+
+    private var lines: [String] = []
+    private var conflictSides: ConflictSides?
+    private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
+    private var lineOrigins: [(origin: Character?, color: NSColor?)] = []
+
+    override var isFlipped: Bool { true }
+
+    func configure(lines: [String], conflictSides: ConflictSides?, regionChoices: [Int: RepoViewModel.RegionChoice]) {
+        self.lines = lines
+        self.conflictSides = conflictSides
+        self.regionChoices = regionChoices
+        computeLineOrigins()
+    }
+
+    private func computeLineOrigins() {
+        guard let sides = conflictSides else {
+            lineOrigins = lines.map { _ in (nil, nil) }
+            return
+        }
+        let oursLines = sides.oursContent.components(separatedBy: "\n")
+        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+
+        var origins: [(Character?, NSColor?)] = []
+        var oursIdx = 0
+
+        while oursIdx < oursLines.count {
+            var handledRegion = false
+            for (i, marker) in sides.markers.enumerated() {
+                if marker.oursRange.lowerBound == oursIdx {
+                    let choice = regionChoices[i]
+                    let includeOurs = choice?.oursChecked ?? false
+                    let includeTheirs = choice?.theirsChecked ?? false
+
+                    if includeOurs {
+                        for j in marker.oursRange {
+                            if j < oursLines.count {
+                                origins.append(("A", .systemBlue))
+                            }
+                        }
+                    }
+                    if includeTheirs {
+                        for j in marker.theirsRange {
+                            if j < theirsLines.count {
+                                origins.append(("B", .systemOrange))
+                            }
+                        }
+                    }
+                    if !includeOurs && !includeTheirs {
+                        for j in marker.oursRange {
+                            if j < oursLines.count {
+                                origins.append((nil, nil))
+                            }
+                        }
+                    }
+
+                    oursIdx = marker.oursRange.upperBound
+                    handledRegion = true
+                    break
+                }
+            }
+            if !handledRegion {
+                origins.append((nil, nil))
+                oursIdx += 1
+            }
+        }
+        lineOrigins = origins
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let lineNumFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let lineH = Self.lineHeight
+        let lnW = Self.lineNumWidth
+
+        let visibleRect = self.visibleRect
+        let startLine = max(0, Int(visibleRect.minY / lineH) - 1)
+        let endLine = min(lines.count, Int(visibleRect.maxY / lineH) + 2)
+
+        for i in startLine..<endLine {
+            let y = CGFloat(i) * lineH
+            let origin: (Character?, NSColor?) = i < lineOrigins.count ? lineOrigins[i] : (nil, nil)
+
+            // Highlight conflict lines
+            if let color = origin.1 {
+                let lineRect = NSRect(x: 0, y: y, width: bounds.width, height: lineH)
+                ctx.setFillColor(color.withAlphaComponent(0.08).cgColor)
+                ctx.fill(lineRect)
+            }
+
+            // Origin badge (A/B)
+            if let label = origin.0, let color = origin.1 {
+                let badgeFont = NSFont.systemFont(ofSize: 8, weight: .bold)
+                let badgeStr = NSAttributedString(
+                    string: String(label),
+                    attributes: [.font: badgeFont, .foregroundColor: color]
+                )
+                let bSz = badgeStr.size()
+                badgeStr.draw(at: NSPoint(x: 3, y: y + (lineH - bSz.height) / 2))
+
+                // Green checkmark
+                let checkStr = NSAttributedString(
+                    string: "\u{2713}",
+                    attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .bold), .foregroundColor: NSColor.systemGreen]
+                )
+                let cSz = checkStr.size()
+                checkStr.draw(at: NSPoint(x: 12, y: y + (lineH - cSz.height) / 2))
+            }
+
+            // Separator
+            ctx.setStrokeColor(NSColor.separatorColor.withAlphaComponent(0.3).cgColor)
+            ctx.setLineWidth(0.5)
+            ctx.move(to: CGPoint(x: lnW + 2, y: y))
+            ctx.addLine(to: CGPoint(x: lnW + 2, y: y + lineH))
+            ctx.strokePath()
+
+            // Line number
+            let numStr = NSAttributedString(
+                string: "\(i + 1)",
+                attributes: [.font: lineNumFont, .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.5)]
+            )
+            let numSz = numStr.size()
+            numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
+
+            // Content
+            guard i < lines.count else { continue }
+            let text = lines[i].isEmpty ? " " : lines[i]
+            let contentStr = NSAttributedString(
+                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
+            )
+            let textSz = contentStr.size()
+            contentStr.draw(at: NSPoint(x: lnW + 8, y: y + (lineH - textSz.height) / 2))
+        }
     }
 }
