@@ -92,7 +92,10 @@ struct GraphView: View {
                             Task { await viewModel.selectCommit(commit) }
                         }
                         .if(!commit.isUncommitted) { view in
-                            view.contextMenu { commitContextMenu(for: commit) }
+                            view.contextMenu {
+                                commitContextMenu(for: commit)
+                                    .font(.system(size: 11, weight: .medium))
+                            }
                         }
 
                         if index < viewModel.commits.count - 1 {

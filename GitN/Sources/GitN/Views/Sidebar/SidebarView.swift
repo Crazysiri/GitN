@@ -417,7 +417,10 @@ struct SidebarView: View {
                     icon: "arrow.triangle.branch"
                 )
                 .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
-                .contextMenu { localBranchContextMenu(branch) }
+                .contextMenu {
+                    localBranchContextMenu(branch)
+                        .font(.system(size: 11, weight: .medium))
+                }
             }
         }
     }
@@ -441,7 +444,10 @@ struct SidebarView: View {
                             .replacingOccurrences(of: "\(remote.name)/", with: "")
                         SidebarBranchRow(name: shortName, isCurrent: false, icon: "arrow.triangle.branch")
                             .padding(.leading, 8)
-                            .contextMenu { remoteBranchContextMenu(branch, remoteName: remote.name) }
+                            .contextMenu {
+                                remoteBranchContextMenu(branch, remoteName: remote.name)
+                                    .font(.system(size: 11, weight: .medium))
+                            }
                     }
                 } label: {
                     Label(remote.name, systemImage: "externaldrive.connected.to.line.below")
@@ -450,20 +456,23 @@ struct SidebarView: View {
                 }
                 .padding(.leading, 24)
                 .contextMenu {
-                    Button {
-                        editingRemote = remote
-                        editRemoteName = remote.name
-                        editRemoteURL = remote.url
-                        showEditRemote = true
-                    } label: {
-                        Label("Edit Remote…", systemImage: "pencil")
+                    Group {
+                        Button {
+                            editingRemote = remote
+                            editRemoteName = remote.name
+                            editRemoteURL = remote.url
+                            showEditRemote = true
+                        } label: {
+                            Label("Edit Remote…", systemImage: "pencil")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            Task { await viewModel.performDeleteRemote(name: remote.name) }
+                        } label: {
+                            Label("Delete Remote", systemImage: "trash")
+                        }
                     }
-                    Divider()
-                    Button(role: .destructive) {
-                        Task { await viewModel.performDeleteRemote(name: remote.name) }
-                    } label: {
-                        Label("Delete Remote", systemImage: "trash")
-                    }
+                    .font(.system(size: 11, weight: .medium))
                 }
             }
         }
