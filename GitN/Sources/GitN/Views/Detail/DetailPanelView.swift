@@ -5,7 +5,9 @@ struct DetailPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if viewModel.isCompareMode, let commit = viewModel.selectedCommit {
+            if viewModel.isRebaseConflict, let state = viewModel.rebaseState {
+                rebaseConflictPanel(state)
+            } else if viewModel.isCompareMode, let commit = viewModel.selectedCommit {
                 compareHeader(commit)
                 Divider()
                 compareFileList
@@ -399,6 +401,205 @@ struct DetailPanelView: View {
                 .disabled(viewModel.commitSummary.isEmpty)
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
+                .padding(.bottom, 8)
+            }
+        }
+    }
+
+    // MARK: - Rebase Conflict Panel
+
+    private func rebaseConflictPanel(_ state: RebaseState) -> some View {
+        VStack(spacing: 0) {
+            // Header
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.system(size: 14))
+                    Text("Rebase conflicts detected")
+                        .font(.system(size: 12, weight: .bold))
+                    Spacer()
+                }
+
+                HStack(spacing: 4) {
+                    Text("Rebasing")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(state.sourceBranch)
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.orange.opacity(0.2)))
+                        .foregroundStyle(.orange)
+                    Text("onto")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(state.targetBranch)
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.green.opacity(0.2)))
+                        .foregroundStyle(.green)
+                }
+            }
+            .padding(10)
+
+            Divider()
+
+            // Conflicted Files
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8))
+                    Text("Conflicted Files (\(state.conflictedFiles.count))")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    if !state.conflictedFiles.isEmpty {
+                        Button("Mark All Resolved") {
+                            Task { await viewModel.markAllFilesResolved() }
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .tint(.orange)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+
+                ForEach(state.conflictedFiles) { file in
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.yellow)
+                        Text(file.path)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+                    .background(Color(.controlBackgroundColor).opacity(0.3))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Task { await viewModel.openConflictMerge(file) }
+                    }
+                }
+            }
+
+            Divider().padding(.vertical, 2)
+
+            // Resolved Files
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8))
+                    Text("Resolved Files (\(state.resolvedFiles.count))")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+
+                ForEach(state.resolvedFiles) { file in
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.green)
+                        Text(file.path)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 3)
+                }
+            }
+
+            Spacer()
+
+            Divider()
+
+            // Commit section
+            VStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    Image(systemName: "circle.dotted")
+                        .font(.system(size: 10))
+                    Text("Commit")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                }
+
+                Toggle(isOn: Binding(
+                    get: { viewModel.isAmend },
+                    set: { viewModel.isAmend = $0 }
+                )) {
+                    Text("Amend previous commit")
+                        .font(.system(size: 10))
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rebasing commit \(state.currentStep) out of \(state.totalSteps)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+
+                    if !state.conflictedFiles.isEmpty {
+                        Text("# Conflicts:")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        ForEach(state.conflictedFiles) { file in
+                            Text("#   \(file.path)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+
+                DisclosureGroup("Commit options") {
+                    EmptyView()
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            }
+            .padding(10)
+
+            Divider()
+
+            // Action Buttons
+            HStack(spacing: 8) {
+                Button(action: { Task { await viewModel.rebaseSkip() } }) {
+                    Text("Skip Commit")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button(action: { Task { await viewModel.rebaseAbort() } }) {
+                    Text("Abort Rebase")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.red)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            // Continue button (only when all conflicts resolved)
+            if state.conflictedFiles.isEmpty {
+                Button(action: { Task { await viewModel.rebaseContinue() } }) {
+                    Text("Continue Rebase")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .padding(.horizontal, 10)
                 .padding(.bottom, 8)
             }
         }

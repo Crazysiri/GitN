@@ -1290,6 +1290,242 @@ actor GitService {
         }
     }
 
+    // MARK: - Rebase Conflict Detection & Resolution
+
+    func isRebaseInProgress() -> Bool {
+        guard let repo else { return false }
+        let state = git_repository_state(repo)
+        return state == GIT_REPOSITORY_STATE_REBASE_MERGE.rawValue
+            || state == GIT_REPOSITORY_STATE_REBASE_INTERACTIVE.rawValue
+            || state == GIT_REPOSITORY_STATE_REBASE.rawValue
+    }
+
+    func rebaseState() throws -> RebaseState? {
+        guard isRebaseInProgress() else { return nil }
+        let fm = FileManager.default
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+
+        var rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
+        if !fm.fileExists(atPath: rebaseDir) {
+            rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-apply")
+            if !fm.fileExists(atPath: rebaseDir) { return nil }
+        }
+
+        let headName = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("head-name"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "refs/heads/", with: "") ?? "unknown"
+
+        let ontoHash = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("onto"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let targetBranch = branchNameForHash(ontoHash) ?? String(ontoHash.prefix(7))
+
+        let msgNum = Int((try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("msgnum"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1") ?? 1
+        let endNum = Int((try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("end"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "1") ?? 1
+
+        let conflicted = try conflictedFiles()
+        let resolved = try resolvedConflictFiles()
+
+        return RebaseState(
+            sourceBranch: headName,
+            targetBranch: targetBranch,
+            currentStep: msgNum,
+            totalSteps: endNum,
+            conflictedFiles: conflicted,
+            resolvedFiles: resolved
+        )
+    }
+
+    private func branchNameForHash(_ hash: String) -> String? {
+        guard let repo, !hash.isEmpty else { return nil }
+        var iter: OpaquePointer?
+        guard git_branch_iterator_new(&iter, repo, GIT_BRANCH_LOCAL) == 0, let iter else { return nil }
+        defer { git_branch_iterator_free(iter) }
+
+        var ref: OpaquePointer?
+        var branchType = GIT_BRANCH_LOCAL
+        while git_branch_next(&ref, &branchType, iter) == 0, let ref {
+            defer { git_reference_free(ref) }
+            if let oid = git_reference_target(ref) {
+                let refHash = oidToHash(oid)
+                if refHash.hasPrefix(hash) || hash.hasPrefix(refHash.prefix(7).description) {
+                    var nameC: UnsafePointer<CChar>?
+                    git_branch_name(&nameC, ref)
+                    return nameC.map(String.init(cString:))
+                }
+            }
+        }
+        return nil
+    }
+
+    func conflictedFiles() throws -> [ConflictFile] {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return [] }
+        defer { git_index_free(index) }
+
+        guard git_index_has_conflicts(index) == 1 else { return [] }
+
+        var iter: OpaquePointer?
+        guard git_index_conflict_iterator_new(&iter, index) == 0, let iter else { return [] }
+        defer { git_index_conflict_iterator_free(iter) }
+
+        var result: [ConflictFile] = []
+        var ancestor: UnsafePointer<git_index_entry>?
+        var ours: UnsafePointer<git_index_entry>?
+        var theirs: UnsafePointer<git_index_entry>?
+
+        while git_index_conflict_next(&ancestor, &ours, &theirs, iter) == 0 {
+            let path: String
+            if let ours, let p = ours.pointee.path {
+                path = String(cString: p)
+            } else if let theirs, let p = theirs.pointee.path {
+                path = String(cString: p)
+            } else {
+                continue
+            }
+
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            var conflictCount = 0
+            if let data = FileManager.default.contents(atPath: fullPath),
+               let content = String(data: data, encoding: .utf8) {
+                conflictCount = content.components(separatedBy: "<<<<<<<").count - 1
+            }
+            result.append(ConflictFile(path: path, conflictCount: max(conflictCount, 1)))
+        }
+        return result
+    }
+
+    private func resolvedConflictFiles() throws -> [ConflictFile] {
+        []
+    }
+
+    func readConflictSides(path: String) throws -> ConflictSides {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        guard let data = FileManager.default.contents(atPath: fullPath),
+              let content = String(data: data, encoding: .utf8)
+        else { throw GitError.operationFailed("Cannot read file") }
+
+        let oursLabel = conflictOursLabel()
+        let theirsLabel = conflictTheirsLabel()
+        let lines = content.components(separatedBy: "\n")
+
+        var oursLines: [String] = []
+        var theirsLines: [String] = []
+        var regions: [ConflictRegion] = []
+        var inConflict = false
+        var inOurs = false
+        var currentOursStart = 0
+        var currentTheirsStart = 0
+        var regionId = 0
+        var baseStart = 0
+
+        for line in lines {
+            if line.hasPrefix("<<<<<<<") {
+                inConflict = true
+                inOurs = true
+                currentOursStart = oursLines.count
+                currentTheirsStart = theirsLines.count
+                baseStart = oursLines.count
+                continue
+            }
+            if line.hasPrefix("=======") && inConflict {
+                inOurs = false
+                continue
+            }
+            if line.hasPrefix(">>>>>>>") && inConflict {
+                inConflict = false
+                regions.append(ConflictRegion(
+                    id: regionId,
+                    oursRange: currentOursStart..<oursLines.count,
+                    theirsRange: currentTheirsStart..<theirsLines.count,
+                    baseRange: baseStart..<max(oursLines.count, theirsLines.count)
+                ))
+                regionId += 1
+
+                let ourCount = oursLines.count - currentOursStart
+                let theirCount = theirsLines.count - currentTheirsStart
+                if ourCount < theirCount {
+                    for _ in 0..<(theirCount - ourCount) { oursLines.append("") }
+                } else if theirCount < ourCount {
+                    for _ in 0..<(ourCount - theirCount) { theirsLines.append("") }
+                }
+                continue
+            }
+
+            if inConflict {
+                if inOurs {
+                    oursLines.append(line)
+                } else {
+                    theirsLines.append(line)
+                }
+            } else {
+                oursLines.append(line)
+                theirsLines.append(line)
+            }
+        }
+
+        return ConflictSides(
+            oursLabel: oursLabel,
+            theirsLabel: theirsLabel,
+            oursContent: oursLines.joined(separator: "\n"),
+            theirsContent: theirsLines.joined(separator: "\n"),
+            markers: regions
+        )
+    }
+
+    private func conflictOursLabel() -> String {
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
+        let ontoHash = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("onto"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let branch = branchNameForHash(ontoHash) ?? String(ontoHash.prefix(7))
+        let shortHash = String(ontoHash.prefix(7))
+        return "Commit \(shortHash) on \(branch)"
+    }
+
+    private func conflictTheirsLabel() -> String {
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
+        let headName = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("head-name"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "refs/heads/", with: "") ?? "unknown"
+        let origHead = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("orig-head"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let shortHash = String(origHead.prefix(7))
+        return "Commit \(shortHash) on \(headName)"
+    }
+
+    func markConflictResolved(path: String) async throws {
+        try stageFile(path)
+    }
+
+    func markAllConflictsResolved() async throws {
+        let files = try conflictedFiles()
+        for file in files {
+            try stageFile(file.path)
+        }
+    }
+
+    func rebaseContinue() async throws {
+        try await runGit(["rebase", "--continue"])
+    }
+
+    func rebaseSkip() async throws {
+        try await runGit(["rebase", "--skip"])
+    }
+
+    func rebaseAbort() async throws {
+        try await runGit(["rebase", "--abort"])
+    }
+
+    func saveConflictResolution(path: String, content: String) throws {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - HEAD Commit Message (for amend)
 
     func headCommitMessage() throws -> String {

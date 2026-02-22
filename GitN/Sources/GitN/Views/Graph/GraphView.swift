@@ -22,6 +22,10 @@ struct GraphView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if viewModel.isRebaseConflict {
+                conflictBanner
+            }
+
             graphHeader
             Divider()
 
@@ -36,6 +40,21 @@ struct GraphView: View {
         .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
         .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
         .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
+    }
+
+    private var conflictBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .font(.system(size: 11))
+            Text("A file conflict was found when attempting to merge into HEAD")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.85))
     }
 
     private var graphHeader: some View {

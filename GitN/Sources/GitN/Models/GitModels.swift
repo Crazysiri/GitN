@@ -121,3 +121,68 @@ struct SubmoduleInfo: Identifiable, Equatable {
     let name: String
     let hash: String
 }
+
+// MARK: - Rebase Conflict
+
+struct RebaseState: Equatable {
+    let sourceBranch: String
+    let targetBranch: String
+    let currentStep: Int
+    let totalSteps: Int
+    var conflictedFiles: [ConflictFile]
+    var resolvedFiles: [ConflictFile]
+}
+
+struct ConflictFile: Identifiable, Equatable {
+    var id: String { path }
+    let path: String
+    var conflictCount: Int
+}
+
+struct ConflictSides: Equatable {
+    let oursLabel: String
+    let theirsLabel: String
+    let oursContent: String
+    let theirsContent: String
+    let markers: [ConflictRegion]
+}
+
+struct ConflictRegion: Identifiable, Equatable {
+    let id: Int
+    let oursRange: Range<Int>
+    let theirsRange: Range<Int>
+    let baseRange: Range<Int>
+}
+
+struct MergedLine: Identifiable, Equatable {
+    let id: Int
+    let content: String
+    let origin: MergedLineOrigin
+}
+
+enum MergedLineOrigin: Equatable {
+    case common
+    case ours
+    case theirs
+    case conflictHeader
+}
+
+// MARK: - Toast Notification
+
+struct ToastMessage: Identifiable, Equatable {
+    let id: UUID
+    let title: String
+    let detail: String
+    let style: ToastStyle
+
+    enum ToastStyle: Equatable {
+        case error, warning, success, info
+    }
+
+    init(title: String, detail: String = "", style: ToastStyle = .error) {
+        self.id = UUID()
+        self.title = title
+        self.detail = detail
+        self.style = style
+    }
+}

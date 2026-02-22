@@ -19,14 +19,42 @@ struct RepoContainerView: View {
     }
 
     var body: some View {
-        HSplitView {
-            SidebarView(viewModel: viewModel)
-                .frame(minWidth: 180, idealWidth: sidebarWidth, maxWidth: 350)
+        ZStack {
+            if viewModel.showConflictMergeView {
+                ConflictMergeView(viewModel: viewModel)
+            } else {
+                HSplitView {
+                    SidebarView(viewModel: viewModel)
+                        .frame(minWidth: 180, idealWidth: sidebarWidth, maxWidth: 350)
 
-            centerPanel
+                    centerPanel
 
-            DetailPanelView(viewModel: viewModel)
-                .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 500)
+                    DetailPanelView(viewModel: viewModel)
+                        .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 500)
+                }
+            }
+
+            // Toast overlay
+            if let toast = viewModel.toastMessage {
+                VStack {
+                    Spacer()
+                    HStack {
+                        toastView(toast)
+                            .padding(.leading, 16)
+                            .padding(.bottom, 16)
+                        Spacer()
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.3), value: viewModel.toastMessage)
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                        if viewModel.toastMessage?.id == toast.id {
+                            viewModel.dismissToast()
+                        }
+                    }
+                }
+            }
         }
         .task {
             await viewModel.loadAll()
@@ -37,6 +65,61 @@ struct RepoContainerView: View {
         }
         .sheet(isPresented: $showNewBranch) {
             newBranchSheet
+        }
+    }
+
+    private func toastView(_ toast: ToastMessage) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: toastIcon(toast.style))
+                .foregroundStyle(toastColor(toast.style))
+                .font(.system(size: 16))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(toast.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                if !toast.detail.isEmpty {
+                    Text(toast.detail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            Button(action: { viewModel.dismissToast() }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 380)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(.darkGray).opacity(0.95))
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+        )
+    }
+
+    private func toastIcon(_ style: ToastMessage.ToastStyle) -> String {
+        switch style {
+        case .error: return "xmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .success: return "checkmark.circle.fill"
+        case .info: return "info.circle.fill"
+        }
+    }
+
+    private func toastColor(_ style: ToastMessage.ToastStyle) -> Color {
+        switch style {
+        case .error: return .red
+        case .warning: return .yellow
+        case .success: return .green
+        case .info: return .blue
         }
     }
 
@@ -138,6 +221,18 @@ struct RepoContainerView: View {
                 }
                 .padding(.trailing, 4)
                 .onTapGesture { viewModel.operationError = nil }
+            }
+
+            if viewModel.isRebaseConflict {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.yellow)
+                    Text("REBASE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.orange)
+                }
+                .padding(.trailing, 4)
             }
         }
         .padding(.horizontal, 8)

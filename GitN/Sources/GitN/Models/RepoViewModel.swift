@@ -40,6 +40,17 @@ final class RepoViewModel {
     var isLoading = false
     var collapsedSections: Set<String> = []
 
+    // MARK: - Rebase Conflict State
+    var rebaseState: RebaseState?
+    var isRebaseConflict: Bool { rebaseState != nil }
+    var conflictMergeFile: ConflictFile?
+    var conflictSides: ConflictSides?
+    var conflictOutputLines: [String] = []
+    var showConflictMergeView = false
+
+    // MARK: - Toast
+    var toastMessage: ToastMessage?
+
     private var fileWatcher: RepositoryFileWatcher?
 
     var remoteBranchGroups: [String: [BranchInfo]] {
@@ -181,6 +192,10 @@ final class RepoViewModel {
 
             commits = loadedCommits
             graphEntries = loadedGraph
+
+            if let state = try? await git.rebaseState() {
+                rebaseState = state
+            }
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -481,7 +496,15 @@ final class RepoViewModel {
     }
 
     func performRebase(onto target: String) async {
-        await performRemoteOperation { try await $0.git.rebase(onto: target) }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.rebase(onto: target)
+            await loadAll()
+        } catch {
+            await checkForRebaseConflict(errorMessage: error.localizedDescription)
+        }
+        operationInProgress = false
     }
 
     func performCheckoutBranch(_ name: String) async {
@@ -597,6 +620,249 @@ final class RepoViewModel {
             operationError = error.localizedDescription
         }
         operationInProgress = false
+    }
+
+    // MARK: - Rebase Conflict Management
+
+    func checkForRebaseConflict(errorMessage: String? = nil) async {
+        do {
+            if let state = try await git.rebaseState() {
+                rebaseState = state
+                if let msg = errorMessage {
+                    showToast(title: "Rebase Failed", detail: "There are merge conflicts that need to be resolved", style: .error)
+                    _ = msg
+                }
+                await loadAll()
+            } else {
+                if let msg = errorMessage {
+                    operationError = msg
+                }
+            }
+        } catch {
+            if let msg = errorMessage {
+                operationError = msg
+            }
+        }
+    }
+
+    func refreshRebaseState() async {
+        do {
+            rebaseState = try await git.rebaseState()
+        } catch {}
+    }
+
+    func markFileResolved(_ file: ConflictFile) async {
+        do {
+            try await git.markConflictResolved(path: file.path)
+            await refreshRebaseState()
+        } catch {
+            showToast(title: "Mark Resolved Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func markAllFilesResolved() async {
+        do {
+            try await git.markAllConflictsResolved()
+            await refreshRebaseState()
+        } catch {
+            showToast(title: "Mark All Resolved Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func rebaseContinue() async {
+        operationInProgress = true
+        do {
+            try await git.rebaseContinue()
+            rebaseState = nil
+            conflictMergeFile = nil
+            showConflictMergeView = false
+            showToast(title: "Rebase Complete", style: .success)
+            await loadAll()
+        } catch {
+            await checkForRebaseConflict(errorMessage: error.localizedDescription)
+        }
+        operationInProgress = false
+    }
+
+    func rebaseSkip() async {
+        operationInProgress = true
+        do {
+            try await git.rebaseSkip()
+            rebaseState = nil
+            conflictMergeFile = nil
+            showConflictMergeView = false
+            await loadAll()
+            await refreshRebaseState()
+            if rebaseState == nil {
+                showToast(title: "Rebase Complete", style: .success)
+            }
+        } catch {
+            await checkForRebaseConflict(errorMessage: error.localizedDescription)
+        }
+        operationInProgress = false
+    }
+
+    func rebaseAbort() async {
+        operationInProgress = true
+        do {
+            try await git.rebaseAbort()
+            rebaseState = nil
+            conflictMergeFile = nil
+            showConflictMergeView = false
+            showToast(title: "Rebase Aborted", style: .info)
+            await loadAll()
+        } catch {
+            showToast(title: "Abort Failed", detail: error.localizedDescription, style: .error)
+        }
+        operationInProgress = false
+    }
+
+    func openConflictMerge(_ file: ConflictFile) async {
+        conflictMergeFile = file
+        do {
+            let sides = try await git.readConflictSides(path: file.path)
+            conflictSides = sides
+            buildInitialOutput()
+            showConflictMergeView = true
+        } catch {
+            showToast(title: "Cannot Open Conflict", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func closeConflictMerge() {
+        showConflictMergeView = false
+        conflictMergeFile = nil
+        conflictSides = nil
+        conflictOutputLines = []
+    }
+
+    private func buildInitialOutput() {
+        guard let sides = conflictSides else { return }
+        let oursLines = sides.oursContent.components(separatedBy: "\n")
+        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+
+        var output: [String] = []
+        var oursIdx = 0
+        var theirsIdx = 0
+
+        let maxLines = max(oursLines.count, theirsLines.count)
+        let conflictRanges = sides.markers.map { ($0.oursRange, $0.theirsRange) }
+
+        func isInConflict(_ idx: Int) -> (Bool, Int?) {
+            for (i, (oursR, _)) in conflictRanges.enumerated() {
+                if oursR.contains(idx) { return (true, i) }
+            }
+            return (false, nil)
+        }
+
+        while oursIdx < maxLines {
+            let (inConflict, regionIdx) = isInConflict(oursIdx)
+            if inConflict, let ri = regionIdx {
+                let oursR = sides.markers[ri].oursRange
+                let theirsR = sides.markers[ri].theirsRange
+                for i in oursR { output.append(i < oursLines.count ? oursLines[i] : "") }
+                _ = theirsR
+                oursIdx = oursR.upperBound
+                theirsIdx = theirsR.upperBound
+            } else {
+                if oursIdx < oursLines.count {
+                    output.append(oursLines[oursIdx])
+                }
+                oursIdx += 1
+                theirsIdx += 1
+            }
+        }
+        conflictOutputLines = output
+    }
+
+    func takeOursForRegion(_ regionIndex: Int) {
+        guard let sides = conflictSides, regionIndex < sides.markers.count else { return }
+        rebuildOutput(preferOurs: true, regionIndex: regionIndex)
+    }
+
+    func takeTheirsForRegion(_ regionIndex: Int) {
+        guard let sides = conflictSides, regionIndex < sides.markers.count else { return }
+        rebuildOutput(preferOurs: false, regionIndex: regionIndex)
+    }
+
+    private var regionChoices: [Int: Bool] = [:]
+
+    func takeOurs(_ regionIndex: Int) {
+        regionChoices[regionIndex] = true
+        rebuildOutputFromChoices()
+    }
+
+    func takeTheirs(_ regionIndex: Int) {
+        regionChoices[regionIndex] = false
+        rebuildOutputFromChoices()
+    }
+
+    private func rebuildOutput(preferOurs: Bool, regionIndex: Int) {
+        regionChoices[regionIndex] = preferOurs
+        rebuildOutputFromChoices()
+    }
+
+    private func rebuildOutputFromChoices() {
+        guard let sides = conflictSides else { return }
+        let oursLines = sides.oursContent.components(separatedBy: "\n")
+        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+
+        var output: [String] = []
+        var oursIdx = 0
+
+        while oursIdx < oursLines.count {
+            var handledRegion = false
+            for (i, marker) in sides.markers.enumerated() {
+                if marker.oursRange.lowerBound == oursIdx {
+                    let useOurs = regionChoices[i] ?? true
+                    if useOurs {
+                        for j in marker.oursRange {
+                            if j < oursLines.count { output.append(oursLines[j]) }
+                        }
+                    } else {
+                        for j in marker.theirsRange {
+                            if j < theirsLines.count { output.append(theirsLines[j]) }
+                        }
+                    }
+                    oursIdx = marker.oursRange.upperBound
+                    handledRegion = true
+                    break
+                }
+            }
+            if !handledRegion {
+                output.append(oursLines[oursIdx])
+                oursIdx += 1
+            }
+        }
+        conflictOutputLines = output
+    }
+
+    func saveConflictResolution() async {
+        guard let file = conflictMergeFile else { return }
+        let content = conflictOutputLines.joined(separator: "\n")
+        do {
+            try await git.saveConflictResolution(path: file.path, content: content)
+            try await git.markConflictResolved(path: file.path)
+            showToast(title: "Saved", detail: "\(file.path) marked as resolved", style: .success)
+            showConflictMergeView = false
+            conflictMergeFile = nil
+            conflictSides = nil
+            conflictOutputLines = []
+            regionChoices = [:]
+            await refreshRebaseState()
+        } catch {
+            showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    // MARK: - Toast
+
+    func showToast(title: String, detail: String = "", style: ToastMessage.ToastStyle = .error) {
+        toastMessage = ToastMessage(title: title, detail: detail, style: style)
+    }
+
+    func dismissToast() {
+        toastMessage = nil
     }
 
     func toggleSection(_ section: String) {
