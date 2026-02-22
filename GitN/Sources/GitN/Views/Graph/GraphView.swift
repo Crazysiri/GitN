@@ -22,9 +22,6 @@ struct GraphView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if viewModel.isRebaseConflict {
-                conflictBanner
-            }
 
             graphHeader
             Divider()
@@ -40,21 +37,6 @@ struct GraphView: View {
         .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
         .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
         .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
-    }
-
-    private var conflictBanner: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
-                .font(.system(size: 11))
-            Text("A file conflict was found when attempting to merge into HEAD")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.85))
     }
 
     private var graphHeader: some View {
@@ -94,32 +76,7 @@ struct GraphView: View {
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(viewModel.commits.enumerated()), id: \.element.id) { index, commit in
-                        GraphRowView(
-                            commit: commit,
-                            graphEntry: viewModel.graphEntries[commit.hash],
-                            isSelected: viewModel.selectedCommit?.hash == commit.hash,
-                            rowHeight: rowHeight,
-                            columnWidth: columnWidth,
-                            avatarSize: avatarSize,
-                            graphAreaWidth: graphAreaWidth,
-                            refsColumnWidth: refsColumnWidth,
-                            currentBranch: viewModel.currentBranch
-                        )
-                        .id(commit.hash)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            Task { await viewModel.selectCommit(commit) }
-                        }
-                        .if(!commit.isUncommitted) { view in
-                            view.contextMenu {
-                                commitContextMenu(for: commit)
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                        }
-
-                        if index < viewModel.commits.count - 1 {
-                            Divider().opacity(0.15)
-                        }
+                        graphRow(commit: commit, index: index)
                     }
                 }
             }
@@ -130,6 +87,39 @@ struct GraphView: View {
                 }
                 viewModel.scrollToCommitHash = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private func graphRow(commit: CommitInfo, index: Int) -> some View {
+        let row = GraphRowView(
+            commit: commit,
+            graphEntry: viewModel.graphEntries[commit.hash],
+            isSelected: viewModel.selectedCommit?.hash == commit.hash,
+            rowHeight: rowHeight,
+            columnWidth: columnWidth,
+            avatarSize: avatarSize,
+            graphAreaWidth: graphAreaWidth,
+            refsColumnWidth: refsColumnWidth,
+            currentBranch: viewModel.currentBranch,
+            isRebaseConflict: commit.isUncommitted && viewModel.isRebaseConflict
+        )
+
+        row
+            .id(commit.hash)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                Task { await viewModel.selectCommit(commit) }
+            }
+            .if(!commit.isUncommitted) { view in
+                view.contextMenu {
+                    commitContextMenu(for: commit)
+                        .font(.system(size: 11, weight: .medium))
+                }
+            }
+
+        if index < viewModel.commits.count - 1 {
+            Divider().opacity(0.15)
         }
     }
     // MARK: - Context Menu
@@ -399,20 +389,41 @@ struct GraphRowView: View {
     let graphAreaWidth: CGFloat
     let refsColumnWidth: CGFloat
     let currentBranch: String
+    var isRebaseConflict: Bool = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            refsColumn
-                .frame(width: refsColumnWidth, height: rowHeight)
+        if isRebaseConflict {
+            conflictBannerRow
+        } else {
+            HStack(spacing: 0) {
+                refsColumn
+                    .frame(width: refsColumnWidth, height: rowHeight)
 
-            graphColumn
-                .frame(width: graphAreaWidth, height: rowHeight)
+                graphColumn
+                    .frame(width: graphAreaWidth, height: rowHeight)
 
-            messageColumn
-                .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
+                messageColumn
+                    .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
+            }
+            .padding(.horizontal, 8)
+            .background(rowBackground)
         }
-        .padding(.horizontal, 8)
-        .background(rowBackground)
+    }
+
+    private var conflictBannerRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .font(.system(size: 11))
+            Text("A file conflict was found when attempting to merge into HEAD")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: rowHeight)
+        .padding(.vertical, 2)
+        .background(Color.orange.opacity(0.85))
     }
 
     private var rowBackground: some View {

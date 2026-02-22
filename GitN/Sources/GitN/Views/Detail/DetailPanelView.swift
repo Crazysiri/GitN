@@ -540,12 +540,27 @@ struct DetailPanelView: View {
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Rebasing commit \(state.currentStep) out of \(state.totalSteps)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                Text("Rebasing commit \(state.currentStep) out of \(state.totalSteps)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
 
-                    if !state.conflictedFiles.isEmpty {
+                // Commit message editor
+                TextEditor(text: Binding(
+                    get: { viewModel.rebaseCommitMessage },
+                    set: { viewModel.rebaseCommitMessage = $0 }
+                ))
+                .font(.system(size: 11, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .background(Color(.textBackgroundColor).opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+                )
+                .frame(minHeight: 60, maxHeight: 100)
+
+                if !state.conflictedFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("# Conflicts:")
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(.secondary)

@@ -167,6 +167,10 @@ enum MergedLineOrigin: Equatable {
     case conflictHeader
 }
 
+enum ConflictSide {
+    case ours, theirs
+}
+
 // MARK: - Toast Notification
 
 struct ToastMessage: Identifiable, Equatable {

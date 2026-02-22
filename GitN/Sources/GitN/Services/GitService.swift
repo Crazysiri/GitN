@@ -1510,7 +1510,21 @@ actor GitService {
         }
     }
 
-    func rebaseContinue() async throws {
+    func rebaseCommitMessage() -> String {
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
+        let msgPath = (rebaseDir as NSString).appendingPathComponent("message")
+        return (try? String(contentsOfFile: msgPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    func rebaseContinue(message: String? = nil) async throws {
+        if let message, !message.isEmpty {
+            let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+            let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
+            let msgPath = (rebaseDir as NSString).appendingPathComponent("message")
+            try? message.write(toFile: msgPath, atomically: true, encoding: .utf8)
+        }
         try await runGit(["rebase", "--continue"])
     }
 

@@ -47,6 +47,7 @@ final class RepoViewModel {
     var conflictSides: ConflictSides?
     var conflictOutputLines: [String] = []
     var showConflictMergeView = false
+    var rebaseCommitMessage = ""
 
     // MARK: - Push Upstream Prompt
     var showPushUpstreamPrompt = false
@@ -205,6 +206,7 @@ final class RepoViewModel {
 
             if let state = try? await git.rebaseState() {
                 rebaseState = state
+                rebaseCommitMessage = await git.rebaseCommitMessage()
             }
         } catch {
             print("Error loading repo data: \(error)")
@@ -699,6 +701,7 @@ final class RepoViewModel {
         do {
             if let state = try await git.rebaseState() {
                 rebaseState = state
+                rebaseCommitMessage = await git.rebaseCommitMessage()
                 if let msg = errorMessage {
                     showToast(title: "Rebase Failed", detail: "There are merge conflicts that need to be resolved", style: .error)
                     _ = msg
@@ -719,6 +722,9 @@ final class RepoViewModel {
     func refreshRebaseState() async {
         do {
             rebaseState = try await git.rebaseState()
+            if rebaseState != nil {
+                rebaseCommitMessage = await git.rebaseCommitMessage()
+            }
         } catch {}
     }
 
@@ -743,8 +749,9 @@ final class RepoViewModel {
     func rebaseContinue() async {
         operationInProgress = true
         do {
-            try await git.rebaseContinue()
+            try await git.rebaseContinue(message: rebaseCommitMessage.isEmpty ? nil : rebaseCommitMessage)
             rebaseState = nil
+            rebaseCommitMessage = ""
             conflictMergeFile = nil
             showConflictMergeView = false
             showToast(title: "Rebase Complete", style: .success)
@@ -856,7 +863,7 @@ final class RepoViewModel {
         rebuildOutput(preferOurs: false, regionIndex: regionIndex)
     }
 
-    private var regionChoices: [Int: Bool] = [:]
+    var regionChoices: [Int: Bool] = [:]
 
     func takeOurs(_ regionIndex: Int) {
         regionChoices[regionIndex] = true
