@@ -1005,8 +1005,9 @@ actor GitService {
         try await runGit(args)
     }
 
-    func push(remoteName: String? = nil, branchName: String? = nil) async throws {
+    func push(remoteName: String? = nil, branchName: String? = nil, setUpstream: Bool = false) async throws {
         var args = ["push"]
+        if setUpstream { args.append("-u") }
         if let remoteName {
             args.append(remoteName)
             if let branchName { args.append(branchName) }

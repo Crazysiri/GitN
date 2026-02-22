@@ -48,6 +48,11 @@ final class RepoViewModel {
     var conflictOutputLines: [String] = []
     var showConflictMergeView = false
 
+    // MARK: - Push Upstream Prompt
+    var showPushUpstreamPrompt = false
+    var pushUpstreamRemote = "origin"
+    var pushUpstreamBranch = ""
+
     // MARK: - Toast
     var toastMessage: ToastMessage?
 
@@ -457,7 +462,25 @@ final class RepoViewModel {
     }
 
     func performPush() async {
+        let hasUpstream = localBranches.first(where: { $0.isCurrent })?.upstream != nil
+        if !hasUpstream {
+            pushUpstreamRemote = "origin"
+            pushUpstreamBranch = currentBranch
+            showPushUpstreamPrompt = true
+            return
+        }
         await performRemoteOperation { try await $0.git.push() }
+    }
+
+    func performPushWithUpstream(remote: String, branch: String) async {
+        showPushUpstreamPrompt = false
+        await performRemoteOperation {
+            try await $0.git.push(remoteName: remote, branchName: branch, setUpstream: true)
+        }
+    }
+
+    func cancelPushUpstreamPrompt() {
+        showPushUpstreamPrompt = false
     }
 
     func performStashSave(message: String? = nil) async {

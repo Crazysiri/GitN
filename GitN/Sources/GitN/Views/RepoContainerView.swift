@@ -129,6 +129,11 @@ struct RepoContainerView: View {
             repoToolbar
             Divider()
 
+            if viewModel.showPushUpstreamPrompt {
+                pushUpstreamBanner
+                Divider()
+            }
+
             GraphView(viewModel: viewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -254,6 +259,58 @@ struct RepoContainerView: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .foregroundStyle(disabled ? .tertiary : .secondary)
+    }
+
+    // MARK: - Push Upstream Banner
+
+    private var pushUpstreamBanner: some View {
+        HStack(spacing: 8) {
+            Text("What remote/branch should \"\(viewModel.currentBranch)\" push to and pull from?")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.primary)
+
+            Picker("", selection: Binding(
+                get: { viewModel.pushUpstreamRemote },
+                set: { viewModel.pushUpstreamRemote = $0 }
+            )) {
+                ForEach(viewModel.remotes) { remote in
+                    Text(remote.name).tag(remote.name)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 100)
+            .controlSize(.small)
+
+            Text("/")
+                .foregroundStyle(.secondary)
+
+            TextField("branch", text: Binding(
+                get: { viewModel.pushUpstreamBranch },
+                set: { viewModel.pushUpstreamBranch = $0 }
+            ))
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11))
+            .frame(width: 120)
+            .controlSize(.small)
+
+            Button("Submit") {
+                let remote = viewModel.pushUpstreamRemote.trimmingCharacters(in: .whitespaces)
+                let branch = viewModel.pushUpstreamBranch.trimmingCharacters(in: .whitespaces)
+                guard !remote.isEmpty, !branch.isEmpty else { return }
+                Task { await viewModel.performPushWithUpstream(remote: remote, branch: branch) }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            Button("Cancel") {
+                viewModel.cancelPushUpstreamPrompt()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(.controlBackgroundColor).opacity(0.7))
     }
 
     // MARK: - New Branch Sheet
