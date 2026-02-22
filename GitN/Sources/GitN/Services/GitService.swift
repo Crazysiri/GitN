@@ -942,7 +942,15 @@ actor GitService {
             throw GitError.operationFailed("Cannot get index")
         }
         defer { git_index_free(index) }
-        git_index_add_bypath(index, path)
+
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        let fileExists = FileManager.default.fileExists(atPath: fullPath)
+
+        if fileExists {
+            git_index_add_bypath(index, path)
+        } else {
+            git_index_remove_bypath(index, path)
+        }
         git_index_write(index)
     }
 
