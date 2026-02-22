@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "GitX",
+    name: "GitN",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "GitX", targets: ["GitX"]),
+        .executable(name: "GitN", targets: ["GitN"]),
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
@@ -17,9 +17,9 @@ let package = Package(
             providers: [.brew(["libgit2"])]
         ),
         .executableTarget(
-            name: "GitX",
+            name: "GitN",
             dependencies: ["Clibgit2", "SwiftTerm"],
-            path: "Sources/GitX"
+            path: "Sources/GitN"
         ),
     ]
 )

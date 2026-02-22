@@ -3,6 +3,17 @@ import SwiftUI
 struct GraphView: View {
     let viewModel: RepoViewModel
 
+    @State private var showCreateTagSheet = false
+    @State private var showCreateBranchSheet = false
+    @State private var showEditMessageSheet = false
+    @State private var showSetUpstreamSheet = false
+    @State private var contextCommit: CommitInfo?
+    @State private var tagName = ""
+    @State private var newBranchNameAtCommit = ""
+    @State private var editedMessage = ""
+    @State private var upstreamRemote = "origin"
+    @State private var upstreamBranch = ""
+
     private let rowHeight: CGFloat = 24
     private let columnWidth: CGFloat = 18
     private let avatarSize: CGFloat = 18
@@ -21,6 +32,10 @@ struct GraphView: View {
             }
         }
         .background(Color(.textBackgroundColor))
+        .sheet(isPresented: $showCreateTagSheet) { createTagSheet }
+        .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
+        .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
+        .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
     }
 
     private var graphHeader: some View {
@@ -56,30 +71,296 @@ struct GraphView: View {
     }
 
     private var scrollContent: some View {
-        ScrollView(.vertical) {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(viewModel.commits.enumerated()), id: \.element.id) { index, commit in
-                    GraphRowView(
-                        commit: commit,
-                        graphEntry: viewModel.graphEntries[commit.hash],
-                        isSelected: viewModel.selectedCommit?.hash == commit.hash,
-                        rowHeight: rowHeight,
-                        columnWidth: columnWidth,
-                        avatarSize: avatarSize,
-                        graphAreaWidth: graphAreaWidth,
-                        refsColumnWidth: refsColumnWidth,
-                        currentBranch: viewModel.currentBranch
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        Task { await viewModel.selectCommit(commit) }
-                    }
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(viewModel.commits.enumerated()), id: \.element.id) { index, commit in
+                        GraphRowView(
+                            commit: commit,
+                            graphEntry: viewModel.graphEntries[commit.hash],
+                            isSelected: viewModel.selectedCommit?.hash == commit.hash,
+                            rowHeight: rowHeight,
+                            columnWidth: columnWidth,
+                            avatarSize: avatarSize,
+                            graphAreaWidth: graphAreaWidth,
+                            refsColumnWidth: refsColumnWidth,
+                            currentBranch: viewModel.currentBranch
+                        )
+                        .id(commit.hash)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Task { await viewModel.selectCommit(commit) }
+                        }
+                        .if(!commit.isUncommitted) { view in
+                            view.contextMenu { commitContextMenu(for: commit) }
+                        }
 
-                    if index < viewModel.commits.count - 1 {
-                        Divider().opacity(0.15)
+                        if index < viewModel.commits.count - 1 {
+                            Divider().opacity(0.15)
+                        }
                     }
                 }
             }
+            .onChange(of: viewModel.scrollToCommitHash) { _, hash in
+                guard let hash else { return }
+                withAnimation {
+                    proxy.scrollTo(hash, anchor: .center)
+                }
+                viewModel.scrollToCommitHash = nil
+            }
+        }
+    }
+    // MARK: - Context Menu
+
+    @ViewBuilder
+    private func commitContextMenu(for commit: CommitInfo) -> some View {
+        let refs = commit.refs
+        let isCurrentBranchHead = refs.contains(where: { $0.contains("HEAD") })
+        let branchRef = refs.first(where: { !$0.contains("tag:") && !$0.contains("HEAD ->") })
+        let _ = refs.first(where: { $0.contains("HEAD ->") })
+        let otherBranchName = branchRef.map(RefBadge.displayName)
+        let isOtherBranchHead = otherBranchName != nil && !isCurrentBranchHead
+        let _ = refs.contains(where: { $0.contains("origin/") })
+
+        // Merge
+        if let otherBranchName, isOtherBranchHead {
+            Button("Merge \(otherBranchName) into \(viewModel.currentBranch)") {
+                Task { await viewModel.performMerge(otherBranchName) }
+            }
+        }
+
+        // Rebase
+        if let otherBranchName, isOtherBranchHead {
+            Button("Rebase \(viewModel.currentBranch) onto \(otherBranchName)") {
+                Task { await viewModel.performRebase(onto: otherBranchName) }
+            }
+        }
+
+        if isOtherBranchHead || isCurrentBranchHead {
+            Divider()
+        }
+
+        // Checkout
+        if isOtherBranchHead, let otherBranchName {
+            Menu("Checkout") {
+                Button("Checkout \(otherBranchName)") {
+                    Task { await viewModel.performCheckoutBranch(otherBranchName) }
+                }
+                Button("Checkout commit \(commit.shortHash)") {
+                    Task { await viewModel.performCheckoutCommit(commit.hash) }
+                }
+            }
+        } else if !isCurrentBranchHead {
+            Button("Checkout this commit") {
+                Task { await viewModel.performCheckoutCommit(commit.hash) }
+            }
+        }
+
+        if isCurrentBranchHead {
+            // Set Upstream
+            Button("Set Upstream") {
+                contextCommit = commit
+                upstreamBranch = viewModel.currentBranch
+                upstreamRemote = "origin"
+                showSetUpstreamSheet = true
+            }
+        }
+
+        Divider()
+
+        // Create branch here
+        Button("Create branch here") {
+            contextCommit = commit
+            newBranchNameAtCommit = ""
+            showCreateBranchSheet = true
+        }
+
+        // Cherry pick (not on current branch head)
+        if !isCurrentBranchHead {
+            Button("Cherry pick commit") {
+                Task { await viewModel.performCherryPick(commit.hash) }
+            }
+        }
+
+        // Reset
+        Menu("Reset \(viewModel.currentBranch) to this commit") {
+            Button("Soft – keep all changes staged") {
+                Task { await viewModel.performReset(commit.hash, mode: .soft) }
+            }
+            Button("Mixed – keep changes unstaged") {
+                Task { await viewModel.performReset(commit.hash, mode: .mixed) }
+            }
+            Button("Hard – discard all changes") {
+                Task { await viewModel.performReset(commit.hash, mode: .hard) }
+            }
+        }
+
+        // Edit commit message (only HEAD)
+        if isCurrentBranchHead {
+            Button("Edit commit message") {
+                contextCommit = commit
+                editedMessage = commit.message
+                showEditMessageSheet = true
+            }
+        }
+
+        // Revert
+        Button("Revert commit") {
+            Task { await viewModel.performRevert(commit.hash) }
+        }
+
+        Divider()
+
+        // Delete branch
+        if isOtherBranchHead, let otherBranchName {
+            Button("Delete \(otherBranchName)", role: .destructive) {
+                Task { await viewModel.performDeleteBranch(otherBranchName) }
+            }
+        }
+
+        // Copy
+        Button("Copy commit SHA") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(commit.hash, forType: .string)
+        }
+
+        Divider()
+
+        // Compare
+        Button("Compare commit against working directory") {
+            Task { await viewModel.selectCommit(commit) }
+        }
+
+        // Create tag
+        Button("Create tag here") {
+            contextCommit = commit
+            tagName = ""
+            showCreateTagSheet = true
+        }
+    }
+
+    // MARK: - Sheets
+
+    private var createTagSheet: some View {
+        VStack(spacing: 12) {
+            Text("Create Tag")
+                .font(.headline)
+            TextField("Tag name", text: $tagName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showCreateTagSheet = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    guard let c = contextCommit else { return }
+                    let name = tagName.trimmingCharacters(in: .whitespaces)
+                    showCreateTagSheet = false
+                    guard !name.isEmpty else { return }
+                    Task { await viewModel.performCreateTag(name: name, at: c.hash) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(tagName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var createBranchAtSheet: some View {
+        VStack(spacing: 12) {
+            Text("Create Branch")
+                .font(.headline)
+            if let c = contextCommit {
+                Text("At \(c.shortHash) – \(c.message)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 280)
+            }
+            TextField("Branch name", text: $newBranchNameAtCommit)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showCreateBranchSheet = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    guard let c = contextCommit else { return }
+                    let name = newBranchNameAtCommit.trimmingCharacters(in: .whitespaces)
+                    showCreateBranchSheet = false
+                    guard !name.isEmpty else { return }
+                    Task { await viewModel.performCreateBranchAt(name: name, commitHash: c.hash) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(newBranchNameAtCommit.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var editMessageSheet: some View {
+        VStack(spacing: 12) {
+            Text("Edit Commit Message")
+                .font(.headline)
+            TextEditor(text: $editedMessage)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: 400, height: 120)
+                .border(Color(.separatorColor))
+            HStack {
+                Button("Cancel") { showEditMessageSheet = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    guard let c = contextCommit else { return }
+                    let msg = editedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                    showEditMessageSheet = false
+                    guard !msg.isEmpty else { return }
+                    Task { await viewModel.performEditCommitMessage(hash: c.hash, newMessage: msg) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(editedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var setUpstreamSheet: some View {
+        VStack(spacing: 12) {
+            Text("Set Upstream")
+                .font(.headline)
+            TextField("Remote", text: $upstreamRemote)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            TextField("Branch", text: $upstreamBranch)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showSetUpstreamSheet = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Set") {
+                    let remote = upstreamRemote.trimmingCharacters(in: .whitespaces)
+                    let branch = upstreamBranch.trimmingCharacters(in: .whitespaces)
+                    showSetUpstreamSheet = false
+                    guard !remote.isEmpty, !branch.isEmpty else { return }
+                    Task { await viewModel.performSetUpstream(remote: remote, branch: branch) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    upstreamRemote.trimmingCharacters(in: .whitespaces).isEmpty ||
+                    upstreamBranch.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+            }
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Conditional View Modifier
+
+extension View {
+    @ViewBuilder
+    func `if`<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
         }
     }
 }

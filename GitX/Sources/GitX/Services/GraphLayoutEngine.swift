@@ -1,186 +1,168 @@
 import SwiftUI
 
-/// A drawable line segment within a single row.
-/// Faithfully ported from Xit's HistoryLine.
+/// A drawable line segment within a single row, ported from gitx's PBGitGraphLine.
 ///
-/// - `childIndex`: column at the TOP of the row (where the line enters from above).
-///   `nil` means the line originates at the commit dot.
-/// - `parentIndex`: column at the BOTTOM of the row (where the line exits downward).
-///   `nil` means the line terminates at the commit dot.
-struct HistoryLine: Equatable, Sendable {
-    let childIndex: Int?
-    let parentIndex: Int?
+/// Each line represents half a row's connection:
+/// - `upper = true`: line from column `from` at the TOP edge to column `to` at the CENTER
+/// - `upper = false`: line from column `from` at the BOTTOM edge to column `to` at the CENTER
+///
+/// Columns are 1-indexed to match gitx's convention.
+struct GraphLine: Equatable, Sendable {
+    let upper: Bool
+    let from: Int
+    let to: Int
     let colorIndex: Int
+    var isUncommittedLink: Bool = false
 }
 
-/// Per-commit graph layout data.
-struct CommitGraphEntry: Equatable {
-    let dotColumn: Int
+/// Per-commit graph layout data, ported from gitx's PBGraphCellInfo.
+struct CommitGraphEntry: Equatable, Sendable {
+    /// 1-indexed column position for the commit dot
+    let position: Int
     let dotColorIndex: Int
-    let lines: [HistoryLine]
-    /// True for the uncommitted-changes pseudo-row
+    let lines: [GraphLine]
+    let numColumns: Int
     let isUncommitted: Bool
 }
 
-/// Exact port of Xit's CommitHistory.generateConnections + generateLines.
+/// Graph layout engine ported from gitx's PBGitGrapher.
 ///
-/// The algorithm maintains an ordered array of "active connections" (pipes)
-/// flowing downward through the graph. Each connection targets a specific
-/// parent commit hash. When a commit is encountered:
-/// 1. The incoming pipe (targeting this commit) is found
-/// 2. A new pipe to the first parent replaces/extends it
-/// 3. Additional parent pipes are appended (for merge commits)
-/// 4. A snapshot of all connections is taken
-/// 5. Connections targeting this commit are removed
-///
-/// Then for each row, the snapshot is converted into HistoryLine segments.
+/// The algorithm maintains an ordered array of "lanes" flowing downward.
+/// Each lane tracks a target parent commit hash and a color index.
+/// When processing each commit:
+/// 1. Incoming lanes targeting this commit merge into the commit's position
+/// 2. Non-matching lanes pass through to the next row
+/// 3. New lanes are created for the commit's parents
 enum GraphLayoutEngine {
 
-    private struct Connection: Equatable {
-        let parentHash: String
-        let childHash: String
+    private final class Lane {
+        var parentHash: String
         let colorIndex: Int
+        var fromUncommitted: Bool
+
+        init(colorIndex: Int, parentHash: String, fromUncommitted: Bool = false) {
+            self.colorIndex = colorIndex
+            self.parentHash = parentHash
+            self.fromUncommitted = fromUncommitted
+        }
     }
 
     static func computeEntries(for commits: [CommitInfo]) -> [String: CommitGraphEntry] {
         guard !commits.isEmpty else { return [:] }
 
-        let snapshots = generateConnections(for: commits)
         var result: [String: CommitGraphEntry] = [:]
         result.reserveCapacity(commits.count)
 
-        for (i, commit) in commits.enumerated() {
-            let entry = generateLines(
-                commitHash: commit.hash,
-                connections: snapshots[i],
-                isUncommitted: commit.isUncommitted
-            )
-            result[commit.hash] = entry
-        }
-
-        return result
-    }
-
-    // MARK: - Phase 1: generateConnections (Xit's CommitHistory.generateConnections)
-
-    private static func generateConnections(for commits: [CommitInfo]) -> [[Connection]] {
-        var snapshots: [[Connection]] = []
-        snapshots.reserveCapacity(commits.count)
-        var connections: [Connection] = []
-        var nextColorIndex = 0
+        var previousLanes: [Lane?] = []
+        var nextLaneIndex = 0
 
         for commit in commits {
             let commitHash = commit.hash
+            let parents = commit.parentHashes
+            let nParents = parents.count
 
-            let incomingIndex = connections.firstIndex { $0.parentHash == commitHash }
-            let incomingColor = incomingIndex.map { connections[$0].colorIndex }
+            var currentLanes: [Lane?] = []
+            var lines: [GraphLine] = []
+            var newPos = -1
+            var currentLane: Lane?
+            var didFirst = false
+            var dotColorIndex = 0
 
-            if let firstParentHash = commit.parentHashes.first {
-                let color: Int
-                if let ic = incomingColor {
-                    color = ic
+            // Phase 1: iterate over previous lanes, pass through or merge
+            var i = 0
+            for lane in previousLanes {
+                i += 1
+                guard let lane else { continue }
+
+                if lane.parentHash == commitHash {
+                    let isULink = lane.fromUncommitted
+                    if !didFirst {
+                        didFirst = true
+                        currentLanes.append(lane)
+                        currentLane = lane
+                        newPos = currentLanes.count
+                        dotColorIndex = lane.colorIndex
+                        lines.append(GraphLine(upper: true, from: i, to: newPos, colorIndex: lane.colorIndex, isUncommittedLink: isULink))
+                        if nParents > 0 {
+                            lines.append(GraphLine(upper: false, from: newPos, to: newPos, colorIndex: lane.colorIndex))
+                        }
+                    } else {
+                        lines.append(GraphLine(upper: true, from: i, to: newPos, colorIndex: lane.colorIndex, isUncommittedLink: isULink))
+                    }
+                    lane.fromUncommitted = false
                 } else {
-                    color = nextColorIndex
-                    nextColorIndex += 1
+                    currentLanes.append(lane)
+                    let col = currentLanes.count
+                    lines.append(GraphLine(upper: true, from: i, to: col, colorIndex: lane.colorIndex))
+                    lines.append(GraphLine(upper: false, from: col, to: col, colorIndex: lane.colorIndex))
+                }
+            }
+
+            // Phase 2: create lane for first parent if not already handled
+            if !didFirst && nParents > 0 {
+                let newLane = Lane(colorIndex: nextLaneIndex, parentHash: parents[0], fromUncommitted: commit.isUncommitted)
+                nextLaneIndex += 1
+                currentLanes.append(newLane)
+                currentLane = newLane
+                newPos = currentLanes.count
+                dotColorIndex = newLane.colorIndex
+                lines.append(GraphLine(upper: false, from: newPos, to: newPos, colorIndex: newLane.colorIndex))
+            }
+
+            // Phase 3: create lanes for additional parents (merge commits)
+            var addedParent = false
+            for parentIdx in 1..<max(1, nParents) {
+                let parentHash = parents[parentIdx]
+                var wasDisplayed = false
+
+                var j = 0
+                for existingLane in currentLanes {
+                    j += 1
+                    guard let existingLane else { continue }
+                    if existingLane.parentHash == parentHash {
+                        lines.append(GraphLine(upper: false, from: j, to: newPos, colorIndex: existingLane.colorIndex))
+                        wasDisplayed = true
+                        break
+                    }
                 }
 
-                let newConn = Connection(
-                    parentHash: firstParentHash,
-                    childHash: commitHash,
-                    colorIndex: color
-                )
-                let insertIndex = incomingIndex.map { $0 + 1 } ?? connections.endIndex
-                connections.insert(newConn, at: insertIndex)
+                if !wasDisplayed {
+                    addedParent = true
+                    let newLane = Lane(colorIndex: nextLaneIndex, parentHash: parentHash)
+                    nextLaneIndex += 1
+                    currentLanes.append(newLane)
+                    lines.append(GraphLine(
+                        upper: false, from: currentLanes.count, to: newPos, colorIndex: newLane.colorIndex
+                    ))
+                }
             }
 
-            for parentHash in commit.parentHashes.dropFirst() {
-                connections.append(Connection(
-                    parentHash: parentHash,
-                    childHash: commitHash,
-                    colorIndex: nextColorIndex
-                ))
-                nextColorIndex += 1
+            let numColumns = addedParent ? currentLanes.count - 1 : currentLanes.count
+
+            // Update current lane to point to first parent, or nullify for root commits
+            if let cl = currentLane {
+                if nParents > 0 {
+                    cl.parentHash = parents[0]
+                } else {
+                    if let idx = currentLanes.firstIndex(where: { $0 === cl }) {
+                        currentLanes[idx] = nil
+                    }
+                }
             }
 
-            snapshots.append(connections)
+            if newPos < 1 { newPos = 1 }
 
-            connections = connections.filter { $0.parentHash != commitHash }
+            result[commitHash] = CommitGraphEntry(
+                position: newPos,
+                dotColorIndex: dotColorIndex,
+                lines: lines,
+                numColumns: numColumns,
+                isUncommitted: commit.isUncommitted
+            )
+
+            previousLanes = currentLanes
         }
 
-        return snapshots
-    }
-
-    // MARK: - Phase 2: generateLines (Xit's CommitHistory.generateLines)
-
-    private static func generateLines(
-        commitHash: String,
-        connections: [Connection],
-        isUncommitted: Bool = false
-    ) -> CommitGraphEntry {
-        var nextChildIndex = 0
-
-        let parentOutlets: [String] = {
-            var seen: [String] = []
-            for conn in connections where conn.parentHash != commitHash {
-                if !seen.contains(conn.parentHash) {
-                    seen.append(conn.parentHash)
-                }
-            }
-            return seen
-        }()
-
-        var parentLines: [String: (childIndex: Int, colorIndex: Int)] = [:]
-        var generatedLines: [HistoryLine] = []
-        var dotColumn: Int?
-        var dotColorIndex: Int?
-
-        for conn in connections {
-            let commitIsParent = conn.parentHash == commitHash
-            let commitIsChild = conn.childHash == commitHash
-
-            let parentIndex: Int? = commitIsParent
-                ? nil
-                : parentOutlets.firstIndex(of: conn.parentHash)
-
-            var childIndex: Int? = commitIsChild ? nil : nextChildIndex
-            var colorIndex = conn.colorIndex
-
-            if dotColumn == nil && (commitIsParent || commitIsChild) {
-                dotColumn = nextChildIndex
-                dotColorIndex = colorIndex
-            }
-
-            if let existing = parentLines[conn.parentHash] {
-                if !commitIsChild {
-                    childIndex = existing.childIndex
-                    colorIndex = existing.colorIndex
-                } else if !commitIsParent {
-                    nextChildIndex += 1
-                }
-            } else {
-                if !commitIsChild {
-                    parentLines[conn.parentHash] = (
-                        childIndex: nextChildIndex,
-                        colorIndex: colorIndex
-                    )
-                }
-                if !commitIsParent {
-                    nextChildIndex += 1
-                }
-            }
-
-            generatedLines.append(HistoryLine(
-                childIndex: childIndex,
-                parentIndex: parentIndex,
-                colorIndex: colorIndex
-            ))
-        }
-
-        return CommitGraphEntry(
-            dotColumn: dotColumn ?? 0,
-            dotColorIndex: dotColorIndex ?? 0,
-            lines: generatedLines,
-            isUncommitted: isUncommitted
-        )
+        return result
     }
 }

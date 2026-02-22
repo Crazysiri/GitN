@@ -86,25 +86,36 @@ final class RepoViewModel {
     }
 
     /// Lightweight refresh: only file statuses + uncommitted graph entry.
+    /// Does NOT reload the full commit list — only updates the uncommitted entry.
     private func refreshStatusAndGraph() async {
         do {
             let sts = try await git.status()
             fileStatuses = sts
-
-            let cms = try await git.commitLog()
             let hc = try await git.headCommitHash()
             headCommitHash = hc
-            var allEntries = cms
-            if !sts.isEmpty {
+
+            let hadUncommitted = commits.first?.isUncommitted == true
+            let needsUncommitted = !sts.isEmpty
+
+            if hadUncommitted && needsUncommitted {
                 let staged = sts.filter(\.hasStagedChanges).count
                 let unstaged = sts.filter(\.hasUnstagedChanges).count
                 let uncommitted = CommitInfo.uncommittedEntry(
                     parentHash: hc, stagedCount: staged, unstagedCount: unstaged
                 )
-                allEntries.insert(uncommitted, at: 0)
+                commits[0] = uncommitted
+            } else if hadUncommitted != needsUncommitted {
+                if hadUncommitted { commits.removeFirst() }
+                if needsUncommitted {
+                    let staged = sts.filter(\.hasStagedChanges).count
+                    let unstaged = sts.filter(\.hasUnstagedChanges).count
+                    let uncommitted = CommitInfo.uncommittedEntry(
+                        parentHash: hc, stagedCount: staged, unstagedCount: unstaged
+                    )
+                    commits.insert(uncommitted, at: 0)
+                }
+                graphEntries = GraphLayoutEngine.computeEntries(for: commits)
             }
-            commits = allEntries
-            graphEntries = GraphLayoutEngine.computeEntries(for: allEntries)
 
             if let file = selectedDiffFile, selectedCommit?.isUncommitted == true {
                 await selectDiffFile(file, context: currentDiffContext)
@@ -117,19 +128,19 @@ final class RepoViewModel {
         defer { isLoading = false }
 
         do {
+            // Phase 1: Load metadata in parallel
             async let b = git.localBranches()
             async let rb = git.remoteBranches()
             async let r = git.remotes()
             async let t = git.tags()
             async let st = git.stashes()
             async let sub = git.submodules()
-            async let c = git.commitLog()
             async let cur = git.currentBranch()
             async let stat = git.status()
             async let hch = git.headCommitHash()
 
-            let (lb, rbs, rms, tgs, sth, subs, cms, cb, sts, hc) = try await (
-                b, rb, r, t, st, sub, c, cur, stat, hch
+            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc) = try await (
+                b, rb, r, t, st, sub, cur, stat, hch
             )
             localBranches = lb
             remoteBranches = rbs
@@ -141,19 +152,35 @@ final class RepoViewModel {
             fileStatuses = sts
             headCommitHash = hc
 
-            var allEntries = cms
+            // Phase 2: Stream commits with incremental graph (like gitx's PBGitRevList)
+            let graphEngine = IncrementalGraphLayoutEngine()
+            var loadedCommits: [CommitInfo] = []
+            var loadedGraph: [String: CommitGraphEntry] = [:]
+
             if !sts.isEmpty {
                 let staged = sts.filter(\.hasStagedChanges).count
                 let unstaged = sts.filter(\.hasUnstagedChanges).count
                 let uncommitted = CommitInfo.uncommittedEntry(
-                    parentHash: hc,
-                    stagedCount: staged,
-                    unstagedCount: unstaged
+                    parentHash: hc, stagedCount: staged, unstagedCount: unstaged
                 )
-                allEntries.insert(uncommitted, at: 0)
+                loadedCommits.append(uncommitted)
+                loadedGraph[uncommitted.hash] = graphEngine.processCommit(uncommitted)
             }
-            commits = allEntries
-            graphEntries = GraphLayoutEngine.computeEntries(for: allEntries)
+
+            let stream = await git.commitLogStream()
+            for await batch in stream {
+                loadedCommits.reserveCapacity(loadedCommits.count + batch.count)
+                loadedGraph.reserveCapacity(loadedGraph.count + batch.count)
+                for commit in batch {
+                    loadedCommits.append(commit)
+                    loadedGraph[commit.hash] = graphEngine.processCommit(commit)
+                }
+                commits = loadedCommits
+                graphEntries = loadedGraph
+            }
+
+            commits = loadedCommits
+            graphEntries = loadedGraph
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -374,23 +401,29 @@ final class RepoViewModel {
         if let file = selectedDiffFile {
             await selectDiffFile(file, context: currentDiffContext)
         }
-        // Refresh commits graph (uncommitted entry counts may change)
-        do {
-            let cms = try await git.commitLog()
-            let hc = try await git.headCommitHash()
-            headCommitHash = hc
-            var allEntries = cms
-            if !fileStatuses.isEmpty {
+        // Update uncommitted entry counts without reloading all commits
+        let hadUncommitted = commits.first?.isUncommitted == true
+        let needsUncommitted = !fileStatuses.isEmpty
+
+        if hadUncommitted && needsUncommitted {
+            let staged = fileStatuses.filter(\.hasStagedChanges).count
+            let unstaged = fileStatuses.filter(\.hasUnstagedChanges).count
+            let uncommitted = CommitInfo.uncommittedEntry(
+                parentHash: headCommitHash, stagedCount: staged, unstagedCount: unstaged
+            )
+            commits[0] = uncommitted
+        } else if hadUncommitted != needsUncommitted {
+            if hadUncommitted { commits.removeFirst() }
+            if needsUncommitted {
                 let staged = fileStatuses.filter(\.hasStagedChanges).count
                 let unstaged = fileStatuses.filter(\.hasUnstagedChanges).count
                 let uncommitted = CommitInfo.uncommittedEntry(
-                    parentHash: hc, stagedCount: staged, unstagedCount: unstaged
+                    parentHash: headCommitHash, stagedCount: staged, unstagedCount: unstaged
                 )
-                allEntries.insert(uncommitted, at: 0)
+                commits.insert(uncommitted, at: 0)
             }
-            commits = allEntries
-            graphEntries = GraphLayoutEngine.computeEntries(for: allEntries)
-        } catch {}
+            graphEntries = GraphLayoutEngine.computeEntries(for: commits)
+        }
     }
 
     // MARK: - Remote Operations
@@ -424,6 +457,84 @@ final class RepoViewModel {
 
     func performAddRemote(name: String, url: String) async {
         await performRemoteOperation { try await $0.git.addRemote(name: name, url: url) }
+    }
+
+    func performDeleteRemote(name: String) async {
+        await performRemoteOperation { try await $0.git.deleteRemote(name: name) }
+    }
+
+    func performEditRemote(oldName: String, newName: String, newURL: String) async {
+        await performRemoteOperation {
+            if oldName != newName {
+                try await $0.git.renameRemote(oldName: oldName, newName: newName)
+            }
+            try await $0.git.setRemoteURL(name: newName, url: newURL)
+        }
+    }
+
+    // MARK: - Commit Context Menu Operations
+
+    func performMerge(_ refName: String) async {
+        await performRemoteOperation { try await $0.git.merge(refName) }
+    }
+
+    func performRebase(onto target: String) async {
+        await performRemoteOperation { try await $0.git.rebase(onto: target) }
+    }
+
+    func performCheckoutBranch(_ name: String) async {
+        await performRemoteOperation { try await $0.git.checkoutBranch(name) }
+    }
+
+    func performCheckoutCommit(_ hash: String) async {
+        await performRemoteOperation { try await $0.git.checkoutCommit(hash) }
+    }
+
+    func performCherryPick(_ hash: String) async {
+        await performRemoteOperation { try await $0.git.cherryPick(hash) }
+    }
+
+    func performReset(_ hash: String, mode: GitService.ResetMode) async {
+        await performRemoteOperation { try await $0.git.resetToCommit(hash, mode: mode) }
+    }
+
+    func performRevert(_ hash: String) async {
+        await performRemoteOperation { try await $0.git.revertCommit(hash) }
+    }
+
+    func performDeleteBranch(_ name: String, force: Bool = false) async {
+        await performRemoteOperation { try await $0.git.deleteBranch(name, force: force) }
+    }
+
+    func performCreateTag(name: String, at hash: String) async {
+        await performRemoteOperation { try await $0.git.createTag(name: name, at: hash) }
+    }
+
+    func performSetUpstream(remote: String, branch: String) async {
+        await performRemoteOperation { try await $0.git.setUpstream(remote: remote, branch: branch) }
+    }
+
+    func performEditCommitMessage(hash: String, newMessage: String) async {
+        if hash == headCommitHash {
+            await performRemoteOperation { try await $0.git.amendCommitMessage(newMessage) }
+        } else {
+            operationError = "Can only edit the HEAD commit message (amend)."
+        }
+    }
+
+    func performCreateBranchAt(name: String, commitHash: String) async {
+        await performRemoteOperation { try await $0.git.createBranchAt(name: name, commitHash: commitHash) }
+    }
+
+    // MARK: - Scroll to commit
+
+    var scrollToCommitHash: String?
+
+    func scrollToCommitForBranch(_ branch: BranchInfo) {
+        if let commit = commits.first(where: { $0.shortHash == branch.shortHash || $0.hash.hasPrefix(branch.shortHash) }) {
+            scrollToCommitHash = commit.hash
+            Task { await selectCommit(commit) }
+        }
     }
 
     private func performRemoteOperation(_ op: (RepoViewModel) async throws -> Void) async {

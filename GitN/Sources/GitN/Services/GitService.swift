@@ -44,7 +44,7 @@ private func makeDefaultSignature(repo: OpaquePointer) -> UnsafeMutablePointer<g
     let nameOk = git_config_get_string_buf(&nameBuf, config, "user.name") == 0
     let emailOk = git_config_get_string_buf(&emailBuf, config, "user.email") == 0
 
-    let name = nameOk ? String(cString: nameBuf.ptr) : NSFullUserName().isEmpty ? "GitX User" : NSFullUserName()
+    let name = nameOk ? String(cString: nameBuf.ptr) : NSFullUserName().isEmpty ? "GitN User" : NSFullUserName()
     let email = emailOk ? String(cString: emailBuf.ptr) : "\(NSUserName())@\(ProcessInfo.processInfo.hostName)"
 
     if nameOk { git_buf_dispose(&nameBuf) }
@@ -57,7 +57,7 @@ private func makeDefaultSignature(repo: OpaquePointer) -> UnsafeMutablePointer<g
 }
 
 private func createFallbackSignature() -> UnsafeMutablePointer<git_signature>? {
-    let name = NSFullUserName().isEmpty ? "GitX User" : NSFullUserName()
+    let name = NSFullUserName().isEmpty ? "GitN User" : NSFullUserName()
     let email = "\(NSUserName())@\(ProcessInfo.processInfo.hostName)"
     var sig: UnsafeMutablePointer<git_signature>?
     if git_signature_now(&sig, name, email) == 0 {
@@ -362,6 +362,133 @@ actor GitService {
             count += 1
         }
         return result
+    }
+
+    /// Streaming commit log that yields batches progressively (like gitx's PBGitRevList).
+    /// Opens a separate repo handle on a detached task for true parallelism.
+    /// The first batch is smaller for fast initial display; subsequent batches are larger.
+    func commitLogStream(firstBatch: Int = 500, batchSize: Int = 5000) -> AsyncStream<[CommitInfo]> {
+        let refMap = buildRefMap()
+        let path = repoPath
+        let (stream, continuation) = AsyncStream.makeStream(of: [CommitInfo].self)
+
+        Task.detached(priority: .userInitiated) {
+            Self._produceCommitBatches(
+                repoPath: path, refMap: refMap,
+                firstBatch: firstBatch, batchSize: batchSize,
+                continuation: continuation
+            )
+        }
+
+        return stream
+    }
+
+    private nonisolated static func _produceCommitBatches(
+        repoPath: String,
+        refMap: [String: [String]],
+        firstBatch: Int,
+        batchSize: Int,
+        continuation: AsyncStream<[CommitInfo]>.Continuation
+    ) {
+        var repo: OpaquePointer?
+        guard git_repository_open(&repo, repoPath) == 0, let repo else {
+            continuation.finish()
+            return
+        }
+        defer { git_repository_free(repo) }
+
+        var walker: OpaquePointer?
+        guard git_revwalk_new(&walker, repo) == 0, let walker else {
+            continuation.finish()
+            return
+        }
+        defer { git_revwalk_free(walker) }
+
+        git_revwalk_sorting(walker, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
+        git_revwalk_push_glob(walker, "refs/heads/*")
+        git_revwalk_push_glob(walker, "refs/remotes/*")
+
+        func oidStr(_ ptr: UnsafePointer<git_oid>) -> String {
+            var buf = [CChar](repeating: 0, count: 41)
+            git_oid_tostr(&buf, 41, ptr)
+            return String(cString: buf)
+        }
+        func shortOidStr(_ ptr: UnsafePointer<git_oid>) -> String {
+            var buf = [CChar](repeating: 0, count: 8)
+            git_oid_tostr(&buf, 8, ptr)
+            return String(cString: buf)
+        }
+        func fmtTime(_ time: git_time) -> String {
+            let date = Date(timeIntervalSince1970: TimeInterval(time.time))
+            let fmt = DateFormatter()
+            fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let totalMinutes = Int(time.offset)
+            fmt.timeZone = TimeZone(secondsFromGMT: totalMinutes * 60)
+            let sign = totalMinutes >= 0 ? "+" : "-"
+            let absMin = Swift.abs(totalMinutes)
+            return fmt.string(from: date) + " " + String(format: "%@%02d%02d", sign, absMin / 60, absMin % 60)
+        }
+
+        var batch: [CommitInfo] = []
+        var isFirstBatch = true
+        let currentLimit = firstBatch
+        batch.reserveCapacity(currentLimit)
+        var oid = git_oid()
+
+        while git_revwalk_next(&oid, walker) == 0 {
+            guard !Task.isCancelled else { break }
+
+            var commit: OpaquePointer?
+            guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else { continue }
+            defer { git_commit_free(commit) }
+
+            let hash = oidStr(&oid)
+            let shortHash = shortOidStr(&oid)
+
+            let parentCount = git_commit_parentcount(commit)
+            var parentHashes: [String] = []
+            for pi in 0..<parentCount {
+                if let pid = git_commit_parent_id(commit, pi) {
+                    parentHashes.append(oidStr(pid))
+                }
+            }
+
+            let authorName: String
+            let authorEmail: String
+            let date: String
+            if let sig = git_commit_author(commit) {
+                authorName = String(cString: sig.pointee.name)
+                authorEmail = String(cString: sig.pointee.email)
+                date = fmtTime(sig.pointee.when)
+            } else {
+                authorName = ""; authorEmail = ""; date = ""
+            }
+
+            let message = git_commit_message(commit).map(String.init(cString:))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let firstLine = message.components(separatedBy: .newlines).first ?? message
+
+            batch.append(CommitInfo(
+                hash: hash, shortHash: shortHash,
+                parentHashes: parentHashes,
+                authorName: authorName, authorEmail: authorEmail,
+                date: date, message: firstLine,
+                refs: refMap[hash] ?? []
+            ))
+
+            let limit = isFirstBatch ? firstBatch : batchSize
+            if batch.count >= limit {
+                continuation.yield(batch)
+                batch = []
+                batch.reserveCapacity(batchSize)
+                isFirstBatch = false
+            }
+        }
+
+        if !batch.isEmpty {
+            continuation.yield(batch)
+        }
+        continuation.finish()
     }
 
     private func buildRefMap() -> [String: [String]] {
@@ -891,10 +1018,92 @@ actor GitService {
         }
     }
 
+    func createBranchAt(name: String, commitHash: String) async throws {
+        try await runGit(["branch", name, commitHash])
+    }
+
+    func checkoutBranch(_ name: String) async throws {
+        try await runGit(["checkout", name])
+    }
+
+    func checkoutCommit(_ hash: String) async throws {
+        try await runGit(["checkout", hash])
+    }
+
+    func merge(_ branchOrHash: String) async throws {
+        try await runGit(["merge", branchOrHash])
+    }
+
+    func rebase(onto target: String) async throws {
+        try await runGit(["rebase", target])
+    }
+
+    func cherryPick(_ hash: String) async throws {
+        try await runGit(["cherry-pick", hash])
+    }
+
+    func resetToCommit(_ hash: String, mode: ResetMode) async throws {
+        try await runGit(["reset", mode.flag, hash])
+    }
+
+    func revertCommit(_ hash: String) async throws {
+        try await runGit(["revert", "--no-edit", hash])
+    }
+
+    func deleteBranch(_ name: String, force: Bool = false) async throws {
+        try await runGit(["branch", force ? "-D" : "-d", name])
+    }
+
+    func deleteRemoteBranch(remote: String, branch: String) async throws {
+        try await runGit(["push", remote, "--delete", branch])
+    }
+
+    func createTag(name: String, at hash: String, message: String? = nil) async throws {
+        if let message {
+            try await runGit(["tag", "-a", name, hash, "-m", message])
+        } else {
+            try await runGit(["tag", name, hash])
+        }
+    }
+
+    func setUpstream(remote: String, branch: String) async throws {
+        try await runGit(["branch", "--set-upstream-to=\(remote)/\(branch)"])
+    }
+
+    func editCommitMessage(_ hash: String, newMessage: String) async throws {
+        try await runGit(["rebase", "-i", "--autosquash", "\(hash)^"])
+    }
+
+    func amendCommitMessage(_ newMessage: String) async throws {
+        try await runGit(["commit", "--amend", "-m", newMessage])
+    }
+
+    func compareWithWorkingDirectory(_ hash: String) async throws -> String {
+        try await runGitOutput(["diff", hash])
+    }
+
+    enum ResetMode: String {
+        case soft, mixed, hard
+        var flag: String { "--\(rawValue)" }
+        var displayName: String { rawValue.capitalized }
+    }
+
     // MARK: - Remote Management
 
     func addRemote(name: String, url: String) async throws {
         try await runGit(["remote", "add", name, url])
+    }
+
+    func deleteRemote(name: String) async throws {
+        try await runGit(["remote", "remove", name])
+    }
+
+    func renameRemote(oldName: String, newName: String) async throws {
+        try await runGit(["remote", "rename", oldName, newName])
+    }
+
+    func setRemoteURL(name: String, url: String) async throws {
+        try await runGit(["remote", "set-url", name, url])
     }
 
     // MARK: - Stash (libgit2, following Xit's XTRepository+Commands.swift)
@@ -975,6 +1184,33 @@ actor GitService {
                     continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
                 } else {
                     continuation.resume()
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func runGitOutput(_ args: [String]) async throws -> String {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = args
+            proc.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+            let pipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = errPipe
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus != 0 {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
+                    continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
+                } else {
+                    let outData = pipe.fileHandleForReading.readDataToEndOfFile()
+                    continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
                 }
             } catch {
                 continuation.resume(throwing: error)

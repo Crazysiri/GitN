@@ -7,6 +7,11 @@ struct SidebarView: View {
     @State private var newRemoteName = ""
     @State private var newRemoteURL = ""
 
+    @State private var showEditRemote = false
+    @State private var editingRemote: RemoteInfo?
+    @State private var editRemoteName = ""
+    @State private var editRemoteURL = ""
+
     var body: some View {
         VStack(spacing: 0) {
             repoHeader
@@ -25,6 +30,9 @@ struct SidebarView: View {
         .background(Color(.controlBackgroundColor).opacity(0.5))
         .sheet(isPresented: $showAddRemote) {
             addRemoteSheet
+        }
+        .sheet(isPresented: $showEditRemote) {
+            editRemoteSheet
         }
     }
 
@@ -60,6 +68,43 @@ struct SidebarView: View {
                 .disabled(
                     newRemoteName.trimmingCharacters(in: .whitespaces).isEmpty ||
                     newRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+            }
+        }
+        .padding(20)
+    }
+
+    // MARK: - Edit Remote Sheet
+
+    private var editRemoteSheet: some View {
+        VStack(spacing: 12) {
+            Text("Edit Remote")
+                .font(.headline)
+            TextField("Remote name", text: $editRemoteName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+            TextField("Remote URL", text: $editRemoteURL)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+            HStack {
+                Button("Cancel") {
+                    showEditRemote = false
+                    editingRemote = nil
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    guard let original = editingRemote else { return }
+                    let name = editRemoteName.trimmingCharacters(in: .whitespaces)
+                    let url = editRemoteURL.trimmingCharacters(in: .whitespaces)
+                    showEditRemote = false
+                    editingRemote = nil
+                    guard !name.isEmpty, !url.isEmpty else { return }
+                    Task { await viewModel.performEditRemote(oldName: original.name, newName: name, newURL: url) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    editRemoteName.trimmingCharacters(in: .whitespaces).isEmpty ||
+                    editRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
                 )
             }
         }
@@ -104,6 +149,7 @@ struct SidebarView: View {
                     isCurrent: branch.isCurrent,
                     icon: "arrow.triangle.branch"
                 )
+                .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
             }
         }
     }
@@ -134,6 +180,22 @@ struct SidebarView: View {
                         .foregroundStyle(.primary)
                 }
                 .padding(.leading, 12)
+                .contextMenu {
+                    Button {
+                        editingRemote = remote
+                        editRemoteName = remote.name
+                        editRemoteURL = remote.url
+                        showEditRemote = true
+                    } label: {
+                        Label("Edit Remote…", systemImage: "pencil")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        Task { await viewModel.performDeleteRemote(name: remote.name) }
+                    } label: {
+                        Label("Delete Remote", systemImage: "trash")
+                    }
+                }
             }
         }
     }
