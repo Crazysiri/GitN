@@ -12,7 +12,7 @@ BUNDLE_DIR="${OUTPUT_DIR}/${APP_NAME}.app"
 ICON_SCRIPT="Scripts/generate_icon.swift"
 
 echo "=========================================="
-echo "  Building ${APP_NAME}.app"
+echo "  Building ${APP_NAME}.app ..."
 echo "=========================================="
 
 # ──────────────────────────────────────────────
