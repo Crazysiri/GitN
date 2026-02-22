@@ -508,6 +508,14 @@ final class RepoViewModel {
         await performRemoteOperation { try await $0.git.deleteBranch(name, force: force) }
     }
 
+    func performRenameBranch(oldName: String, newName: String) async {
+        await performRemoteOperation { try await $0.git.renameBranch(oldName: oldName, newName: newName) }
+    }
+
+    func performDeleteRemoteBranch(remote: String, branch: String) async {
+        await performRemoteOperation { try await $0.git.deleteRemoteBranch(remote: remote, branch: branch) }
+    }
+
     func performCreateTag(name: String, at hash: String) async {
         await performRemoteOperation { try await $0.git.createTag(name: name, at: hash) }
     }

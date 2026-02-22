@@ -12,6 +12,22 @@ struct SidebarView: View {
     @State private var editRemoteName = ""
     @State private var editRemoteURL = ""
 
+    @State private var showRenameBranch = false
+    @State private var renamingBranch = ""
+    @State private var renamedBranchName = ""
+
+    @State private var showCreateTagAtBranch = false
+    @State private var tagAtBranchHash = ""
+    @State private var tagAtBranchName = ""
+
+    @State private var showCreateBranchFrom = false
+    @State private var branchFromHash = ""
+    @State private var newBranchFromName = ""
+
+    @State private var showSetUpstream = false
+    @State private var upstreamRemote = "origin"
+    @State private var upstreamBranch = ""
+
     var body: some View {
         VStack(spacing: 0) {
             repoHeader
@@ -31,9 +47,11 @@ struct SidebarView: View {
         .sheet(isPresented: $showAddRemote) {
             addRemoteSheet
         }
-        .sheet(isPresented: $showEditRemote) {
-            editRemoteSheet
-        }
+        .sheet(isPresented: $showEditRemote) { editRemoteSheet }
+        .sheet(isPresented: $showRenameBranch) { renameBranchSheet }
+        .sheet(isPresented: $showCreateTagAtBranch) { createTagAtBranchSheet }
+        .sheet(isPresented: $showCreateBranchFrom) { createBranchFromSheet }
+        .sheet(isPresented: $showSetUpstream) { setUpstreamSheet }
     }
 
     // MARK: - Add Remote Sheet
@@ -68,6 +86,255 @@ struct SidebarView: View {
                 .disabled(
                     newRemoteName.trimmingCharacters(in: .whitespaces).isEmpty ||
                     newRemoteURL.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+            }
+        }
+        .padding(20)
+    }
+
+    // MARK: - Local Branch Context Menu
+
+    @ViewBuilder
+    private func localBranchContextMenu(_ branch: BranchInfo) -> some View {
+        let cur = viewModel.currentBranch
+
+        if !branch.isCurrent {
+            Button("Merge \(branch.name) into \(cur)") {
+                Task { await viewModel.performMerge(branch.name) }
+            }
+            Button("Rebase \(cur) onto \(branch.name)") {
+                Task { await viewModel.performRebase(onto: branch.name) }
+            }
+            Divider()
+            Button("Checkout \(branch.name)") {
+                Task { await viewModel.performCheckoutBranch(branch.name) }
+            }
+        }
+
+        if branch.isCurrent {
+            Button("Set Upstream") {
+                upstreamRemote = "origin"
+                upstreamBranch = branch.name
+                showSetUpstream = true
+            }
+            Divider()
+        }
+
+        Button("Create branch here") {
+            branchFromHash = branch.shortHash
+            newBranchFromName = ""
+            showCreateBranchFrom = true
+        }
+        if !branch.isCurrent {
+            Button("Cherry pick commit") {
+                Task { await viewModel.performCherryPick(branch.shortHash) }
+            }
+        }
+        Menu("Reset \(cur) to this commit") {
+            Button("Soft") { Task { await viewModel.performReset(branch.shortHash, mode: .soft) } }
+            Button("Mixed") { Task { await viewModel.performReset(branch.shortHash, mode: .mixed) } }
+            Button("Hard") { Task { await viewModel.performReset(branch.shortHash, mode: .hard) } }
+        }
+        Button("Revert commit") {
+            Task { await viewModel.performRevert(branch.shortHash) }
+        }
+
+        Divider()
+
+        Button("Rename \(branch.name)") {
+            renamingBranch = branch.name
+            renamedBranchName = branch.name
+            showRenameBranch = true
+        }
+        if !branch.isCurrent {
+            Button("Delete \(branch.name)", role: .destructive) {
+                Task { await viewModel.performDeleteBranch(branch.name) }
+            }
+        }
+
+        Divider()
+
+        Button("Copy branch name") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(branch.name, forType: .string)
+        }
+        Button("Copy commit SHA") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(branch.shortHash, forType: .string)
+        }
+
+        Divider()
+
+        Button("Create tag here") {
+            tagAtBranchHash = branch.shortHash
+            tagAtBranchName = ""
+            showCreateTagAtBranch = true
+        }
+    }
+
+    // MARK: - Remote Branch Context Menu
+
+    @ViewBuilder
+    private func remoteBranchContextMenu(_ branch: BranchInfo, remoteName: String) -> some View {
+        let cur = viewModel.currentBranch
+        let fullName = branch.name
+        let shortName = fullName.replacingOccurrences(of: "\(remoteName)/", with: "")
+
+        Button("Merge \(fullName) into \(cur)") {
+            Task { await viewModel.performMerge(fullName) }
+        }
+        Button("Rebase \(cur) onto \(fullName)") {
+            Task { await viewModel.performRebase(onto: fullName) }
+        }
+
+        Divider()
+
+        Button("Checkout \(fullName)") {
+            Task { await viewModel.performCheckoutBranch(fullName) }
+        }
+
+        Divider()
+
+        Button("Create branch here") {
+            branchFromHash = branch.shortHash
+            newBranchFromName = shortName
+            showCreateBranchFrom = true
+        }
+        if !branch.isCurrent {
+            Button("Cherry pick commit") {
+                Task { await viewModel.performCherryPick(branch.shortHash) }
+            }
+        }
+        Menu("Reset \(cur) to this commit") {
+            Button("Soft") { Task { await viewModel.performReset(branch.shortHash, mode: .soft) } }
+            Button("Mixed") { Task { await viewModel.performReset(branch.shortHash, mode: .mixed) } }
+            Button("Hard") { Task { await viewModel.performReset(branch.shortHash, mode: .hard) } }
+        }
+        Button("Revert commit") {
+            Task { await viewModel.performRevert(branch.shortHash) }
+        }
+
+        Divider()
+
+        Button("Delete \(fullName)", role: .destructive) {
+            Task { await viewModel.performDeleteRemoteBranch(remote: remoteName, branch: shortName) }
+        }
+
+        Divider()
+
+        Button("Copy branch name") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(fullName, forType: .string)
+        }
+        Button("Copy commit SHA") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(branch.shortHash, forType: .string)
+        }
+
+        Divider()
+
+        Button("Create tag here") {
+            tagAtBranchHash = branch.shortHash
+            tagAtBranchName = ""
+            showCreateTagAtBranch = true
+        }
+    }
+
+    // MARK: - Branch Sheets
+
+    private var renameBranchSheet: some View {
+        VStack(spacing: 12) {
+            Text("Rename Branch")
+                .font(.headline)
+            TextField("New name", text: $renamedBranchName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showRenameBranch = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Rename") {
+                    let newName = renamedBranchName.trimmingCharacters(in: .whitespaces)
+                    showRenameBranch = false
+                    guard !newName.isEmpty, newName != renamingBranch else { return }
+                    Task { await viewModel.performRenameBranch(oldName: renamingBranch, newName: newName) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(renamedBranchName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var createTagAtBranchSheet: some View {
+        VStack(spacing: 12) {
+            Text("Create Tag")
+                .font(.headline)
+            TextField("Tag name", text: $tagAtBranchName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showCreateTagAtBranch = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    let name = tagAtBranchName.trimmingCharacters(in: .whitespaces)
+                    showCreateTagAtBranch = false
+                    guard !name.isEmpty else { return }
+                    Task { await viewModel.performCreateTag(name: name, at: tagAtBranchHash) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(tagAtBranchName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var createBranchFromSheet: some View {
+        VStack(spacing: 12) {
+            Text("Create Branch")
+                .font(.headline)
+            TextField("Branch name", text: $newBranchFromName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showCreateBranchFrom = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    let name = newBranchFromName.trimmingCharacters(in: .whitespaces)
+                    showCreateBranchFrom = false
+                    guard !name.isEmpty else { return }
+                    Task { await viewModel.performCreateBranchAt(name: name, commitHash: branchFromHash) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(newBranchFromName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var setUpstreamSheet: some View {
+        VStack(spacing: 12) {
+            Text("Set Upstream")
+                .font(.headline)
+            TextField("Remote", text: $upstreamRemote)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            TextField("Branch", text: $upstreamBranch)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showSetUpstream = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Set") {
+                    let remote = upstreamRemote.trimmingCharacters(in: .whitespaces)
+                    let branch = upstreamBranch.trimmingCharacters(in: .whitespaces)
+                    showSetUpstream = false
+                    guard !remote.isEmpty, !branch.isEmpty else { return }
+                    Task { await viewModel.performSetUpstream(remote: remote, branch: branch) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(
+                    upstreamRemote.trimmingCharacters(in: .whitespaces).isEmpty ||
+                    upstreamBranch.trimmingCharacters(in: .whitespaces).isEmpty
                 )
             }
         }
@@ -150,6 +417,7 @@ struct SidebarView: View {
                     icon: "arrow.triangle.branch"
                 )
                 .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
+                .contextMenu { localBranchContextMenu(branch) }
             }
         }
     }
@@ -173,6 +441,7 @@ struct SidebarView: View {
                             .replacingOccurrences(of: "\(remote.name)/", with: "")
                         SidebarBranchRow(name: shortName, isCurrent: false, icon: "arrow.triangle.branch")
                             .padding(.leading, 8)
+                            .contextMenu { remoteBranchContextMenu(branch, remoteName: remote.name) }
                     }
                 } label: {
                     Label(remote.name, systemImage: "externaldrive.connected.to.line.below")

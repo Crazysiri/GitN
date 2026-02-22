@@ -1062,6 +1062,10 @@ actor GitService {
         try await runGit(["branch", force ? "-D" : "-d", name])
     }
 
+    func renameBranch(oldName: String, newName: String) async throws {
+        try await runGit(["branch", "-m", oldName, newName])
+    }
+
     func deleteRemoteBranch(remote: String, branch: String) async throws {
         try await runGit(["push", remote, "--delete", branch])
     }
