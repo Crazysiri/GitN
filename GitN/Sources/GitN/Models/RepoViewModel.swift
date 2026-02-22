@@ -53,6 +53,11 @@ final class RepoViewModel {
     var pushUpstreamRemote = "origin"
     var pushUpstreamBranch = ""
 
+    // MARK: - SSH Host Key Prompt
+    var showHostKeyPrompt = false
+    var hostKeyHost = ""
+    private var pendingOperationAfterHostKey: (() async -> Void)?
+
     // MARK: - Toast
     var toastMessage: ToastMessage?
 
@@ -633,16 +638,59 @@ final class RepoViewModel {
         }
     }
 
-    private func performRemoteOperation(_ op: (RepoViewModel) async throws -> Void) async {
+    private func performRemoteOperation(_ op: @escaping (RepoViewModel) async throws -> Void) async {
         operationInProgress = true
         operationError = nil
         do {
             try await op(self)
             await loadAll()
         } catch {
-            operationError = error.localizedDescription
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performRemoteOperation(op)
+                }
+                showHostKeyPrompt = true
+            } else {
+                operationError = msg
+            }
         }
         operationInProgress = false
+    }
+
+    private func extractHostFromError(_ msg: String) -> String {
+        if let range = msg.range(of: "'"),
+           let endRange = msg[range.upperBound...].range(of: "'") {
+            return String(msg[range.upperBound..<endRange.lowerBound])
+        }
+        if msg.lowercased().contains("github.com") { return "github.com" }
+        if msg.lowercased().contains("gitlab.com") { return "gitlab.com" }
+        if msg.lowercased().contains("bitbucket.org") { return "bitbucket.org" }
+        return "unknown host"
+    }
+
+    func acceptHostKey() async {
+        showHostKeyPrompt = false
+        let host = hostKeyHost
+        guard !host.isEmpty, host != "unknown host" else { return }
+        do {
+            try await git.addHostToKnownHosts(host: host)
+            if let op = pendingOperationAfterHostKey {
+                pendingOperationAfterHostKey = nil
+                await op()
+            }
+        } catch {
+            showToast(title: "Failed to add host key", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func rejectHostKey() {
+        showHostKeyPrompt = false
+        hostKeyHost = ""
+        pendingOperationAfterHostKey = nil
     }
 
     // MARK: - Rebase Conflict Management

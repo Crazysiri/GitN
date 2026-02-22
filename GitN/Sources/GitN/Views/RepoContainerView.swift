@@ -129,6 +129,11 @@ struct RepoContainerView: View {
             repoToolbar
             Divider()
 
+            if viewModel.showHostKeyPrompt {
+                hostKeyBanner
+                Divider()
+            }
+
             if viewModel.showPushUpstreamPrompt {
                 pushUpstreamBanner
                 Divider()
@@ -259,6 +264,34 @@ struct RepoContainerView: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .foregroundStyle(disabled ? .tertiary : .secondary)
+    }
+
+    // MARK: - Host Key Banner
+
+    private var hostKeyBanner: some View {
+        HStack(spacing: 8) {
+            Text("The authenticity of host '\(viewModel.hostKeyHost)' can't be established. Answering yes will permanently add '\(viewModel.hostKeyHost)' to the list of known hosts. Are you sure you want to continue?")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+
+            Spacer()
+
+            Button("Yes") {
+                Task { await viewModel.acceptHostKey() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+
+            Button("No") {
+                viewModel.rejectHostKey()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(.controlBackgroundColor).opacity(0.7))
     }
 
     // MARK: - Push Upstream Banner

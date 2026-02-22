@@ -1527,6 +1527,42 @@ actor GitService {
         try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - SSH Host Key
+
+    func addHostToKnownHosts(host: String) async throws {
+        let sshDir = (NSHomeDirectory() as NSString).appendingPathComponent(".ssh")
+        let knownHostsPath = (sshDir as NSString).appendingPathComponent("known_hosts")
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: sshDir) {
+            try fm.createDirectory(atPath: sshDir, withIntermediateDirectories: true)
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keyscan")
+        proc.arguments = ["-H", host]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+
+        try proc.run()
+        proc.waitUntilExit()
+
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        guard !data.isEmpty else {
+            throw GitError.operationFailed("ssh-keyscan returned no keys for \(host)")
+        }
+
+        if let fh = FileHandle(forWritingAtPath: knownHostsPath) {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            fh.closeFile()
+        } else {
+            fm.createFile(atPath: knownHostsPath, contents: data)
+        }
+    }
+
     // MARK: - HEAD Commit Message (for amend)
 
     func headCommitMessage() throws -> String {
