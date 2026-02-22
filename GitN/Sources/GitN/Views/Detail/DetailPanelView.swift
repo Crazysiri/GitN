@@ -5,7 +5,13 @@ struct DetailPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let commit = viewModel.selectedCommit {
+            if viewModel.isCompareMode, let commit = viewModel.selectedCommit {
+                compareHeader(commit)
+                Divider()
+                compareFileList
+                Divider()
+                diffContentView
+            } else if let commit = viewModel.selectedCommit {
                 if !commit.isUncommitted {
                     commitInfoHeader(commit)
                     Divider()
@@ -64,6 +70,75 @@ struct DetailPanelView: View {
             }
         }
         .padding(10)
+    }
+
+    // MARK: - Compare mode
+
+    private func compareHeader(_ commit: CommitInfo) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "arrow.left.arrow.right")
+                    .foregroundStyle(.purple)
+                Text("Comparing commit against working directory")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Button("Done") {
+                    viewModel.exitCompareMode()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(commit.shortHash)
+                        .font(.system(size: 10, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.purple.opacity(0.15))
+                        )
+                    Text(commit.message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+                Text("Working Directory")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.orange.opacity(0.15))
+                    )
+            }
+
+            Text("\(viewModel.diffFiles.count) file(s) changed")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+    }
+
+    private var compareFileList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(viewModel.diffFiles) { file in
+                    DiffFileRow(
+                        file: file,
+                        isSelected: viewModel.selectedDiffFile?.path == file.path
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Task { await viewModel.selectCompareFile(file) }
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: 200)
     }
 
     // MARK: - File list

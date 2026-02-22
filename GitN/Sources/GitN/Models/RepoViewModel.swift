@@ -187,9 +187,11 @@ final class RepoViewModel {
     }
 
     func selectCommit(_ commit: CommitInfo) async {
+        if isCompareMode { exitCompareMode() }
         selectedCommit = commit
         selectedDiffFile = nil
         fileDiffContent = ""
+        parsedDiff = nil
         do {
             if commit.isUncommitted {
                 diffFiles = try await git.uncommittedDiffFiles()
@@ -528,7 +530,47 @@ final class RepoViewModel {
 
     // MARK: - Scroll to commit
 
+    var isCompareMode = false
+    var compareBaseHash: String?
+
     var scrollToCommitHash: String?
+
+    func performCompareWithWorkingDirectory(_ commit: CommitInfo) async {
+        isCompareMode = true
+        compareBaseHash = commit.hash
+        selectedCommit = commit
+        selectedDiffFile = nil
+        fileDiffContent = ""
+        parsedDiff = nil
+        do {
+            diffFiles = try await git.compareFileList(commit.hash)
+        } catch {
+            diffFiles = []
+            operationError = "Compare failed: \(error.localizedDescription)"
+        }
+    }
+
+    func selectCompareFile(_ file: DiffFile) async {
+        guard let baseHash = compareBaseHash else { return }
+        selectedDiffFile = file
+        currentDiffContext = .committed
+        do {
+            fileDiffContent = try await git.compareFileDiff(baseHash, path: file.path)
+            parsedDiff = DiffParserEngine.parse(fileDiffContent)
+        } catch {
+            fileDiffContent = "Failed to load diff"
+            parsedDiff = nil
+        }
+    }
+
+    func exitCompareMode() {
+        isCompareMode = false
+        compareBaseHash = nil
+        diffFiles = []
+        fileDiffContent = ""
+        parsedDiff = nil
+        selectedDiffFile = nil
+    }
 
     func scrollToCommitForBranch(_ branch: BranchInfo) {
         if let commit = commits.first(where: { $0.shortHash == branch.shortHash || $0.hash.hasPrefix(branch.shortHash) }) {

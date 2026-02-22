@@ -1090,6 +1090,22 @@ actor GitService {
         try await runGitOutput(["diff", hash])
     }
 
+    func compareFileList(_ hash: String) async throws -> [DiffFile] {
+        let raw = try await runGitOutput(["diff", "--numstat", hash])
+        return raw.split(separator: "\n").compactMap { line in
+            let parts = line.split(separator: "\t")
+            guard parts.count >= 3 else { return nil }
+            let adds = Int(parts[0]) ?? 0
+            let dels = Int(parts[1]) ?? 0
+            let path = String(parts[2])
+            return DiffFile(additions: adds, deletions: dels, path: path)
+        }
+    }
+
+    func compareFileDiff(_ hash: String, path: String) async throws -> String {
+        try await runGitOutput(["diff", hash, "--", path])
+    }
+
     enum ResetMode: String {
         case soft, mixed, hard
         var flag: String { "--\(rawValue)" }

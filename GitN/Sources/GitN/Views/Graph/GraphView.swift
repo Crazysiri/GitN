@@ -228,7 +228,7 @@ struct GraphView: View {
 
         // Compare
         Button("Compare commit against working directory") {
-            Task { await viewModel.selectCommit(commit) }
+            Task { await viewModel.performCompareWithWorkingDirectory(commit) }
         }
 
         // Create tag
