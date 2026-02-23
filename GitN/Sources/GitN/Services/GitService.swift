@@ -1036,27 +1036,140 @@ actor GitService {
         try await runGit(args)
     }
 
-    // MARK: - Branch Creation
+    // MARK: - Branch Operations (libgit2, following Xit's approach)
 
-    func createBranch(name: String, checkout: Bool = true) async throws {
+    /// Helper: get libgit2 error message for better diagnostics
+    private func libgit2ErrorMsg(_ prefix: String, code: Int32) -> String {
+        if let err = git_error_last(), let msg = err.pointee.message {
+            return "\(prefix): \(String(cString: msg))"
+        }
+        return "\(prefix) (\(code))"
+    }
+
+    func createBranch(name: String, checkout: Bool = true) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        // Get HEAD commit
+        var head: OpaquePointer?
+        guard git_repository_head(&head, repo) == 0, let head else {
+            throw GitError.operationFailed("Cannot determine HEAD")
+        }
+        defer { git_reference_free(head) }
+
+        guard let oid = git_reference_target(head) else {
+            throw GitError.operationFailed("Cannot get HEAD target")
+        }
+
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, oid) == 0, let commit else {
+            throw GitError.operationFailed("Cannot find HEAD commit")
+        }
+        defer { git_commit_free(commit) }
+
+        var branchRef: OpaquePointer?
+        let rc = git_branch_create(&branchRef, repo, name, commit, 0)
+        if let branchRef { git_reference_free(branchRef) }
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Branch creation failed", code: rc))
+        }
+
         if checkout {
-            try await runGit(["checkout", "-b", name])
-        } else {
-            try await runGit(["branch", name])
+            try checkoutBranch(name)
         }
     }
 
-    func createBranchAt(name: String, commitHash: String) async throws {
-        try await runGit(["branch", name, commitHash])
+    func createBranchAt(name: String, commitHash: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, commitHash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_commit_free(commit) }
+
+        var branchRef: OpaquePointer?
+        let rc = git_branch_create(&branchRef, repo, name, commit, 0)
+        if let branchRef { git_reference_free(branchRef) }
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Branch creation failed", code: rc))
+        }
     }
 
-    func checkoutBranch(_ name: String) async throws {
-        try await runGit(["checkout", name])
+    func checkoutBranch(_ name: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        let refName = "refs/heads/\(name)"
+
+        // Look up the branch reference
+        var ref: OpaquePointer?
+        guard git_reference_lookup(&ref, repo, refName) == 0, let ref else {
+            throw GitError.operationFailed("Branch '\(name)' not found")
+        }
+        defer { git_reference_free(ref) }
+
+        guard let targetOid = git_reference_target(ref) else {
+            throw GitError.operationFailed("Cannot get branch target")
+        }
+
+        // Look up target object for checkout
+        var target: OpaquePointer?
+        guard git_object_lookup(&target, repo, targetOid, GIT_OBJECT_ANY) == 0, let target else {
+            throw GitError.operationFailed("Cannot find branch target object")
+        }
+        defer { git_object_free(target) }
+
+        // Checkout tree (GIT_CHECKOUT_SAFE like Xit)
+        var opts = git_checkout_options()
+        git_checkout_init_options(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+        opts.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+
+        let rc = git_checkout_tree(repo, target, &opts)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Checkout failed", code: rc))
+        }
+
+        // Move HEAD to branch
+        let headRc = git_repository_set_head(repo, refName)
+        guard headRc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
+        }
     }
 
-    func checkoutCommit(_ hash: String) async throws {
-        try await runGit(["checkout", hash])
+    func checkoutCommit(_ hash: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+
+        var target: OpaquePointer?
+        guard git_object_lookup(&target, repo, &oid, GIT_OBJECT_ANY) == 0, let target else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_object_free(target) }
+
+        var opts = git_checkout_options()
+        git_checkout_init_options(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+        opts.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+
+        let rc = git_checkout_tree(repo, target, &opts)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Checkout failed", code: rc))
+        }
+
+        let headRc = git_repository_set_head_detached(repo, &oid)
+        guard headRc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to detach HEAD", code: headRc))
+        }
     }
+
+    // MARK: - Operations kept as CLI (following Xit: merge/rebase/cherry-pick/revert need CLI)
 
     func merge(_ branchOrHash: String) async throws {
         try await runGit(["merge", branchOrHash])
@@ -1070,38 +1183,151 @@ actor GitService {
         try await runGit(["cherry-pick", hash])
     }
 
-    func resetToCommit(_ hash: String, mode: ResetMode) async throws {
-        try await runGit(["reset", mode.flag, hash])
+    func resetToCommit(_ hash: String, mode: ResetMode) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+
+        var obj: OpaquePointer?
+        guard git_object_lookup(&obj, repo, &oid, GIT_OBJECT_COMMIT) == 0, let obj else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_object_free(obj) }
+
+        let gitReset: git_reset_t
+        switch mode {
+        case .soft:  gitReset = GIT_RESET_SOFT
+        case .mixed: gitReset = GIT_RESET_MIXED
+        case .hard:  gitReset = GIT_RESET_HARD
+        }
+
+        let rc = git_reset(repo, obj, gitReset, nil)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Reset failed", code: rc))
+        }
     }
 
     func revertCommit(_ hash: String) async throws {
         try await runGit(["revert", "--no-edit", hash])
     }
 
-    func deleteBranch(_ name: String, force: Bool = false) async throws {
-        try await runGit(["branch", force ? "-D" : "-d", name])
+    func deleteBranch(_ name: String, force: Bool = false) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var branch: OpaquePointer?
+        guard git_branch_lookup(&branch, repo, name, GIT_BRANCH_LOCAL) == 0, let branch else {
+            throw GitError.operationFailed("Branch '\(name)' not found")
+        }
+        defer { git_reference_free(branch) }
+
+        // If not force, check if branch is fully merged (like 'git branch -d')
+        if !force {
+            guard let branchOid = git_reference_target(branch) else {
+                throw GitError.operationFailed("Cannot get branch target")
+            }
+
+            var headRef: OpaquePointer?
+            guard git_repository_head(&headRef, repo) == 0, let headRef else {
+                throw GitError.operationFailed("Cannot determine HEAD")
+            }
+            defer { git_reference_free(headRef) }
+
+            guard let headOid = git_reference_target(headRef) else {
+                throw GitError.operationFailed("Cannot get HEAD target")
+            }
+
+            var ahead: Int = 0
+            var behind: Int = 0
+            let abRc = git_graph_ahead_behind(&ahead, &behind, repo, branchOid, headOid)
+            if abRc == 0 && ahead > 0 {
+                throw GitError.operationFailed(
+                    "error: The branch '\(name)' is not fully merged.\nIf you are sure you want to delete it, run 'git branch -D \(name)'."
+                )
+            }
+        }
+
+        let rc = git_branch_delete(branch)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Branch deletion failed", code: rc))
+        }
     }
 
-    func renameBranch(oldName: String, newName: String) async throws {
-        try await runGit(["branch", "-m", oldName, newName])
+    func renameBranch(oldName: String, newName: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var branch: OpaquePointer?
+        guard git_branch_lookup(&branch, repo, oldName, GIT_BRANCH_LOCAL) == 0, let branch else {
+            throw GitError.operationFailed("Branch '\(oldName)' not found")
+        }
+        defer { git_reference_free(branch) }
+
+        var newRef: OpaquePointer?
+        let rc = git_branch_move(&newRef, branch, newName, 0)
+        if let newRef { git_reference_free(newRef) }
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Branch rename failed", code: rc))
+        }
     }
 
+    // deleteRemoteBranch needs push (auth), keep CLI (Xit same)
     func deleteRemoteBranch(remote: String, branch: String) async throws {
         try await runGit(["push", remote, "--delete", branch])
     }
 
-    func createTag(name: String, at hash: String, message: String? = nil) async throws {
+    func createTag(name: String, at hash: String, message: String? = nil) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_commit_free(commit) }
+
+        var tagOid = git_oid()
         if let message {
-            try await runGit(["tag", "-a", name, hash, "-m", message])
+            // Annotated tag (like Xit's createTag)
+            guard let sig = makeDefaultSignature(repo: repo) else {
+                throw GitError.operationFailed("No git user configured")
+            }
+            defer { git_signature_free(sig) }
+
+            let rc = git_tag_create(&tagOid, repo, name, commit, sig, message, 0)
+            guard rc == 0 else {
+                throw GitError.operationFailed(libgit2ErrorMsg("Tag creation failed", code: rc))
+            }
         } else {
-            try await runGit(["tag", name, hash])
+            // Lightweight tag (like Xit's createLightweightTag)
+            let rc = git_tag_create_lightweight(&tagOid, repo, name, commit, 0)
+            guard rc == 0 else {
+                throw GitError.operationFailed(libgit2ErrorMsg("Tag creation failed", code: rc))
+            }
         }
     }
 
-    func setUpstream(remote: String, branch: String) async throws {
-        try await runGit(["branch", "--set-upstream-to=\(remote)/\(branch)"])
+    func setUpstream(remote: String, branch: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var head: OpaquePointer?
+        guard git_repository_head(&head, repo) == 0, let head else {
+            throw GitError.operationFailed("Cannot determine HEAD")
+        }
+        defer { git_reference_free(head) }
+
+        let rc = git_branch_set_upstream(head, "\(remote)/\(branch)")
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to set upstream", code: rc))
+        }
     }
 
+    // CLI-only operations (Xit also uses CLI for these)
     func editCommitMessage(_ hash: String, newMessage: String) async throws {
         try await runGit(["rebase", "-i", "--autosquash", "\(hash)^"])
     }
@@ -1110,6 +1336,7 @@ actor GitService {
         try await runGit(["commit", "--amend", "-m", newMessage])
     }
 
+    // Diff/compare operations kept as CLI (--follow, --numstat not in libgit2)
     func compareWithWorkingDirectory(_ hash: String) async throws -> String {
         try await runGitOutput(["diff", hash])
     }
@@ -1130,7 +1357,7 @@ actor GitService {
         try await runGitOutput(["diff", hash, "--", path])
     }
 
-    // MARK: - File History (git log --follow)
+    // MARK: - File History (git log --follow, kept as CLI - libgit2 has no --follow)
 
     func fileLog(path: String, maxCount: Int = 200) async throws -> [CommitInfo] {
         let raw = try await runGitOutput([
@@ -1169,22 +1396,46 @@ actor GitService {
         var displayName: String { rawValue.capitalized }
     }
 
-    // MARK: - Remote Management
+    // MARK: - Remote Management (libgit2, following Xit's approach)
 
-    func addRemote(name: String, url: String) async throws {
-        try await runGit(["remote", "add", name, url])
+    func addRemote(name: String, url: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var remote: OpaquePointer?
+        let rc = git_remote_create(&remote, repo, name, url)
+        if let remote { git_remote_free(remote) }
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to add remote", code: rc))
+        }
     }
 
-    func deleteRemote(name: String) async throws {
-        try await runGit(["remote", "remove", name])
+    func deleteRemote(name: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        let rc = git_remote_delete(repo, name)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to delete remote", code: rc))
+        }
     }
 
-    func renameRemote(oldName: String, newName: String) async throws {
-        try await runGit(["remote", "rename", oldName, newName])
+    func renameRemote(oldName: String, newName: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var problems = git_strarray()
+        let rc = git_remote_rename(&problems, repo, oldName, newName)
+        git_strarray_free(&problems)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to rename remote", code: rc))
+        }
     }
 
-    func setRemoteURL(name: String, url: String) async throws {
-        try await runGit(["remote", "set-url", name, url])
+    func setRemoteURL(name: String, url: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        let rc = git_remote_set_url(repo, name, url)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to set remote URL", code: rc))
+        }
     }
 
     // MARK: - Stash (libgit2, following Xit's XTRepository+Commands.swift)
@@ -1354,8 +1605,36 @@ actor GitService {
 
     // MARK: - File Actions
 
-    func discardFileChanges(path: String) async throws {
-        try await runGit(["checkout", "--", path])
+    /// Discard working directory changes for a file (libgit2, following Xit's revert(file:))
+    func discardFileChanges(path: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        // Check if file is untracked - just delete it
+        var statusFlags: UInt32 = 0
+        if git_status_file(&statusFlags, repo, path) == 0 {
+            if (statusFlags & GIT_STATUS_WT_NEW.rawValue) != 0 {
+                let fullPath = (repoPath as NSString).appendingPathComponent(path)
+                try FileManager.default.removeItem(atPath: fullPath)
+                return
+            }
+        }
+
+        // Checkout from index (equivalent to `git checkout -- path`)
+        var opts = git_checkout_options()
+        git_checkout_init_options(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue | GIT_CHECKOUT_RECREATE_MISSING.rawValue
+
+        let pathCopy = strdup(path)!
+        defer { free(pathCopy) }
+        var pathOpt: UnsafeMutablePointer<CChar>? = pathCopy
+
+        let rc = withUnsafeMutablePointer(to: &pathOpt) { stringsPtr in
+            opts.paths = git_strarray(strings: stringsPtr, count: 1)
+            return git_checkout_tree(repo, nil, &opts)
+        }
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Discard changes failed", code: rc))
+        }
     }
 
     func addToGitignore(pattern: String) async throws {

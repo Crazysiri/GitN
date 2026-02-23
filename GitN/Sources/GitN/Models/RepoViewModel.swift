@@ -40,7 +40,10 @@ final class RepoViewModel {
 
     var showTerminal = true
     var isLoading = false
-    var collapsedSections: Set<String> = []
+    var collapsedSections: Set<String> = {
+        let saved = UserDefaults.standard.stringArray(forKey: "SidebarCollapsedSections") ?? []
+        return Set(saved)
+    }()
 
     // MARK: - File Context Menu Actions
 
@@ -188,6 +191,10 @@ final class RepoViewModel {
     var showPushUpstreamPrompt = false
     var pushUpstreamRemote = "origin"
     var pushUpstreamBranch = ""
+
+    // MARK: - Force Delete Branch Prompt
+    var showForceDeleteBranchPrompt = false
+    var forceDeleteBranchName = ""
 
     // MARK: - SSH Host Key Prompt
     var showHostKeyPrompt = false
@@ -695,7 +702,33 @@ final class RepoViewModel {
     }
 
     func performDeleteBranch(_ name: String, force: Bool = false) async {
-        await performRemoteOperation { try await $0.git.deleteBranch(name, force: force) }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.deleteBranch(name, force: force)
+            await loadAll()
+        } catch {
+            let msg = error.localizedDescription
+            if !force && (msg.lowercased().contains("not fully merged") || msg.lowercased().contains("is not fully merged")) {
+                forceDeleteBranchName = name
+                showForceDeleteBranchPrompt = true
+            } else {
+                operationError = msg
+            }
+        }
+        operationInProgress = false
+    }
+
+    func confirmForceDeleteBranch() async {
+        showForceDeleteBranchPrompt = false
+        let name = forceDeleteBranchName
+        forceDeleteBranchName = ""
+        await performDeleteBranch(name, force: true)
+    }
+
+    func cancelForceDeleteBranch() {
+        showForceDeleteBranchPrompt = false
+        forceDeleteBranchName = ""
     }
 
     func performRenameBranch(oldName: String, newName: String) async {
@@ -872,6 +905,7 @@ final class RepoViewModel {
         do {
             try await git.markConflictResolved(path: file.path)
             await refreshRebaseState()
+            await refreshStatusAndGraph()
         } catch {
             showToast(title: "Mark Resolved Failed", detail: error.localizedDescription, style: .error)
         }
@@ -881,6 +915,7 @@ final class RepoViewModel {
         do {
             try await git.markAllConflictsResolved()
             await refreshRebaseState()
+            await refreshStatusAndGraph()
         } catch {
             showToast(title: "Mark All Resolved Failed", detail: error.localizedDescription, style: .error)
         }
@@ -1077,6 +1112,7 @@ final class RepoViewModel {
             conflictOutputLines = []
             regionChoices = [:]
             await refreshRebaseState()
+            await refreshStatusAndGraph()
         } catch {
             showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
         }
@@ -1098,6 +1134,7 @@ final class RepoViewModel {
         } else {
             collapsedSections.insert(section)
         }
+        UserDefaults.standard.set(Array(collapsedSections), forKey: "SidebarCollapsedSections")
     }
 
     func isSectionCollapsed(_ section: String) -> Bool {

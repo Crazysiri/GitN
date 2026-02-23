@@ -73,6 +73,22 @@ struct RepoContainerView: View {
             FileHistoryView(viewModel: viewModel)
                 .frame(minWidth: 800, minHeight: 550)
         }
+        .alert(
+            "Branch Not Fully Merged",
+            isPresented: Binding(
+                get: { viewModel.showForceDeleteBranchPrompt },
+                set: { if !$0 { viewModel.cancelForceDeleteBranch() } }
+            )
+        ) {
+            Button("Force Delete", role: .destructive) {
+                Task { await viewModel.confirmForceDeleteBranch() }
+            }
+            Button("Cancel", role: .cancel) {
+                viewModel.cancelForceDeleteBranch()
+            }
+        } message: {
+            Text("Branch '\(viewModel.forceDeleteBranchName)' is not fully merged. Are you sure you want to force delete it? This may cause you to lose commits.")
+        }
     }
 
     private func toastView(_ toast: ToastMessage) -> some View {
