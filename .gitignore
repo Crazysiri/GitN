@@ -1,4 +1,5 @@
 refs/
 .build/
+*.app
 UserInterfaceState.xcuserstate
 .swiftpm/

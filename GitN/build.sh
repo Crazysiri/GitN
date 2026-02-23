@@ -19,7 +19,7 @@ echo "=========================================="
 # Step 1: Generate app icon
 # ──────────────────────────────────────────────
 echo ""
-echo "[1/4] Generating app icon..."
+echo "[1/3] Generating app icon..."
 
 ICONSET_DIR="${OUTPUT_DIR}/${APP_NAME}.iconset"
 ICNS_FILE="${OUTPUT_DIR}/AppIcon.icns"
@@ -53,7 +53,7 @@ fi
 # Step 2: Build Swift package (release)
 # ──────────────────────────────────────────────
 echo ""
-echo "[2/4] Building Swift package (${BUILD_CONFIG})..."
+echo "[2/3] Building Swift package (${BUILD_CONFIG})..."
 
 swift build -c "$BUILD_CONFIG" 2>&1
 
@@ -65,10 +65,10 @@ fi
 echo "       Binary built: ${BINARY}"
 
 # ──────────────────────────────────────────────
-# Step 3: Create .app bundle
+# Step 3: Create .app bundle & sign
 # ──────────────────────────────────────────────
 echo ""
-echo "[3/4] Creating app bundle..."
+echo "[3/3] Creating app bundle..."
 
 rm -rf "$BUNDLE_DIR"
 mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
@@ -117,20 +117,8 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-echo "       Bundle created: ${BUNDLE_DIR}"
-
-# ──────────────────────────────────────────────
-# Step 4: Ad-hoc code sign
-# ──────────────────────────────────────────────
-echo ""
-echo "[4/4] Code signing (ad-hoc)..."
-
 codesign --force --deep --sign - "$BUNDLE_DIR" 2>&1
-echo "       Signed."
 
-# ──────────────────────────────────────────────
-# Done
-# ──────────────────────────────────────────────
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
 echo ""
 echo "=========================================="
