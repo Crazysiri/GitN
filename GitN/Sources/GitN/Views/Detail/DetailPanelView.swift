@@ -137,6 +137,7 @@ struct DetailPanelView: View {
                     .onTapGesture {
                         Task { await viewModel.selectCompareFile(file) }
                     }
+                    .contextMenu { commitFileContextMenu(file) }
                 }
             }
         }
@@ -166,10 +167,47 @@ struct DetailPanelView: View {
                     .onTapGesture {
                         Task { await viewModel.selectDiffFile(file) }
                     }
+                    .contextMenu { commitFileContextMenu(file) }
                 }
             }
         }
         .frame(maxHeight: 200)
+    }
+
+    // MARK: - Commit File Context Menu
+
+    @ViewBuilder
+    private func commitFileContextMenu(_ file: DiffFile) -> some View {
+        Button("File History") {
+            Task { await viewModel.openFileHistory(path: file.path) }
+        }
+
+        Divider()
+
+        Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
+
+        Button("Copy file path") { viewModel.copyFilePaths([file.path]) }
+
+        if let commit = viewModel.selectedCommit {
+            Button("Copy commit diff") {
+                Task {
+                    do {
+                        let diff = try await viewModel.getFileDiff(hash: commit.hash, path: file.path)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(diff, forType: .string)
+                        viewModel.showToast(title: "Diff copied", detail: file.path, style: .success)
+                    } catch {
+                        viewModel.showToast(title: "Failed to copy diff", detail: error.localizedDescription, style: .error)
+                    }
+                }
+            }
+        }
+
+        Divider()
+
+        Button("Open in Default Editor") {
+            viewModel.openInEditor(path: file.path)
+        }
     }
 
     // MARK: - Staged / Unstaged split list
@@ -268,7 +306,9 @@ struct DetailPanelView: View {
 
         Divider()
 
-        Button("File History") {}
+        Button("File History") {
+            Task { await viewModel.openFileHistory(path: file.path) }
+        }
 
         Divider()
 
@@ -278,6 +318,10 @@ struct DetailPanelView: View {
 
         Button("Create patch from file changes") {
             Task { await viewModel.createPatch(paths: paths) }
+        }
+
+        Button("Open in Default Editor") {
+            viewModel.openInEditor(path: file.path)
         }
 
         Divider()
@@ -320,7 +364,9 @@ struct DetailPanelView: View {
 
         Divider()
 
-        Button("File History") {}
+        Button("File History") {
+            Task { await viewModel.openFileHistory(path: file.path) }
+        }
 
         Divider()
 
@@ -330,6 +376,10 @@ struct DetailPanelView: View {
 
         Button("Create patch from file changes") {
             Task { await viewModel.createPatch(paths: paths) }
+        }
+
+        Button("Open in Default Editor") {
+            viewModel.openInEditor(path: file.path)
         }
 
         Divider()

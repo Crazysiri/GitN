@@ -77,6 +77,16 @@ final class RepoViewModel {
         NSWorkspace.shared.selectFile(fullPath, inFileViewerRootedAtPath: "")
     }
 
+    func openInEditor(path: String) {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        let url = URL(fileURLWithPath: fullPath)
+        NSWorkspace.shared.open(url)
+    }
+
+    func getFileDiff(hash: String, path: String) async throws -> String {
+        try await git.fileDiff(hash: hash, path: path)
+    }
+
     func copyFilePaths(_ paths: [String]) {
         let text = paths.joined(separator: "\n")
         NSPasteboard.general.clearContents()
@@ -120,6 +130,49 @@ final class RepoViewModel {
         } else {
             selectedFilePaths = [path]
         }
+    }
+
+    // MARK: - File History
+    var showFileHistory = false
+    var fileHistoryPath: String = ""
+    var fileHistoryCommits: [CommitInfo] = []
+    var fileHistorySelectedCommit: CommitInfo?
+    var fileHistoryDiff: String = ""
+    var fileHistoryParsedDiff: ParsedDiff?
+
+    func openFileHistory(path: String) async {
+        fileHistoryPath = path
+        fileHistoryCommits = []
+        fileHistorySelectedCommit = nil
+        fileHistoryDiff = ""
+        fileHistoryParsedDiff = nil
+        showFileHistory = true
+        do {
+            fileHistoryCommits = try await git.fileLog(path: path)
+        } catch {
+            showToast(title: "Failed to load file history", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func selectFileHistoryCommit(_ commit: CommitInfo) async {
+        fileHistorySelectedCommit = commit
+        do {
+            let diff = try await git.fileLogDiff(hash: commit.hash, path: fileHistoryPath)
+            fileHistoryDiff = diff
+            fileHistoryParsedDiff = DiffParserEngine.parse(diff)
+        } catch {
+            fileHistoryDiff = ""
+            fileHistoryParsedDiff = nil
+        }
+    }
+
+    func closeFileHistory() {
+        showFileHistory = false
+        fileHistoryPath = ""
+        fileHistoryCommits = []
+        fileHistorySelectedCommit = nil
+        fileHistoryDiff = ""
+        fileHistoryParsedDiff = nil
     }
 
     // MARK: - Rebase Conflict State

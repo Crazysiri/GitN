@@ -1130,6 +1130,39 @@ actor GitService {
         try await runGitOutput(["diff", hash, "--", path])
     }
 
+    // MARK: - File History (git log --follow)
+
+    func fileLog(path: String, maxCount: Int = 200) async throws -> [CommitInfo] {
+        let raw = try await runGitOutput([
+            "log", "--follow", "--format=%H%n%h%n%P%n%an%n%ae%n%ai%n%s", "-n", "\(maxCount)", "--", path
+        ])
+        var result: [CommitInfo] = []
+        let lines = raw.components(separatedBy: "\n")
+        var i = 0
+        while i + 6 < lines.count {
+            let hash = lines[i]
+            let shortHash = lines[i + 1]
+            let parentStr = lines[i + 2]
+            let authorName = lines[i + 3]
+            let authorEmail = lines[i + 4]
+            let date = lines[i + 5]
+            let message = lines[i + 6]
+            let parentHashes = parentStr.isEmpty ? [] : parentStr.components(separatedBy: " ")
+            result.append(CommitInfo(
+                hash: hash, shortHash: shortHash, parentHashes: parentHashes,
+                authorName: authorName, authorEmail: authorEmail,
+                date: date, message: message, refs: []
+            ))
+            i += 7
+        }
+        return result
+    }
+
+    /// Get the diff for a specific file at a specific commit
+    func fileLogDiff(hash: String, path: String) async throws -> String {
+        try await runGitOutput(["log", "-1", "-p", "--follow", "--format=", hash, "--", path])
+    }
+
     enum ResetMode: String {
         case soft, mixed, hard
         var flag: String { "--\(rawValue)" }

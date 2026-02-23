@@ -108,7 +108,8 @@ struct ConflictMergeView: View {
                 highlightColor: NSColor.systemBlue,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
-                onToggleRegion: { idx in viewModel.toggleOurs(idx) }
+                onToggleRegion: { idx in viewModel.toggleOurs(idx) },
+                filePath: file?.path ?? ""
             )
         }
         .background(Color(.textBackgroundColor))
@@ -125,7 +126,8 @@ struct ConflictMergeView: View {
                 highlightColor: NSColor.systemOrange,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
-                onToggleRegion: { idx in viewModel.toggleTheirs(idx) }
+                onToggleRegion: { idx in viewModel.toggleTheirs(idx) },
+                filePath: file?.path ?? ""
             )
         }
         .background(Color(.textBackgroundColor))
@@ -177,7 +179,8 @@ struct ConflictMergeView: View {
                 lines: viewModel.conflictOutputLines,
                 conflictSides: sides,
                 regionChoices: viewModel.regionChoices,
-                scrollOffset: $scrollOffset
+                scrollOffset: $scrollOffset,
+                filePath: file?.path ?? ""
             )
         }
         .background(Color(.textBackgroundColor))
@@ -219,6 +222,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
     let regionChoices: [Int: RepoViewModel.RegionChoice]
     @Binding var scrollOffset: CGPoint
     let onToggleRegion: (Int) -> Void
+    var filePath: String = ""
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -248,7 +252,8 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         contentView.configure(
             lines: lines, conflictRegions: conflictRegions, side: side,
             highlightColor: highlightColor, regionChoices: regionChoices,
-            onToggleRegion: onToggleRegion
+            onToggleRegion: onToggleRegion,
+            filePath: filePath
         )
 
         let lineH = SideCodeContentView.lineHeight
@@ -301,6 +306,7 @@ struct OutputScrollCodeView: NSViewRepresentable {
     let conflictSides: ConflictSides?
     let regionChoices: [Int: RepoViewModel.RegionChoice]
     @Binding var scrollOffset: CGPoint
+    var filePath: String = ""
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -326,7 +332,7 @@ struct OutputScrollCodeView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let contentView = scrollView.documentView as? OutputCodeContentView else { return }
-        contentView.configure(lines: lines, conflictSides: conflictSides, regionChoices: regionChoices)
+        contentView.configure(lines: lines, conflictSides: conflictSides, regionChoices: regionChoices, filePath: filePath)
 
         let lineH = OutputCodeContentView.lineHeight
         let contentHeight = CGFloat(lines.count) * lineH + 16
@@ -371,6 +377,243 @@ struct OutputScrollCodeView: NSViewRepresentable {
     }
 }
 
+// MARK: - Simple Syntax Highlighter
+
+/// Provides basic syntax highlighting for code content using NSAttributedString.
+/// Supports keywords, strings, comments, numbers, and type names based on file extension.
+enum CodeSyntaxHighlighter {
+    // Language detection from file path
+    enum Language {
+        case swift, javascript, typescript, python, ruby, java, kotlin, cSharp
+        case go, rust, cpp, objc, dart, html, css, sql, shell, yaml, json, xml
+        case unknown
+    }
+
+    static func language(for path: String) -> Language {
+        let ext = (path as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift": return .swift
+        case "js", "jsx", "mjs", "cjs": return .javascript
+        case "ts", "tsx": return .typescript
+        case "py": return .python
+        case "rb": return .ruby
+        case "java": return .java
+        case "kt", "kts": return .kotlin
+        case "cs": return .cSharp
+        case "go": return .go
+        case "rs": return .rust
+        case "c", "h", "cpp", "hpp", "cc", "cxx", "hxx": return .cpp
+        case "m", "mm": return .objc
+        case "dart": return .dart
+        case "html", "htm": return .html
+        case "css", "scss", "less": return .css
+        case "sql": return .sql
+        case "sh", "bash", "zsh": return .shell
+        case "yml", "yaml": return .yaml
+        case "json": return .json
+        case "xml", "plist", "xib", "storyboard": return .xml
+        default: return .unknown
+        }
+    }
+
+    private static func keywords(for lang: Language) -> Set<String> {
+        switch lang {
+        case .swift:
+            return ["import", "class", "struct", "enum", "protocol", "extension", "func",
+                    "var", "let", "if", "else", "guard", "return", "switch", "case", "default",
+                    "for", "while", "repeat", "break", "continue", "throw", "throws", "try",
+                    "catch", "do", "in", "where", "as", "is", "self", "Self", "super", "init",
+                    "deinit", "nil", "true", "false", "public", "private", "internal", "fileprivate",
+                    "open", "static", "final", "override", "mutating", "nonmutating", "lazy",
+                    "weak", "unowned", "async", "await", "some", "any", "typealias", "associatedtype",
+                    "operator", "infix", "prefix", "postfix", "inout", "defer", "willSet", "didSet",
+                    "get", "set", "@Observable", "@MainActor", "@State", "@Binding", "@Published"]
+        case .javascript, .typescript:
+            return ["import", "export", "from", "const", "let", "var", "function", "class",
+                    "extends", "return", "if", "else", "for", "while", "do", "switch", "case",
+                    "default", "break", "continue", "throw", "try", "catch", "finally", "new",
+                    "this", "super", "typeof", "instanceof", "void", "delete", "in", "of",
+                    "async", "await", "yield", "true", "false", "null", "undefined",
+                    "interface", "type", "enum", "implements", "abstract", "readonly", "as"]
+        case .python:
+            return ["import", "from", "class", "def", "return", "if", "elif", "else", "for",
+                    "while", "break", "continue", "pass", "raise", "try", "except", "finally",
+                    "with", "as", "in", "not", "and", "or", "is", "None", "True", "False",
+                    "lambda", "yield", "global", "nonlocal", "assert", "del", "async", "await",
+                    "self", "cls"]
+        case .java, .kotlin:
+            return ["import", "package", "class", "interface", "enum", "extends", "implements",
+                    "public", "private", "protected", "static", "final", "abstract", "void",
+                    "return", "if", "else", "for", "while", "do", "switch", "case", "default",
+                    "break", "continue", "throw", "throws", "try", "catch", "finally", "new",
+                    "this", "super", "true", "false", "null", "instanceof", "synchronized",
+                    "val", "var", "fun", "when", "object", "companion", "data", "sealed",
+                    "override", "open", "suspend", "lateinit", "by", "lazy"]
+        case .dart:
+            return ["import", "export", "class", "extends", "implements", "mixin", "with",
+                    "abstract", "void", "return", "if", "else", "for", "while", "do", "switch",
+                    "case", "default", "break", "continue", "throw", "try", "catch", "finally",
+                    "new", "this", "super", "true", "false", "null", "var", "final", "const",
+                    "late", "required", "async", "await", "yield", "dynamic", "typedef",
+                    "static", "enum", "factory", "get", "set", "operator", "covariant"]
+        case .go:
+            return ["package", "import", "func", "return", "if", "else", "for", "range",
+                    "switch", "case", "default", "break", "continue", "go", "defer", "chan",
+                    "map", "struct", "interface", "type", "var", "const", "true", "false", "nil",
+                    "select", "fallthrough", "goto"]
+        case .rust:
+            return ["use", "mod", "fn", "let", "mut", "const", "static", "struct", "enum",
+                    "impl", "trait", "pub", "crate", "self", "super", "return", "if", "else",
+                    "for", "while", "loop", "break", "continue", "match", "as", "in", "ref",
+                    "move", "async", "await", "where", "type", "true", "false", "unsafe", "extern"]
+        case .cpp, .objc:
+            return ["#include", "#import", "#define", "#ifdef", "#ifndef", "#endif", "#pragma",
+                    "class", "struct", "enum", "union", "namespace", "using", "typedef",
+                    "public", "private", "protected", "virtual", "override", "const", "static",
+                    "extern", "inline", "volatile", "mutable", "explicit", "template", "typename",
+                    "void", "return", "if", "else", "for", "while", "do", "switch", "case",
+                    "default", "break", "continue", "throw", "try", "catch", "new", "delete",
+                    "this", "true", "false", "nullptr", "NULL", "auto", "register",
+                    "@interface", "@implementation", "@end", "@property", "@synthesize",
+                    "@selector", "@protocol", "@optional", "@required", "self", "nil", "YES", "NO"]
+        case .html, .xml:
+            return []
+        case .css:
+            return ["important", "inherit", "initial", "unset", "none", "auto", "block",
+                    "inline", "flex", "grid", "relative", "absolute", "fixed", "sticky"]
+        case .sql:
+            return ["SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+                    "ALTER", "TABLE", "INDEX", "VIEW", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
+                    "ON", "AND", "OR", "NOT", "IN", "EXISTS", "BETWEEN", "LIKE", "ORDER", "BY",
+                    "GROUP", "HAVING", "LIMIT", "OFFSET", "AS", "NULL", "TRUE", "FALSE",
+                    "select", "from", "where", "insert", "update", "delete", "create", "drop",
+                    "alter", "table", "join", "left", "right", "inner", "outer", "on", "and",
+                    "or", "not", "in", "order", "by", "group", "having", "limit", "as", "null"]
+        case .shell:
+            return ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case",
+                    "esac", "function", "return", "exit", "echo", "export", "source", "local",
+                    "readonly", "unset", "shift", "true", "false", "in"]
+        case .yaml, .json:
+            return ["true", "false", "null", "yes", "no"]
+        default:
+            return []
+        }
+    }
+
+    private static let commentColor = NSColor.systemGreen
+    private static let stringColor = NSColor.systemRed
+    private static let keywordColor = NSColor.systemPink
+    private static let numberColor = NSColor.systemPurple
+    private static let typeColor = NSColor(calibratedRed: 0.42, green: 0.68, blue: 0.90, alpha: 1.0) // light blue
+
+    /// Build an attributed string for a line of code with syntax highlighting.
+    static func highlight(_ text: String, language lang: Language, font: NSFont) -> NSAttributedString {
+        guard lang != .unknown, !text.isEmpty else {
+            return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        }
+
+        let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        let fullRange = NSRange(location: 0, length: (text as NSString).length)
+        let kws = keywords(for: lang)
+
+        // 1. Detect line comments
+        let lineCommentPrefixes: [String]
+        switch lang {
+        case .swift, .javascript, .typescript, .java, .kotlin, .dart, .go, .rust, .cpp, .objc, .cSharp:
+            lineCommentPrefixes = ["//"]
+        case .python, .ruby, .shell, .yaml:
+            lineCommentPrefixes = ["#"]
+        case .sql:
+            lineCommentPrefixes = ["--"]
+        case .html, .xml, .css, .json:
+            lineCommentPrefixes = []
+        default:
+            lineCommentPrefixes = []
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        for prefix in lineCommentPrefixes {
+            if trimmed.hasPrefix(prefix) {
+                result.addAttribute(.foregroundColor, value: commentColor, range: fullRange)
+                return result
+            }
+        }
+
+        // Find inline comment start (not inside a string)
+        var commentStart: Int? = nil
+        do {
+            var inStr: Character? = nil
+            var escaped = false
+            for (idx, ch) in text.enumerated() {
+                if escaped { escaped = false; continue }
+                if ch == "\\" { escaped = true; continue }
+                if let q = inStr {
+                    if ch == q { inStr = nil }
+                    continue
+                }
+                if ch == "\"" || ch == "'" || ch == "`" { inStr = ch; continue }
+                for prefix in lineCommentPrefixes {
+                    if text.dropFirst(idx).hasPrefix(prefix) {
+                        commentStart = idx
+                        break
+                    }
+                }
+                if commentStart != nil { break }
+            }
+        }
+
+        if let cs = commentStart {
+            let commentRange = NSRange(location: cs, length: (text as NSString).length - cs)
+            result.addAttribute(.foregroundColor, value: commentColor, range: commentRange)
+        }
+
+        let effectiveEnd = commentStart ?? (text as NSString).length
+
+        // 2. Highlight strings
+        let stringPattern = #"("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#
+        if let regex = try? NSRegularExpression(pattern: stringPattern) {
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: effectiveEnd))
+            for match in matches {
+                result.addAttribute(.foregroundColor, value: stringColor, range: match.range)
+            }
+        }
+
+        // 3. Highlight numbers
+        let numberPattern = #"\b(\d+\.?\d*([eE][+-]?\d+)?|0x[0-9a-fA-F]+|0b[01]+|0o[0-7]+)\b"#
+        if let regex = try? NSRegularExpression(pattern: numberPattern) {
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: effectiveEnd))
+            for match in matches {
+                // Only color if not already colored (i.e., not inside a string)
+                let existingColor = result.attribute(.foregroundColor, at: match.range.location, effectiveRange: nil)
+                if existingColor as? NSColor == NSColor.labelColor {
+                    result.addAttribute(.foregroundColor, value: numberColor, range: match.range)
+                }
+            }
+        }
+
+        // 4. Highlight keywords and type names
+        let wordPattern = #"\b[A-Za-z_@][A-Za-z0-9_]*\b"#
+        if let regex = try? NSRegularExpression(pattern: wordPattern) {
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: effectiveEnd))
+            for match in matches {
+                let word = (text as NSString).substring(with: match.range)
+                // Only color if not already colored
+                let existingColor = result.attribute(.foregroundColor, at: match.range.location, effectiveRange: nil)
+                guard existingColor as? NSColor == NSColor.labelColor else { continue }
+
+                if kws.contains(word) {
+                    result.addAttribute(.foregroundColor, value: keywordColor, range: match.range)
+                } else if word.first?.isUppercase == true && word.count > 1 {
+                    // Type names (PascalCase)
+                    result.addAttribute(.foregroundColor, value: typeColor, range: match.range)
+                }
+            }
+        }
+
+        return result
+    }
+}
+
 // MARK: - Side Code Content View (ours/theirs with checkboxes)
 
 final class SideCodeContentView: NSView {
@@ -384,13 +627,15 @@ final class SideCodeContentView: NSView {
     private var highlightColor: NSColor = .systemBlue
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var onToggleRegion: ((Int) -> Void)?
+    private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
 
     override var isFlipped: Bool { true }
 
     func configure(
         lines: [String], conflictRegions: [ConflictRegion], side: ConflictSide,
         highlightColor: NSColor, regionChoices: [Int: RepoViewModel.RegionChoice],
-        onToggleRegion: @escaping (Int) -> Void
+        onToggleRegion: @escaping (Int) -> Void,
+        filePath: String = ""
     ) {
         self.lines = lines
         self.conflictRegions = conflictRegions
@@ -398,6 +643,7 @@ final class SideCodeContentView: NSView {
         self.highlightColor = highlightColor
         self.regionChoices = regionChoices
         self.onToggleRegion = onToggleRegion
+        self.syntaxLanguage = CodeSyntaxHighlighter.language(for: filePath)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -472,13 +718,11 @@ final class SideCodeContentView: NSView {
             let numSz = numStr.size()
             numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
 
-            // Content text
+            // Content text (with syntax highlighting)
             guard i < lines.count else { continue }
             let text = lines[i].isEmpty ? " " : lines[i]
             let textX: CGFloat = lnW + 8 + (isConflict ? 20 : 0)
-            let contentStr = NSAttributedString(
-                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
-            )
+            let contentStr = CodeSyntaxHighlighter.highlight(text, language: syntaxLanguage, font: font)
             let textSz = contentStr.size()
             contentStr.draw(at: NSPoint(x: textX, y: y + (lineH - textSz.height) / 2))
         }
@@ -520,13 +764,15 @@ final class OutputCodeContentView: NSView {
     private var conflictSides: ConflictSides?
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var lineOrigins: [(origin: Character?, color: NSColor?)] = []
+    private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
 
     override var isFlipped: Bool { true }
 
-    func configure(lines: [String], conflictSides: ConflictSides?, regionChoices: [Int: RepoViewModel.RegionChoice]) {
+    func configure(lines: [String], conflictSides: ConflictSides?, regionChoices: [Int: RepoViewModel.RegionChoice], filePath: String = "") {
         self.lines = lines
         self.conflictSides = conflictSides
         self.regionChoices = regionChoices
+        self.syntaxLanguage = CodeSyntaxHighlighter.language(for: filePath)
         computeLineOrigins()
     }
 
@@ -642,12 +888,10 @@ final class OutputCodeContentView: NSView {
             let numSz = numStr.size()
             numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
 
-            // Content
+            // Content (with syntax highlighting)
             guard i < lines.count else { continue }
             let text = lines[i].isEmpty ? " " : lines[i]
-            let contentStr = NSAttributedString(
-                string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor]
-            )
+            let contentStr = CodeSyntaxHighlighter.highlight(text, language: syntaxLanguage, font: font)
             let textSz = contentStr.size()
             contentStr.draw(at: NSPoint(x: lnW + 8, y: y + (lineH - textSz.height) / 2))
         }

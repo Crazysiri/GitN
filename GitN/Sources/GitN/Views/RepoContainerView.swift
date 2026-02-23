@@ -66,6 +66,13 @@ struct RepoContainerView: View {
         .sheet(isPresented: $showNewBranch) {
             newBranchSheet
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.showFileHistory },
+            set: { if !$0 { viewModel.closeFileHistory() } }
+        )) {
+            FileHistoryView(viewModel: viewModel)
+                .frame(minWidth: 800, minHeight: 550)
+        }
     }
 
     private func toastView(_ toast: ToastMessage) -> some View {
