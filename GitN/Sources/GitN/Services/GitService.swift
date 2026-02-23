@@ -1478,7 +1478,22 @@ actor GitService {
     }
 
     private func resolvedConflictFiles() throws -> [ConflictFile] {
-        []
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return [] }
+        defer { git_index_free(index) }
+
+        let reucCount = git_index_reuc_entrycount(index)
+        guard reucCount > 0 else { return [] }
+
+        var result: [ConflictFile] = []
+        for i in 0..<reucCount {
+            guard let entry = git_index_reuc_get_byindex(index, i),
+                  let pathPtr = entry.pointee.path else { continue }
+            let path = String(cString: pathPtr)
+            result.append(ConflictFile(path: path, conflictCount: 0))
+        }
+        return result
     }
 
     func readConflictSides(path: String) throws -> ConflictSides {

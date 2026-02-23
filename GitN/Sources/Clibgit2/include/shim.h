@@ -2,5 +2,6 @@
 #define CLIBGIT2_SHIM_H
 
 #include "git2.h"
+#include "git2/sys/index.h"
 
 #endif
