@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct GraphView: View {
     let viewModel: RepoViewModel
@@ -13,6 +14,9 @@ struct GraphView: View {
     @State private var editedMessage = ""
     @State private var upstreamRemote = "origin"
     @State private var upstreamBranch = ""
+
+    // Graph horizontal scroll state (reference type for NSEvent closure)
+    @State private var graphHScroll = GraphHScrollState()
 
     private let rowHeight: CGFloat = 24
     private let columnWidth: CGFloat = 18
@@ -33,10 +37,54 @@ struct GraphView: View {
             }
         }
         .background(Color(.textBackgroundColor))
+        .onAppear {
+            updateMaxColumns()
+            installScrollWheelMonitor()
+        }
+        .onDisappear { removeScrollWheelMonitor() }
+        .onChange(of: viewModel.graphEntries.count) { _, _ in
+            updateMaxColumns()
+        }
         .sheet(isPresented: $showCreateTagSheet) { createTagSheet }
         .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
         .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
         .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
+    }
+
+    // MARK: - Horizontal Scroll
+
+    /// Recompute the maximum column count from graph entries and clamp offset.
+    private func updateMaxColumns() {
+        let maxCols = viewModel.graphEntries.values.map(\.numColumns).max() ?? 1
+        graphHScroll.maxColumns = maxCols
+        let maxOff = max(0, CGFloat(maxCols + 1) * columnWidth - graphAreaWidth)
+        graphHScroll.offset = min(graphHScroll.offset, maxOff)
+    }
+
+    private func installScrollWheelMonitor() {
+        let state = graphHScroll
+        let colWidth = columnWidth
+        let areaWidth = graphAreaWidth
+        state.monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard state.isHovering else { return event }
+            var dx = event.scrollingDeltaX
+            // Shift + vertical scroll → horizontal scroll (for mice without horizontal wheel)
+            if event.modifierFlags.contains(.shift) && abs(event.scrollingDeltaY) > abs(dx) {
+                dx = event.scrollingDeltaY
+            }
+            let maxOff = max(0, CGFloat(state.maxColumns + 1) * colWidth - areaWidth)
+            if abs(dx) > 0.1 && maxOff > 0 {
+                state.offset = max(0, min(maxOff, state.offset - dx))
+            }
+            return event
+        }
+    }
+
+    private func removeScrollWheelMonitor() {
+        if let monitor = graphHScroll.monitor {
+            NSEvent.removeMonitor(monitor)
+            graphHScroll.monitor = nil
+        }
     }
 
     private var graphHeader: some View {
@@ -46,7 +94,8 @@ struct GraphView: View {
                 .padding(.leading, 8)
             Divider().frame(height: 12)
             Text("Graph")
-                .frame(width: graphAreaWidth, alignment: .center)
+                .frame(width: graphAreaWidth, alignment: .leading)
+                .padding(.leading, 6)
             Divider().frame(height: 12)
             Text("Commit Message")
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,7 +151,8 @@ struct GraphView: View {
             graphAreaWidth: graphAreaWidth,
             refsColumnWidth: refsColumnWidth,
             currentBranch: viewModel.currentBranch,
-            isRebaseConflict: commit.isUncommitted && viewModel.isRebaseConflict
+            isRebaseConflict: commit.isUncommitted && viewModel.isRebaseConflict,
+            graphHScroll: graphHScroll
         )
 
         row
@@ -390,6 +440,7 @@ struct GraphRowView: View {
     let refsColumnWidth: CGFloat
     let currentBranch: String
     var isRebaseConflict: Bool = false
+    var graphHScroll: GraphHScrollState?
 
     var body: some View {
         if isRebaseConflict {
@@ -401,6 +452,7 @@ struct GraphRowView: View {
 
                 graphColumn
                     .frame(width: graphAreaWidth, height: rowHeight)
+                    .onHover { graphHScroll?.isHovering = $0 }
 
                 messageColumn
                     .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
@@ -485,8 +537,10 @@ struct GraphRowView: View {
 
     /// Canvas draws the lane lines + a background halo behind the avatar.
     /// The avatar itself is a SwiftUI overlay so `.help()` works for tooltip.
+    /// Content is offset by the shared scroll state and clipped for horizontal scrolling.
     private var graphColumn: some View {
-        ZStack(alignment: .topLeading) {
+        let scrollX = graphHScroll?.offset ?? 0
+        return ZStack(alignment: .topLeading) {
             Canvas { context, size in
                 guard let entry = graphEntry else { return }
                 let h = size.height
@@ -498,8 +552,8 @@ struct GraphRowView: View {
                         ? Color.gray.opacity(0.5)
                         : GraphColors.color(for: line.colorIndex)
 
-                    let fromX = CGFloat(line.from) * columnWidth
-                    let toX = CGFloat(line.to) * columnWidth
+                    let fromX = CGFloat(line.from) * columnWidth - scrollX
+                    let toX = CGFloat(line.to) * columnWidth - scrollX
                     let sourceY: CGFloat = line.upper ? 0 : h
 
                     var path = Path()
@@ -518,7 +572,7 @@ struct GraphRowView: View {
                     )
                 }
 
-                let dotX = CGFloat(entry.position) * columnWidth
+                let dotX = CGFloat(entry.position) * columnWidth - scrollX
                 if entry.isUncommitted {
                     let dotSize: CGFloat = 12
                     let dotRect = CGRect(
@@ -554,12 +608,13 @@ struct GraphRowView: View {
                     borderColor: GraphColors.color(for: entry.dotColorIndex)
                 )
                 .offset(
-                    x: CGFloat(entry.position) * columnWidth - avatarSize / 2,
+                    x: CGFloat(entry.position) * columnWidth - avatarSize / 2 - scrollX,
                     y: (rowHeight - avatarSize) / 2
                 )
                 .help(commit.authorName)
             }
         }
+        .clipped()
     }
 
     // MARK: - Message Column
@@ -733,6 +788,18 @@ private enum BriefDateFormatter {
         if days < 365 { return "\(days / 30) months ago" }
         return "\(days / 365)y ago"
     }
+}
+
+// MARK: - Graph Horizontal Scroll State
+
+/// Observable reference type so the NSEvent monitor closure can read/write
+/// the latest values via a captured reference (avoiding struct-copy issues).
+@Observable
+final class GraphHScrollState {
+    var offset: CGFloat = 0
+    var maxColumns: Int = 1
+    var isHovering: Bool = false
+    var monitor: Any?
 }
 
 // MARK: - Colors (gitx HSB palette)
