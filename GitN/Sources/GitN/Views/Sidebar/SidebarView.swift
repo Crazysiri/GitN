@@ -382,16 +382,25 @@ struct SidebarView: View {
 
     private var repoHeader: some View {
         HStack {
-            Image(systemName: "arrow.triangle.branch")
-                .foregroundStyle(.blue)
+            Image(systemName: viewModel.isDetachedHead
+                  ? "point.topleft.filled.down.to.point.bottomright.curvepath"
+                  : "arrow.triangle.branch")
+                .foregroundStyle(viewModel.isDetachedHead ? .orange : .blue)
             VStack(alignment: .leading, spacing: 1) {
                 Text(viewModel.repoName)
                     .font(.headline)
                     .lineLimit(1)
                 if !viewModel.currentBranch.isEmpty {
-                    Text(viewModel.currentBranch)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(viewModel.currentBranch)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if viewModel.isDetachedHead {
+                            Text("(detached)")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
+                    }
                 }
             }
             Spacer()
@@ -406,10 +415,25 @@ struct SidebarView: View {
         SidebarSection(
             title: "LOCAL",
             icon: "arrow.triangle.branch",
-            count: viewModel.localBranches.count,
+            count: viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0),
             isCollapsed: viewModel.isSectionCollapsed("local"),
             onToggle: { viewModel.toggleSection("local") }
         ) {
+            // Detached HEAD indicator
+            if viewModel.isDetachedHead {
+                SidebarDetachedHeadRow(
+                    shortHash: viewModel.currentBranch
+                )
+                .onTapGesture {
+                    if let commit = viewModel.commits.first(where: {
+                        $0.shortHash == viewModel.currentBranch || $0.hash.hasPrefix(viewModel.currentBranch)
+                    }) {
+                        viewModel.scrollToCommitHash = commit.hash
+                        Task { await viewModel.selectCommit(commit) }
+                    }
+                }
+            }
+
             ForEach(viewModel.localBranches) { branch in
                 SidebarBranchRow(
                     name: branch.name,
@@ -718,5 +742,47 @@ struct SidebarBranchRow: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+struct SidebarDetachedHeadRow: View {
+    let shortHash: String
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "point.topleft.filled.down.to.point.bottomright.curvepath")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+
+            Text("HEAD")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(.orange.opacity(0.8)))
+
+            Text(shortHash)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            Text("detached")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .italic()
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.orange.opacity(0.06))
+                .padding(.horizontal, 4)
+        )
+        .onHover { isHovering = $0 }
     }
 }

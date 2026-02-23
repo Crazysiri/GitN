@@ -223,6 +223,11 @@ actor GitService {
         return "HEAD"
     }
 
+    func isDetachedHead() throws -> Bool {
+        guard let repo else { throw GitError.repoNotOpen }
+        return git_repository_head_detached(repo) == 1
+    }
+
     // MARK: - Tags
 
     func tags() throws -> [String] {

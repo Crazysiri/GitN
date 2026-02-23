@@ -14,6 +14,7 @@ final class RepoViewModel {
     var stashes: [StashInfo] = []
     var submodules: [SubmoduleInfo] = []
     var currentBranch: String = ""
+    var isDetachedHead: Bool = false
 
     var commits: [CommitInfo] = []
     var graphEntries: [String: CommitGraphEntry] = [:]
@@ -241,9 +242,10 @@ final class RepoViewModel {
             async let cur = git.currentBranch()
             async let stat = git.status()
             async let hch = git.headCommitHash()
+            async let detached = git.isDetachedHead()
 
-            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc) = try await (
-                b, rb, r, t, st, sub, cur, stat, hch
+            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh) = try await (
+                b, rb, r, t, st, sub, cur, stat, hch, detached
             )
             localBranches = lb
             remoteBranches = rbs
@@ -254,6 +256,7 @@ final class RepoViewModel {
             currentBranch = cb
             fileStatuses = sts
             headCommitHash = hc
+            isDetachedHead = dh
 
             // Phase 2: Stream commits with incremental graph (like gitx's PBGitRevList)
             let graphEngine = IncrementalGraphLayoutEngine()
