@@ -450,10 +450,11 @@ struct GraphRowView: View {
                     ForEach(commit.refs.dropFirst(), id: \.self) { ref in
                         Button {
                         } label: {
-                            Label(
-                                RefBadge.displayName(ref),
-                                systemImage: ref.contains("tag:") ? "tag" : "arrow.triangle.branch"
-                            )
+                            Label {
+                                Text(RefBadge.menuDisplayName(ref))
+                            } icon: {
+                                Image(systemName: RefBadge.iconName(for: ref))
+                            }
                         }
                     }
                 } label: {
@@ -639,7 +640,7 @@ struct RefBadge: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            Image(systemName: iconName)
+            Image(systemName: Self.iconName(for: refName))
                 .font(.system(size: 7))
             Text(cleanName)
                 .font(.system(size: 9, weight: .medium))
@@ -658,17 +659,35 @@ struct RefBadge: View {
         .foregroundStyle(badgeColor)
     }
 
-    private var iconName: String {
-        if refName.contains("tag:") { return "tag" }
+    /// Icon name based on ref type: tag, remote branch, or local branch
+    static func iconName(for ref: String) -> String {
+        if ref.contains("tag:") { return "tag.fill" }
+        if ref.contains("/") && !ref.contains("HEAD") { return "cloud.fill" }
         return "arrow.triangle.branch"
     }
 
+    /// Display name for the main badge (strips HEAD prefix only, keeps origin/ and tag:)
     static func displayName(_ ref: String) -> String {
         ref
             .replacingOccurrences(of: "HEAD -> ", with: "")
             .replacingOccurrences(of: "origin/", with: "")
             .replacingOccurrences(of: "tag: ", with: "")
             .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Display name for the dropdown menu — keeps remote prefix and adds type label
+    static func menuDisplayName(_ ref: String) -> String {
+        let stripped = ref.replacingOccurrences(of: "HEAD -> ", with: "")
+        if ref.contains("tag:") {
+            let tagName = ref.replacingOccurrences(of: "tag: ", with: "").trimmingCharacters(in: .whitespaces)
+            return "🏷 \(tagName)"
+        } else if stripped.contains("/") {
+            // Remote branch: keep full name like "origin/main"
+            return stripped.trimmingCharacters(in: .whitespaces)
+        } else {
+            // Local branch
+            return stripped.trimmingCharacters(in: .whitespaces)
+        }
     }
 
     private var cleanName: String {
@@ -680,7 +699,7 @@ struct RefBadge: View {
             return .green
         } else if refName.contains("tag:") {
             return .yellow
-        } else if refName.contains("origin/") || refName.contains("remote") {
+        } else if refName.contains("/") {
             return .blue
         } else {
             return .orange

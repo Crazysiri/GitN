@@ -418,6 +418,10 @@ struct SidebarView: View {
                     ahead: branch.ahead,
                     behind: branch.behind
                 )
+                .onTapGesture(count: 2) {
+                    guard !branch.isCurrent else { return }
+                    Task { await viewModel.performCheckoutBranch(branch.name) }
+                }
                 .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
                 .contextMenu {
                     localBranchContextMenu(branch)
@@ -444,8 +448,16 @@ struct SidebarView: View {
                     ForEach(branches) { branch in
                         let shortName = branch.name
                             .replacingOccurrences(of: "\(remote.name)/", with: "")
-                        SidebarBranchRow(name: shortName, isCurrent: false, icon: "arrow.triangle.branch")
+                        SidebarBranchRow(
+                            name: shortName,
+                            isCurrent: false,
+                            icon: "arrow.triangle.branch"
+                        )
                             .padding(.leading, 8)
+                            .onTapGesture(count: 2) {
+                                Task { await viewModel.performCheckoutBranch(branch.name) }
+                            }
+                            .onTapGesture { }
                             .contextMenu {
                                 remoteBranchContextMenu(branch, remoteName: remote.name)
                                     .font(.system(size: 11, weight: .medium))
@@ -496,6 +508,10 @@ struct SidebarView: View {
                     .padding(.leading, 28)
                     .padding(.trailing, 12)
                     .padding(.vertical, 2)
+                    .onTapGesture(count: 2) {
+                        Task { await viewModel.performCheckoutBranch(tag) }
+                    }
+                    .onTapGesture { }
             }
         }
     }
@@ -632,14 +648,26 @@ struct SidebarBranchRow: View {
     let icon: String
     var ahead: Int = 0
     var behind: Int = 0
+    var badge: String? = nil
+    var badgeColor: Color = .secondary
+    var iconColor: Color? = nil
 
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.caption2)
-                .foregroundStyle(isCurrent ? .green : .secondary)
+                .foregroundStyle(isCurrent ? .green : (iconColor ?? .secondary))
+
+            if let badge = badge {
+                Text(badge)
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(badgeColor.opacity(0.75)))
+            }
 
             Text(name)
                 .font(.caption)
