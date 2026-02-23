@@ -1247,11 +1247,20 @@ actor GitService {
     // MARK: - Git CLI helper
 
     private func runGit(_ args: [String]) async throws {
+        try await runGitWithEnv(args, env: nil)
+    }
+
+    private func runGitWithEnv(_ args: [String], env: [String: String]?) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             proc.arguments = args
             proc.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+            if let env {
+                var merged = ProcessInfo.processInfo.environment
+                for (key, value) in env { merged[key] = value }
+                proc.environment = merged
+            }
             let pipe = Pipe()
             let errPipe = Pipe()
             proc.standardOutput = pipe
@@ -1618,7 +1627,9 @@ actor GitService {
             let msgPath = (rebaseDir as NSString).appendingPathComponent("message")
             try? message.write(toFile: msgPath, atomically: true, encoding: .utf8)
         }
-        try await runGit(["rebase", "--continue"])
+        // Use GIT_EDITOR=true to prevent git from trying to open an interactive editor,
+        // which would fail in a non-TTY Process context.
+        try await runGitWithEnv(["rebase", "--continue"], env: ["GIT_EDITOR": "true"])
     }
 
     func rebaseSkip() async throws {

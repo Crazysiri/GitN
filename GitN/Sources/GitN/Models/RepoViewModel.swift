@@ -839,9 +839,12 @@ final class RepoViewModel {
             if let state = try await git.rebaseState() {
                 rebaseState = state
                 rebaseCommitMessage = await git.rebaseCommitMessage()
-                if let msg = errorMessage {
-                    showToast(title: "Rebase Failed", detail: "There are merge conflicts that need to be resolved", style: .error)
-                    _ = msg
+                if errorMessage != nil {
+                    if !state.conflictedFiles.isEmpty {
+                        showToast(title: "Rebase Conflict", detail: "There are merge conflicts that need to be resolved", style: .error)
+                    } else {
+                        showToast(title: "Rebase Failed", detail: errorMessage ?? "Unknown error", style: .error)
+                    }
                 }
                 await loadAll()
             } else {
