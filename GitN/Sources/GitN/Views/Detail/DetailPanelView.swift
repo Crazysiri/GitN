@@ -298,6 +298,7 @@ struct DetailPanelView: View {
 
     private func rebaseStagingFileList(state: RebaseState) -> some View {
         let conflictPaths = Set(state.conflictedFiles.map(\.path))
+        let resolvedPaths = Set(state.resolvedFiles.map(\.path))
 
         return ScrollView {
             VStack(spacing: 0) {
@@ -330,7 +331,9 @@ struct DetailPanelView: View {
                         viewModel.toggleFileSelection(file.path, isMulti: isMulti)
                         Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
                     }
-                    .contextMenu { rebaseStagedFileContextMenu(file) }
+                    .contextMenu {
+                        rebaseStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                    }
                 }
 
                 Divider().padding(.vertical, 2)
@@ -358,7 +361,9 @@ struct DetailPanelView: View {
                         viewModel.toggleFileSelection(file.path, isMulti: isMulti)
                         Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
                     }
-                    .contextMenu { rebaseUnstagedFileContextMenu(file) }
+                    .contextMenu {
+                        rebaseUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                    }
                 }
             }
         }
@@ -492,15 +497,17 @@ struct DetailPanelView: View {
     }
 
     @ViewBuilder
-    private func rebaseStagedFileContextMenu(_ file: FileStatus) -> some View {
+    private func rebaseStagedFileContextMenu(_ file: FileStatus, wasConflicted: Bool) -> some View {
         let paths = selectedOrSingle(file.path)
 
         Button("Unstage") {
             Task { await viewModel.unstageFiles(paths) }
         }
 
-        Button("Mark as Conflicted") {
-            Task { await viewModel.markFileConflicted(path: file.path) }
+        if wasConflicted {
+            Button("Mark as Conflicted") {
+                Task { await viewModel.markFileConflicted(path: file.path) }
+            }
         }
 
         Divider()
@@ -527,7 +534,7 @@ struct DetailPanelView: View {
     }
 
     @ViewBuilder
-    private func rebaseUnstagedFileContextMenu(_ file: FileStatus) -> some View {
+    private func rebaseUnstagedFileContextMenu(_ file: FileStatus, wasConflicted: Bool) -> some View {
         let paths = selectedOrSingle(file.path)
 
         Button("Stage") {
@@ -538,8 +545,10 @@ struct DetailPanelView: View {
             Task { await viewModel.discardChanges(paths: paths) }
         }
 
-        Button("Mark as Conflicted") {
-            Task { await viewModel.markFileConflicted(path: file.path) }
+        if wasConflicted {
+            Button("Mark as Conflicted") {
+                Task { await viewModel.markFileConflicted(path: file.path) }
+            }
         }
 
         Divider()

@@ -1916,9 +1916,13 @@ actor GitService {
         git_index_write(index)
     }
 
-    /// Mark a file as conflicted by re-creating the merge conflict using
-    /// `git checkout -m`, which restores conflict markers and index entries.
+    /// Mark a resolved file as conflicted again by unstaging it first
+    /// (so stage-0 entry is removed), then re-creating the merge conflict
+    /// via `git checkout -m`.
     func markFileConflicted(path: String) async throws {
+        // 1. Unstage the file first (remove stage-0 entry) so checkout -m can work
+        try await runGit(["reset", "HEAD", "--", path])
+        // 2. Re-create the merge conflict markers and index conflict entries
         try await runGit(["checkout", "-m", "--", path])
     }
 
