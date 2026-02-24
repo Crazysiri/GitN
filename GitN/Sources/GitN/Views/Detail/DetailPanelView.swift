@@ -294,6 +294,85 @@ struct DetailPanelView: View {
         .frame(maxHeight: 240)
     }
 
+    // MARK: - Rebase Staging File List (Staged / Unstaged during rebase)
+
+    private func rebaseStagingFileList(state: RebaseState) -> some View {
+        let conflictPaths = Set(state.conflictedFiles.map(\.path))
+
+        return ScrollView {
+            VStack(spacing: 0) {
+                stagingSectionHeader(
+                    title: "已暂存",
+                    count: rebaseStagedFiles(excludingConflicts: conflictPaths).count,
+                    allSelected: !rebaseStagedFiles(excludingConflicts: conflictPaths).isEmpty,
+                    onToggle: {
+                        Task {
+                            if rebaseStagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                                await viewModel.stageAllFiles()
+                            } else {
+                                await viewModel.unstageAllFiles()
+                            }
+                        }
+                    }
+                )
+
+                ForEach(rebaseStagedFiles(excludingConflicts: conflictPaths)) { file in
+                    StagingFileRow(
+                        file: file,
+                        isSelected: viewModel.selectedFilePaths.contains(file.path)
+                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
+                        isStaged: true,
+                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
+                        onToggle: { Task { await viewModel.unstageFile(file.path) } }
+                    )
+                    .onTapGesture {
+                        let isMulti = NSEvent.modifierFlags.contains(.command)
+                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                    }
+                    .contextMenu { rebaseStagedFileContextMenu(file) }
+                }
+
+                Divider().padding(.vertical, 2)
+
+                stagingSectionHeader(
+                    title: "未暂存",
+                    count: rebaseUnstagedFiles(excludingConflicts: conflictPaths).count,
+                    allSelected: false,
+                    onToggle: {
+                        Task { await viewModel.stageAllFiles() }
+                    }
+                )
+
+                ForEach(rebaseUnstagedFiles(excludingConflicts: conflictPaths)) { file in
+                    StagingFileRow(
+                        file: file,
+                        isSelected: viewModel.selectedFilePaths.contains(file.path)
+                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
+                        isStaged: false,
+                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
+                        onToggle: { Task { await viewModel.stageFile(file.path) } }
+                    )
+                    .onTapGesture {
+                        let isMulti = NSEvent.modifierFlags.contains(.command)
+                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                    }
+                    .contextMenu { rebaseUnstagedFileContextMenu(file) }
+                }
+            }
+        }
+        .frame(maxHeight: 200)
+    }
+
+    private func rebaseStagedFiles(excludingConflicts conflictPaths: Set<String>) -> [FileStatus] {
+        stagedFiles.filter { !conflictPaths.contains($0.path) }
+    }
+
+    private func rebaseUnstagedFiles(excludingConflicts conflictPaths: Set<String>) -> [FileStatus] {
+        unstagedFiles.filter { !conflictPaths.contains($0.path) }
+    }
+
     // MARK: - Staged File Context Menu
 
     @ViewBuilder
@@ -413,36 +492,15 @@ struct DetailPanelView: View {
     }
 
     @ViewBuilder
-    private func resolvedFileContextMenu(_ file: ConflictFile) -> some View {
-        Button("File History") {
-            Task { await viewModel.openFileHistory(path: file.path) }
+    private func rebaseStagedFileContextMenu(_ file: FileStatus) -> some View {
+        let paths = selectedOrSingle(file.path)
+
+        Button("Unstage") {
+            Task { await viewModel.unstageFiles(paths) }
         }
 
-        Divider()
-
-        Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
-
-        Button("Copy file path") { viewModel.copyFilePaths([file.path]) }
-
-        Button("Open in Default Editor") {
-            viewModel.openInEditor(path: file.path)
-        }
-    }
-
-    @ViewBuilder
-    private func rebaseOtherFileContextMenu(_ file: FileStatus) -> some View {
-        if file.hasStagedChanges {
-            Button("Unstage") {
-                Task { await viewModel.unstageFiles([file.path]) }
-            }
-        } else {
-            Button("Stage") {
-                Task { await viewModel.stageFiles([file.path]) }
-            }
-        }
-
-        Button("Discard changes") {
-            Task { await viewModel.discardChanges(paths: [file.path]) }
+        Button("Mark as Conflicted") {
+            Task { await viewModel.markFileConflicted(path: file.path) }
         }
 
         Divider()
@@ -455,7 +513,7 @@ struct DetailPanelView: View {
 
         Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
 
-        Button("Copy file path") { viewModel.copyFilePaths([file.path]) }
+        Button("Copy file path") { viewModel.copyFilePaths(paths) }
 
         Button("Open in Default Editor") {
             viewModel.openInEditor(path: file.path)
@@ -464,7 +522,46 @@ struct DetailPanelView: View {
         Divider()
 
         Button("Delete file", role: .destructive) {
-            Task { await viewModel.deleteFiles(paths: [file.path]) }
+            Task { await viewModel.deleteFiles(paths: paths) }
+        }
+    }
+
+    @ViewBuilder
+    private func rebaseUnstagedFileContextMenu(_ file: FileStatus) -> some View {
+        let paths = selectedOrSingle(file.path)
+
+        Button("Stage") {
+            Task { await viewModel.stageFiles(paths) }
+        }
+
+        Button("Discard changes") {
+            Task { await viewModel.discardChanges(paths: paths) }
+        }
+
+        Button("Mark as Conflicted") {
+            Task { await viewModel.markFileConflicted(path: file.path) }
+        }
+
+        Divider()
+
+        Button("File History") {
+            Task { await viewModel.openFileHistory(path: file.path) }
+        }
+
+        Divider()
+
+        Button("Show in Finder") { viewModel.showInFinder(path: file.path) }
+
+        Button("Copy file path") { viewModel.copyFilePaths(paths) }
+
+        Button("Open in Default Editor") {
+            viewModel.openInEditor(path: file.path)
+        }
+
+        Divider()
+
+        Button("Delete file", role: .destructive) {
+            Task { await viewModel.deleteFiles(paths: paths) }
         }
     }
 
@@ -721,71 +818,8 @@ struct DetailPanelView: View {
 
             Divider().padding(.vertical, 2)
 
-            // Resolved Files
-            VStack(spacing: 0) {
-                HStack {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8))
-                    Text("Resolved Files (\(state.resolvedFiles.count))")
-                        .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-
-                ForEach(state.resolvedFiles) { file in
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.green)
-                        Text(file.path)
-                            .font(.system(size: 10))
-                            .lineLimit(1)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 3)
-                    .contentShape(Rectangle())
-                    .contextMenu { resolvedFileContextMenu(file) }
-                }
-            }
-
-            // Other Changes (non-conflict files modified during rebase)
-            let otherFiles = rebaseOtherChangedFiles(state: state)
-            if !otherFiles.isEmpty {
-                Divider().padding(.vertical, 2)
-
-                VStack(spacing: 0) {
-                    HStack {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 8))
-                        Text("Other Changes (\(otherFiles.count))")
-                            .font(.system(size: 11, weight: .semibold))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-
-                    ForEach(otherFiles) { file in
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(file.hasStagedChanges ? Color.green : Color.orange)
-                                .frame(width: 6, height: 6)
-                            Text(file.path)
-                                .font(.system(size: 10))
-                                .lineLimit(1)
-                            Spacer()
-                            Text(file.statusDescription)
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                        .contextMenu { rebaseOtherFileContextMenu(file) }
-                    }
-                }
-            }
+            // Staged Files
+            rebaseStagingFileList(state: state)
 
             Spacer()
 
@@ -915,14 +949,6 @@ struct DetailPanelView: View {
         viewModel.fileStatuses.filter(\.hasUnstagedChanges)
     }
 
-    /// Files changed during rebase that are NOT in the conflicted or resolved lists.
-    private func rebaseOtherChangedFiles(state: RebaseState) -> [FileStatus] {
-        let conflictPaths = Set(state.conflictedFiles.map(\.path))
-        let resolvedPaths = Set(state.resolvedFiles.map(\.path))
-        return viewModel.fileStatuses.filter { file in
-            !conflictPaths.contains(file.path) && !resolvedPaths.contains(file.path)
-        }
-    }
 
     private func formattedDate(_ dateStr: String) -> String {
         let parts = dateStr.split(separator: " ")

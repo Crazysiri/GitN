@@ -916,6 +916,16 @@ final class RepoViewModel {
         }
     }
 
+    func markFileConflicted(path: String) async {
+        do {
+            try await git.markFileConflicted(path: path)
+            await refreshRebaseState()
+            await refreshStatusAndGraph()
+        } catch {
+            showToast(title: "Mark Conflicted Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
     func markAllFilesResolved() async {
         do {
             try await git.markAllConflictsResolved()

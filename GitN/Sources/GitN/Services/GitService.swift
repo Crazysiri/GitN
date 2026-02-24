@@ -1916,6 +1916,24 @@ actor GitService {
         git_index_write(index)
     }
 
+    /// Mark a file as conflicted by unstaging it (removing stage 0) and
+    /// restoring it so it appears as unmerged/conflicted again.
+    func markFileConflicted(path: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot get index")
+        }
+        defer { git_index_free(index) }
+
+        // Remove the resolved stage-0 entry so git sees the file as unmerged
+        git_index_remove_bypath(index, path)
+
+        // Re-read the on-disk merge state to restore conflict entries
+        git_index_read(index, 1) // force=1 to re-read from disk
+        git_index_write(index)
+    }
+
     func rebaseCommitMessage() -> String {
         let gitDir = (repoPath as NSString).appendingPathComponent(".git")
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
