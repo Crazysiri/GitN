@@ -35,7 +35,7 @@ struct GraphView: View {
                     graphEntries: viewModel.graphEntries,
                     selectedCommitHash: viewModel.selectedCommit?.hash,
                     currentBranch: viewModel.currentBranch,
-                    isRebaseConflict: viewModel.isRebaseConflict,
+                    hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
                     scrollToHash: viewModel.scrollToCommitHash,
                     rowHeight: rowHeight,
                     columnWidth: columnWidth,
@@ -293,7 +293,7 @@ struct CommitTableView: NSViewRepresentable {
     let graphEntries: [String: CommitGraphEntry]
     let selectedCommitHash: String?
     let currentBranch: String
-    let isRebaseConflict: Bool
+    let hasUnresolvedConflicts: Bool
     let scrollToHash: String?
     let rowHeight: CGFloat
     let columnWidth: CGFloat
@@ -362,7 +362,7 @@ struct CommitTableView: NSViewRepresentable {
         coordinator.graphEntries = graphEntries
         coordinator.selectedCommitHash = selectedCommitHash
         coordinator.currentBranch = currentBranch
-        coordinator.isRebaseConflict = isRebaseConflict
+        coordinator.hasUnresolvedConflicts = hasUnresolvedConflicts
         coordinator.onSelectCommit = onSelectCommit
         coordinator.onContextAction = onContextAction
         coordinator.columnWidth = columnWidth
@@ -437,7 +437,7 @@ struct CommitTableView: NSViewRepresentable {
         var graphEntries: [String: CommitGraphEntry] = [:]
         var selectedCommitHash: String?
         var currentBranch: String = ""
-        var isRebaseConflict: Bool = false
+        var hasUnresolvedConflicts: Bool = false
         var onSelectCommit: ((CommitInfo) -> Void)?
         var onContextAction: ((CommitInfo, CommitContextAction) -> Void)?
         var rowHeight: CGFloat = 24
@@ -456,7 +456,7 @@ struct CommitTableView: NSViewRepresentable {
             self.graphEntries = parent.graphEntries
             self.selectedCommitHash = parent.selectedCommitHash
             self.currentBranch = parent.currentBranch
-            self.isRebaseConflict = parent.isRebaseConflict
+            self.hasUnresolvedConflicts = parent.hasUnresolvedConflicts
             self.onSelectCommit = parent.onSelectCommit
             self.onContextAction = parent.onContextAction
             self.rowHeight = parent.rowHeight
@@ -497,7 +497,7 @@ struct CommitTableView: NSViewRepresentable {
             cell.graphEntry = graphEntries[commit.hash]
             cell.isSelectedRow = commit.hash == selectedCommitHash
             cell.currentBranch = currentBranch
-            cell.isRebaseConflict = commit.isUncommitted && isRebaseConflict
+            cell.isRebaseConflict = commit.isUncommitted && hasUnresolvedConflicts
             cell.rowHeight = rowHeight
             cell.columnWidth = columnWidth
             cell.avatarSize = avatarSize
@@ -870,8 +870,14 @@ final class CommitRowCellView: NSView {
 
     // MARK: - Refs Column
 
+    /// Cached rect for the clickable "+N" pill (set during drawRefs, used in mouseDown)
+    private var overflowPillRect: NSRect?
+
     private func drawRefs(in rect: NSRect) {
-        guard let commit = commit, !commit.refs.isEmpty else { return }
+        guard let commit = commit, !commit.refs.isEmpty else {
+            overflowPillRect = nil
+            return
+        }
         let clip = NSBezierPath(rect: rect)
         clip.addClip()
 
@@ -903,10 +909,49 @@ final class CommitRowCellView: NSView {
                                   width: size.width, height: size.height)
             countStr.draw(in: textRect, withAttributes: attrs)
 
+            // Cache the pill rect for click detection (offset by the padding used in draw)
+            overflowPillRect = pillRect.offsetBy(dx: 8, dy: 0) // account for leading padding
+
             // Tooltip for all refs
             let allRefs = commit.refs.map { RefBadgeHelper.displayName($0) }.joined(separator: ", ")
             toolTip = allRefs
+        } else {
+            overflowPillRect = nil
         }
+    }
+
+    // MARK: - Click on Refs Overflow Pill
+
+    override func mouseDown(with event: NSEvent) {
+        guard let commit = commit, commit.refs.count > 1 else {
+            super.mouseDown(with: event)
+            return
+        }
+        let loc = convert(event.locationInWindow, from: nil)
+        // Check if click is within the refs column area (badges + pill)
+        let padding: CGFloat = 8
+        let refsRect = NSRect(x: padding, y: 0, width: refsColumnWidth, height: bounds.height)
+        if refsRect.contains(loc) {
+            showRefsPopupMenu(for: commit, at: loc)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    private func showRefsPopupMenu(for commit: CommitInfo, at point: NSPoint) {
+        let menu = NSMenu()
+        for ref in commit.refs {
+            let displayName = RefBadgeHelper.menuDisplayName(ref)
+            let icon = RefBadgeHelper.iconName(for: ref)
+            let item = NSMenuItem(title: displayName, action: nil, keyEquivalent: "")
+            item.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 10, weight: .regular))
+            let tintColor = RefBadgeHelper.badgeNSColor(for: ref)
+            item.image = item.image?.tinted(with: tintColor)
+            item.isEnabled = false // display-only menu items
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 8, y: bounds.height), in: self)
     }
 
     /// Draws a single ref badge and returns its size.
@@ -1135,7 +1180,7 @@ enum RefBadgeHelper {
         let stripped = ref.replacingOccurrences(of: "HEAD -> ", with: "")
         if ref.contains("tag:") {
             let tagName = ref.replacingOccurrences(of: "tag: ", with: "").trimmingCharacters(in: .whitespaces)
-            return "🏷 \(tagName)"
+            return tagName
         } else if stripped.contains("/") {
             return stripped.trimmingCharacters(in: .whitespaces)
         } else {
@@ -1192,6 +1237,21 @@ private enum GraphColorsNS {
 
     static func color(for index: Int) -> NSColor {
         colors[abs(index) % colors.count]
+    }
+}
+
+// MARK: - NSImage Tinting Helper
+
+private extension NSImage {
+    func tinted(with color: NSColor) -> NSImage {
+        let img = self.copy() as! NSImage
+        img.lockFocus()
+        color.set()
+        let rect = NSRect(origin: .zero, size: img.size)
+        rect.fill(using: .sourceAtop)
+        img.unlockFocus()
+        img.isTemplate = false
+        return img
     }
 }
 

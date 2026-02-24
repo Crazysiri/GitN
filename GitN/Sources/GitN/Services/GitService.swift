@@ -1881,14 +1881,39 @@ actor GitService {
     }
 
     func markConflictResolved(path: String) async throws {
-        try stageFile(path)
+        try stageConflictResolved(path: path)
     }
 
     func markAllConflictsResolved() async throws {
         let files = try conflictedFiles()
         for file in files {
-            try stageFile(file.path)
+            try stageConflictResolved(path: file.path)
         }
+    }
+
+    /// Stage a conflict-resolved file: removes conflict entries (stages 1/2/3)
+    /// and adds the working directory version as stage 0.
+    private func stageConflictResolved(path: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot get index")
+        }
+        defer { git_index_free(index) }
+
+        // 1. Remove conflict entries (stages 1/2/3) for this path
+        git_index_conflict_remove(index, path)
+
+        // 2. Add the working directory version as stage 0
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        if FileManager.default.fileExists(atPath: fullPath) {
+            git_index_add_bypath(index, path)
+        } else {
+            git_index_remove_bypath(index, path)
+        }
+
+        // 3. Write the index back to disk
+        git_index_write(index)
     }
 
     func rebaseCommitMessage() -> String {

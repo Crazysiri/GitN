@@ -181,6 +181,7 @@ final class RepoViewModel {
     // MARK: - Rebase Conflict State
     var rebaseState: RebaseState?
     var isRebaseConflict: Bool { rebaseState != nil }
+    var hasUnresolvedConflicts: Bool { rebaseState?.conflictedFiles.isEmpty == false }
     var conflictMergeFile: ConflictFile?
     var conflictSides: ConflictSides?
     var conflictOutputLines: [String] = []
@@ -259,7 +260,7 @@ final class RepoViewModel {
             headCommitHash = hc
 
             let hadUncommitted = commits.first?.isUncommitted == true
-            let needsUncommitted = !sts.isEmpty
+            let needsUncommitted = !sts.isEmpty || rebaseState != nil
 
             if hadUncommitted && needsUncommitted {
                 let staged = sts.filter(\.hasStagedChanges).count
@@ -323,7 +324,16 @@ final class RepoViewModel {
             var loadedCommits: [CommitInfo] = []
             var loadedGraph: [String: CommitGraphEntry] = [:]
 
-            if !sts.isEmpty {
+            // Check rebase state early so we know if we need a WIP entry
+            if let state = try? await git.rebaseState() {
+                rebaseState = state
+                rebaseCommitMessage = await git.rebaseCommitMessage()
+            } else {
+                rebaseState = nil
+            }
+
+            let needsWIP = !sts.isEmpty || rebaseState != nil
+            if needsWIP {
                 let staged = sts.filter(\.hasStagedChanges).count
                 let unstaged = sts.filter(\.hasUnstagedChanges).count
                 let uncommitted = CommitInfo.uncommittedEntry(
@@ -347,11 +357,6 @@ final class RepoViewModel {
 
             commits = loadedCommits
             graphEntries = loadedGraph
-
-            if let state = try? await git.rebaseState() {
-                rebaseState = state
-                rebaseCommitMessage = await git.rebaseCommitMessage()
-            }
         } catch {
             print("Error loading repo data: \(error)")
         }
