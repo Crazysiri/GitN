@@ -79,7 +79,7 @@ enum AICommitService {
 
             if let found = findAgentPath() {
                 proc.executableURL = URL(fileURLWithPath: found)
-                var args = ["--print", "--trust"]
+                var args = ["--print", "--trust", "--model", "composer-1"]
                 if !effectiveAPIKey.isEmpty {
                     args = ["--api-key", effectiveAPIKey] + args
                 }
@@ -89,7 +89,7 @@ enum AICommitService {
                 // Fall back to PATH lookup via /bin/zsh -lc
                 let apiArg = effectiveAPIKey.isEmpty ? "" : "--api-key '\(effectiveAPIKey)' "
                 proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                proc.arguments = ["-lc", "cursor-agent \(apiArg)--print --trust \"$1\"", "--", prompt]
+                proc.arguments = ["-lc", "cursor-agent \(apiArg)--print --trust --model composer-1 \"$1\"", "--", prompt]
             }
 
             // Ensure user-level bin dirs are in PATH for child process

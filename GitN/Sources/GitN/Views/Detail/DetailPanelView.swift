@@ -412,37 +412,48 @@ struct DetailPanelView: View {
     private var stagingFileList: some View {
         ScrollView {
             VStack(spacing: 0) {
-                stagingSectionHeader(
-                    title: "已暂存",
-                    count: stagedFiles.count,
-                    allSelected: !stagedFiles.isEmpty,
-                    onToggle: {
-                        Task {
-                            if stagedFiles.isEmpty {
-                                await viewModel.stageAllFiles()
-                            } else {
-                                await viewModel.unstageAllFiles()
+                // Staged section — entire area is a drop target (works even when empty)
+                VStack(spacing: 0) {
+                    stagingSectionHeader(
+                        title: "已暂存",
+                        count: stagedFiles.count,
+                        allSelected: !stagedFiles.isEmpty,
+                        onToggle: {
+                            Task {
+                                if stagedFiles.isEmpty {
+                                    await viewModel.stageAllFiles()
+                                } else {
+                                    await viewModel.unstageAllFiles()
+                                }
                             }
                         }
-                    }
-                )
-
-                ForEach(stagedFiles) { file in
-                    StagingFileRow(
-                        file: file,
-                        isSelected: viewModel.selectedFilePaths.contains(file.path)
-                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
-                        isStaged: true,
-                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
-                        onToggle: { Task { await viewModel.unstageFile(file.path) } }
                     )
-                    .onTapGesture {
-                        let isMulti = NSEvent.modifierFlags.contains(.command)
-                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
-                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+
+                    ForEach(stagedFiles) { file in
+                        StagingFileRow(
+                            file: file,
+                            isSelected: viewModel.selectedFilePaths.contains(file.path)
+                                || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
+                            isStaged: true,
+                            onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
+                            onToggle: { Task { await viewModel.unstageFile(file.path) } }
+                        )
+                        .onTapGesture {
+                            let isMulti = NSEvent.modifierFlags.contains(.command)
+                            viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                            Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                        }
+                        .contextMenu { stagedFileContextMenu(file) }
+                        .draggable(file.path)
                     }
-                    .contextMenu { stagedFileContextMenu(file) }
-                    .draggable(file.path)
+
+                    // Empty drop hint when no staged files
+                    if stagedFiles.isEmpty {
+                        Text("Drag files here to stage")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, minHeight: 28)
+                    }
                 }
                 .onDrop(of: [.text], isTargeted: nil) { providers in
                     handleDrop(providers: providers, toStaged: true)
@@ -450,31 +461,42 @@ struct DetailPanelView: View {
 
                 Divider().padding(.vertical, 2)
 
-                stagingSectionHeader(
-                    title: "未暂存",
-                    count: unstagedFiles.count,
-                    allSelected: false,
-                    onToggle: {
-                        Task { await viewModel.stageAllFiles() }
-                    }
-                )
-
-                ForEach(unstagedFiles) { file in
-                    StagingFileRow(
-                        file: file,
-                        isSelected: viewModel.selectedFilePaths.contains(file.path)
-                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
-                        isStaged: false,
-                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
-                        onToggle: { Task { await viewModel.stageFile(file.path) } }
+                // Unstaged section — entire area is a drop target
+                VStack(spacing: 0) {
+                    stagingSectionHeader(
+                        title: "未暂存",
+                        count: unstagedFiles.count,
+                        allSelected: false,
+                        onToggle: {
+                            Task { await viewModel.stageAllFiles() }
+                        }
                     )
-                    .onTapGesture {
-                        let isMulti = NSEvent.modifierFlags.contains(.command)
-                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
-                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+
+                    ForEach(unstagedFiles) { file in
+                        StagingFileRow(
+                            file: file,
+                            isSelected: viewModel.selectedFilePaths.contains(file.path)
+                                || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
+                            isStaged: false,
+                            onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
+                            onToggle: { Task { await viewModel.stageFile(file.path) } }
+                        )
+                        .onTapGesture {
+                            let isMulti = NSEvent.modifierFlags.contains(.command)
+                            viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                            Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                        }
+                        .contextMenu { unstagedFileContextMenu(file) }
+                        .draggable(file.path)
                     }
-                    .contextMenu { unstagedFileContextMenu(file) }
-                    .draggable(file.path)
+
+                    // Empty drop hint when no unstaged files
+                    if unstagedFiles.isEmpty {
+                        Text("Drag files here to unstage")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, minHeight: 28)
+                    }
                 }
                 .onDrop(of: [.text], isTargeted: nil) { providers in
                     handleDrop(providers: providers, toStaged: false)
