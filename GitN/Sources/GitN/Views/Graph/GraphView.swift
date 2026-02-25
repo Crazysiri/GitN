@@ -107,6 +107,8 @@ struct GraphView: View {
             contextCommit = commit
             tagName = ""
             showCreateTagSheet = true
+        case .squashCommits(let hashes):
+            Task { await viewModel.performSquashCommits(hashes) }
         }
     }
 
@@ -277,6 +279,7 @@ enum CommitContextAction {
     case copySHA(String)
     case compareWithWorkingDir
     case createTag
+    case squashCommits([String])
 }
 
 // MARK: - NSTableView Wrapper
@@ -314,7 +317,7 @@ struct CommitTableView: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
-        scrollView.horizontalScrollElasticity = .none
+        scrollView.horizontalScrollElasticity = .allowed
 
         // Wire up graph horizontal scroll on the custom scroll view
         scrollView.graphHScroll = context.coordinator.graphHScroll
@@ -329,7 +332,7 @@ struct CommitTableView: NSViewRepresentable {
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.backgroundColor = .clear
         tableView.usesAlternatingRowBackgroundColors = false
-        tableView.allowsMultipleSelection = false
+        tableView.allowsMultipleSelection = true
         tableView.gridStyleMask = []
         tableView.selectionHighlightStyle = .none // We draw our own selection
 
@@ -374,6 +377,12 @@ struct CommitTableView: NSViewRepresentable {
         guard let tableView = coordinator.tableView else { return }
 
         if dataChanged {
+            // Reset multi-selection when data changes (commits reloaded)
+            if let hash = selectedCommitHash {
+                coordinator.selectedRowHashes = [hash]
+            } else {
+                coordinator.selectedRowHashes = []
+            }
             tableView.reloadData()
         } else {
             // Just refresh visible cells (selection change, etc.)
@@ -384,19 +393,23 @@ struct CommitTableView: NSViewRepresentable {
             }
         }
 
-        // Update selection
-        if let selectedHash = selectedCommitHash {
-            if let row = commits.firstIndex(where: { $0.hash == selectedHash }) {
-                if tableView.selectedRow != row {
-                    coordinator.isUpdatingSelection = true
-                    tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    coordinator.isUpdatingSelection = false
+        // Update selection — only force single selection when NOT in a multi-select state
+        if coordinator.selectedRowHashes.count <= 1 {
+            if let selectedHash = selectedCommitHash {
+                if let row = commits.firstIndex(where: { $0.hash == selectedHash }) {
+                    if tableView.selectedRow != row {
+                        coordinator.isUpdatingSelection = true
+                        coordinator.selectedRowHashes = [selectedHash]
+                        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                        coordinator.isUpdatingSelection = false
+                    }
                 }
+            } else if !tableView.selectedRowIndexes.isEmpty {
+                coordinator.isUpdatingSelection = true
+                coordinator.selectedRowHashes = []
+                tableView.deselectAll(nil)
+                coordinator.isUpdatingSelection = false
             }
-        } else if !tableView.selectedRowIndexes.isEmpty {
-            coordinator.isUpdatingSelection = true
-            tableView.deselectAll(nil)
-            coordinator.isUpdatingSelection = false
         }
 
         // Scroll to hash
@@ -448,6 +461,7 @@ struct CommitTableView: NSViewRepresentable {
 
         fileprivate weak var tableView: CommitNSTableView?
         var isUpdatingSelection = false
+        var selectedRowHashes: Set<String> = []
         let graphHScroll = GraphHScrollStateNS()
 
         init(parent: CommitTableView) {
@@ -464,6 +478,9 @@ struct CommitTableView: NSViewRepresentable {
             self.avatarSize = parent.avatarSize
             self.graphAreaWidth = parent.graphAreaWidth
             self.refsColumnWidth = parent.refsColumnWidth
+            if let hash = parent.selectedCommitHash {
+                self.selectedRowHashes = [hash]
+            }
         }
 
         // MARK: NSTableViewDataSource
@@ -495,7 +512,7 @@ struct CommitTableView: NSViewRepresentable {
             let commit = commits[row]
             cell.commit = commit
             cell.graphEntry = graphEntries[commit.hash]
-            cell.isSelectedRow = commit.hash == selectedCommitHash
+            cell.isSelectedRow = selectedRowHashes.contains(commit.hash)
             cell.currentBranch = currentBranch
             cell.isRebaseConflict = commit.isUncommitted && hasUnresolvedConflicts
             cell.rowHeight = rowHeight
@@ -519,14 +536,24 @@ struct CommitTableView: NSViewRepresentable {
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard !isUpdatingSelection else { return }
             guard let tableView = tableView else { return }
-            let row = tableView.selectedRow
-            guard row >= 0, row < commits.count else { return }
-            onSelectCommit?(commits[row])
+            let selectedRows = tableView.selectedRowIndexes
+
+            // Update tracked selection hashes
+            selectedRowHashes = Set(selectedRows.compactMap { row -> String? in
+                guard row >= 0, row < commits.count else { return nil }
+                return commits[row].hash
+            })
+
+            // Determine the "primary" selected row for commit detail display
+            if let lastRow = selectedRows.last, lastRow >= 0, lastRow < commits.count {
+                onSelectCommit?(commits[lastRow])
+            }
+
             // Refresh visible rows for selection highlight
             tableView.enumerateAvailableRowViews { rowView, r in
                 if let cellView = rowView.view(atColumn: 0) as? CommitRowCellView {
-                    let commit = self.commits[r]
-                    cellView.isSelectedRow = commit.hash == self.commits[row].hash
+                    guard r >= 0, r < self.commits.count else { return }
+                    cellView.isSelectedRow = self.selectedRowHashes.contains(self.commits[r].hash)
                     cellView.needsDisplay = true
                 }
             }
@@ -538,6 +565,11 @@ struct CommitTableView: NSViewRepresentable {
             guard row >= 0, row < commits.count else { return nil }
             let commit = commits[row]
             guard !commit.isUncommitted else { return nil }
+
+            // Multi-selection: show squash menu
+            if let tableView, tableView.selectedRowIndexes.count > 1 {
+                return buildMultiSelectContextMenu()
+            }
 
             let menu = NSMenu()
             let refs = commit.refs
@@ -663,6 +695,39 @@ struct CommitTableView: NSViewRepresentable {
             return menu
         }
 
+        private func buildMultiSelectContextMenu() -> NSMenu? {
+            guard let tableView else { return nil }
+            let selectedRows = tableView.selectedRowIndexes
+            let selectedCommits = selectedRows.compactMap { row -> CommitInfo? in
+                guard row >= 0, row < commits.count else { return nil }
+                let c = commits[row]
+                return c.isUncommitted ? nil : c
+            }
+            guard selectedCommits.count >= 2 else { return nil }
+
+            let menu = NSMenu()
+
+            // Squash commits
+            let hashes = selectedCommits.map(\.hash)
+            menu.addItem(menuItem("Squash \(selectedCommits.count) Commits") {
+                [weak self] in
+                guard let self else { return }
+                // Use the first commit in the selection as the anchor
+                self.onContextAction?(selectedCommits[0], .squashCommits(hashes))
+            })
+
+            menu.addItem(.separator())
+
+            // Copy SHAs
+            let shas = selectedCommits.map(\.shortHash).joined(separator: ", ")
+            menu.addItem(menuItem("Copy SHAs") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(shas, forType: .string)
+            })
+
+            return menu
+        }
+
         private func menuItem(_ title: String, action: @escaping () -> Void) -> NSMenuItem {
             let item = ClosureMenuItem(title: title, closure: action)
             return item
@@ -688,29 +753,35 @@ fileprivate final class GraphScrollView: NSScrollView {
     var columnWidth: CGFloat = 18
 
     override func scrollWheel(with event: NSEvent) {
-        // Extract horizontal delta for graph scrolling
+        // Only handle horizontal graph scrolling when the mouse is within the Graph column
         if let state = graphHScroll {
-            var dx = event.scrollingDeltaX
-            // For mouse wheel (non-precise), delta is in "lines" — scale to pixels
-            if !event.hasPreciseScrollingDeltas {
-                dx *= columnWidth
-            }
-            // Shift + vertical scroll → horizontal scroll
-            if event.modifierFlags.contains(.shift) && abs(event.scrollingDeltaY) > abs(dx) {
-                dx = event.scrollingDeltaY
+            let locationInView = convert(event.locationInWindow, from: nil)
+            let isInGraphColumn = locationInView.x >= graphColumnX
+                && locationInView.x <= graphColumnX + graphAreaWidth
+
+            if isInGraphColumn {
+                var dx = event.scrollingDeltaX
+                // For mouse wheel (non-precise), delta is in "lines" — scale to pixels
                 if !event.hasPreciseScrollingDeltas {
                     dx *= columnWidth
                 }
-            }
-            let maxOff = max(0, CGFloat(state.maxColumns + 1) * columnWidth - graphAreaWidth)
-            if abs(dx) > 0.1 && maxOff > 0 {
-                state.offset = max(0, min(maxOff, state.offset - dx))
-                // Redraw visible rows with updated offset
-                if let tableView = documentView as? NSTableView {
-                    tableView.enumerateAvailableRowViews { rowView, _ in
-                        if let cellView = rowView.view(atColumn: 0) as? CommitRowCellView {
-                            cellView.graphScrollOffset = state.offset
-                            cellView.needsDisplay = true
+                // Shift + vertical scroll → horizontal scroll
+                if event.modifierFlags.contains(.shift) && abs(event.scrollingDeltaY) > abs(dx) {
+                    dx = event.scrollingDeltaY
+                    if !event.hasPreciseScrollingDeltas {
+                        dx *= columnWidth
+                    }
+                }
+                let maxOff = max(0, CGFloat(state.maxColumns + 1) * columnWidth - graphAreaWidth)
+                if abs(dx) > 0.1 && maxOff > 0 {
+                    state.offset = max(0, min(maxOff, state.offset - dx))
+                    // Redraw visible rows with updated offset
+                    if let tableView = documentView as? NSTableView {
+                        tableView.enumerateAvailableRowViews { rowView, _ in
+                            if let cellView = rowView.view(atColumn: 0) as? CommitRowCellView {
+                                cellView.graphScrollOffset = state.offset
+                                cellView.needsDisplay = true
+                            }
                         }
                     }
                 }
@@ -731,7 +802,7 @@ fileprivate final class CommitNSTableView: NSTableView {
         let row = self.row(at: point)
         guard row >= 0 else { return nil }
 
-        // Select the row
+        // If right-clicking on an already-selected row in a multi-selection, keep selection
         if !isRowSelected(row) {
             selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }

@@ -1336,6 +1336,33 @@ actor GitService {
         try await runGit(["commit", "--amend", "-m", newMessage])
     }
 
+    /// Squash multiple commits into one using interactive rebase with GIT_SEQUENCE_EDITOR.
+    /// The hashes should be ordered from newest (top) to oldest (bottom) as they appear in the log.
+    func squashCommits(_ hashes: [String]) async throws {
+        guard hashes.count >= 2 else {
+            throw GitError.operationFailed("Need at least 2 commits to squash")
+        }
+
+        // The oldest commit is the last in the list (as ordered in git log: newest first)
+        let oldestHash = hashes.last!
+        let squashSet = Set(hashes.dropLast()) // all except the oldest get squashed
+
+        // Build a sed-like script for GIT_SEQUENCE_EDITOR that replaces "pick" with "squash"
+        // for all commits except the oldest one
+        var sedParts: [String] = []
+        for hash in squashSet {
+            let shortHash = String(hash.prefix(7))
+            sedParts.append("s/^pick \(shortHash)/squash \(shortHash)/")
+        }
+        let sedScript = sedParts.joined(separator: "; ")
+        let editor = "sed -i '' '\(sedScript)'"
+
+        try await runGitWithEnv(
+            ["rebase", "-i", "--autosquash", "\(oldestHash)^"],
+            env: ["GIT_SEQUENCE_EDITOR": editor]
+        )
+    }
+
     // Diff/compare operations kept as CLI (--follow, --numstat not in libgit2)
     func compareWithWorkingDirectory(_ hash: String) async throws -> String {
         try await runGitOutput(["diff", hash])

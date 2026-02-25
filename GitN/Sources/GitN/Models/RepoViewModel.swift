@@ -383,11 +383,12 @@ final class RepoViewModel {
     var currentDiffContext: DiffContext = .committed
 
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed) async {
-        guard let commit = selectedCommit else { return }
+        let isUncommitted = selectedCommit?.isUncommitted == true || isRebaseConflict
+        guard selectedCommit != nil || isRebaseConflict else { return }
         selectedDiffFile = file
         currentDiffContext = context
         do {
-            if commit.isUncommitted {
+            if isUncommitted {
                 let status = fileStatuses.first(where: { $0.path == file.path })
                 let statusCode = status?.statusCode ?? "M "
 
@@ -403,7 +404,7 @@ final class RepoViewModel {
                 case .committed:
                     fileDiffContent = try await git.uncommittedFileDiff(path: file.path, statusCode: statusCode)
                 }
-            } else {
+            } else if let commit = selectedCommit {
                 fileDiffContent = try await git.fileDiff(hash: commit.hash, path: file.path)
             }
             parsedDiff = DiffParserEngine.parse(fileDiffContent)
@@ -704,6 +705,19 @@ final class RepoViewModel {
 
     func performRevert(_ hash: String) async {
         await performRemoteOperation { try await $0.git.revertCommit(hash) }
+    }
+
+    func performSquashCommits(_ hashes: [String]) async {
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.squashCommits(hashes)
+            await loadAll()
+            showToast(title: "Squash Completed", detail: "Successfully squashed \(hashes.count) commits", style: .success)
+        } catch {
+            await checkForRebaseConflict(errorMessage: error.localizedDescription)
+        }
+        operationInProgress = false
     }
 
     func performDeleteBranch(_ name: String, force: Bool = false) async {

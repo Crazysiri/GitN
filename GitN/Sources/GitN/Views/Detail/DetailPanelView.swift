@@ -830,7 +830,10 @@ struct DetailPanelView: View {
             // Staged Files
             rebaseStagingFileList(state: state)
 
-            Spacer()
+            Divider()
+
+            // Diff content view
+            diffContentView
 
             Divider()
 

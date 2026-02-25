@@ -225,19 +225,6 @@ struct RepoContainerView: View {
                 Task { await viewModel.performStashPop() }
             }
 
-            Divider().frame(height: 16).padding(.horizontal, 4)
-
-            // Branch indicator
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(viewModel.currentBranch)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 6)
-
             Spacer()
 
             if viewModel.operationInProgress {
