@@ -168,3 +168,65 @@ enum GraphLayoutEngine {
         return result
     }
 }
+
+/// Lazy graph processor that computes graph entries on-demand as rows become visible.
+/// Inspired by Xit's CommitHistory batch processing — only computes graph lines for
+/// rows the user is about to see, rather than all 50000+ commits upfront.
+///
+/// The IncrementalGraphLayoutEngine is stateful and must process commits in order
+/// (row N depends on the lane state from rows 0..N-1). This class tracks how far
+/// we've processed and extends on demand.
+final class LazyGraphProcessor {
+    private var engine = IncrementalGraphLayoutEngine()
+    private var processedEntries: [CommitGraphEntry] = []
+    private var entryMap: [String: CommitGraphEntry] = [:]
+    private(set) var maxColumns: Int = 1
+    private var commits: [CommitInfo] = []
+
+    var processedCount: Int { processedEntries.count }
+
+    /// Full reset with a new commits array (e.g. when commit order changes or
+    /// the uncommitted entry is added/removed).
+    func reset(commits: [CommitInfo]) {
+        engine = IncrementalGraphLayoutEngine()
+        processedEntries.removeAll()
+        entryMap.removeAll()
+        maxColumns = 1
+        self.commits = commits
+    }
+
+    /// Update commits when new ones are appended during streaming.
+    /// Existing processed state is preserved — the engine's lane state
+    /// at `processedCount` is still valid for the next unprocessed commit.
+    func updateCommits(_ newCommits: [CommitInfo]) {
+        commits = newCommits
+    }
+
+    /// Ensure graph entries are computed through the given row index (inclusive).
+    /// Call this from `tableView(_:viewFor:row:)` with `row + visibleRows + buffer`.
+    func ensureProcessed(through index: Int) {
+        let target = min(index, commits.count - 1)
+        guard target >= processedEntries.count else { return }
+
+        processedEntries.reserveCapacity(target + 1)
+        for i in processedEntries.count...target {
+            let entry = engine.processCommit(commits[i])
+            processedEntries.append(entry)
+            entryMap[commits[i].hash] = entry
+            if entry.numColumns > maxColumns {
+                maxColumns = entry.numColumns
+            }
+        }
+    }
+
+    /// Get graph entry by row index. Returns nil if not yet processed.
+    func entry(at index: Int) -> CommitGraphEntry? {
+        guard index >= 0 && index < processedEntries.count else { return nil }
+        return processedEntries[index]
+    }
+
+    /// Get graph entry by commit hash. Returns nil if not yet processed.
+    func entry(forHash hash: String) -> CommitGraphEntry? {
+        entryMap[hash]
+    }
+}

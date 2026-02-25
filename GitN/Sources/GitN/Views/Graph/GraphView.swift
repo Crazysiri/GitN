@@ -32,7 +32,6 @@ struct GraphView: View {
             } else {
                 CommitTableView(
                     commits: viewModel.commits,
-                    graphEntries: viewModel.graphEntries,
                     selectedCommitHash: viewModel.selectedCommit?.hash,
                     currentBranch: viewModel.currentBranch,
                     hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
@@ -293,7 +292,6 @@ enum CommitContextAction {
 
 struct CommitTableView: NSViewRepresentable {
     let commits: [CommitInfo]
-    let graphEntries: [String: CommitGraphEntry]
     let selectedCommitHash: String?
     let currentBranch: String
     let hasUnresolvedConflicts: Bool
@@ -362,7 +360,6 @@ struct CommitTableView: NSViewRepresentable {
         let dataChanged = oldCommitIDs != newCommitIDs
 
         coordinator.commits = commits
-        coordinator.graphEntries = graphEntries
         coordinator.selectedCommitHash = selectedCommitHash
         coordinator.currentBranch = currentBranch
         coordinator.hasUnresolvedConflicts = hasUnresolvedConflicts
@@ -377,6 +374,19 @@ struct CommitTableView: NSViewRepresentable {
         guard let tableView = coordinator.tableView else { return }
 
         if dataChanged {
+            // Detect append vs. full change for lazy graph processor
+            let isAppend = newCommitIDs.count > oldCommitIDs.count &&
+                           !oldCommitIDs.isEmpty &&
+                           oldCommitIDs == Array(newCommitIDs.prefix(oldCommitIDs.count))
+
+            if isAppend {
+                // Streaming append — keep existing graph state, just extend commits
+                coordinator.lazyGraph.updateCommits(commits)
+            } else {
+                // Full change (reload, uncommitted entry added/removed, etc.)
+                coordinator.lazyGraph.reset(commits: commits)
+            }
+
             // Reset multi-selection when data changes (commits reloaded)
             if let hash = selectedCommitHash {
                 coordinator.selectedRowHashes = [hash]
@@ -428,8 +438,8 @@ struct CommitTableView: NSViewRepresentable {
             onConsumeScrollToHash()
         }
 
-        // Update max columns for horizontal scroll
-        let maxCols = graphEntries.values.map(\.numColumns).max() ?? 1
+        // Update max columns for horizontal scroll (from lazy processor's computed entries)
+        let maxCols = coordinator.lazyGraph.maxColumns
         coordinator.graphHScroll.maxColumns = maxCols
         let maxOff = max(0, CGFloat(maxCols + 1) * columnWidth - graphAreaWidth)
         if coordinator.graphHScroll.offset > maxOff {
@@ -447,7 +457,7 @@ struct CommitTableView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var commits: [CommitInfo] = []
         var commitIDs: [String] = []
-        var graphEntries: [String: CommitGraphEntry] = [:]
+        let lazyGraph = LazyGraphProcessor()
         var selectedCommitHash: String?
         var currentBranch: String = ""
         var hasUnresolvedConflicts: Bool = false
@@ -467,7 +477,6 @@ struct CommitTableView: NSViewRepresentable {
         init(parent: CommitTableView) {
             self.commits = parent.commits
             self.commitIDs = parent.commits.map(\.hash)
-            self.graphEntries = parent.graphEntries
             self.selectedCommitHash = parent.selectedCommitHash
             self.currentBranch = parent.currentBranch
             self.hasUnresolvedConflicts = parent.hasUnresolvedConflicts
@@ -481,6 +490,7 @@ struct CommitTableView: NSViewRepresentable {
             if let hash = parent.selectedCommitHash {
                 self.selectedRowHashes = [hash]
             }
+            lazyGraph.reset(commits: parent.commits)
         }
 
         // MARK: NSTableViewDataSource
@@ -493,6 +503,17 @@ struct CommitTableView: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard row >= 0 && row < commits.count else { return nil }
+
+            // Lazy graph: ensure entries are computed through visible range + buffer
+            let visibleRowCount = tableView.rows(
+                in: tableView.enclosingScrollView?.contentView.bounds ?? tableView.bounds
+            ).length
+            let targetRow = min(commits.count, row + visibleRowCount + 200) - 1
+            if targetRow >= lazyGraph.processedCount {
+                lazyGraph.ensureProcessed(through: targetRow)
+                // Update maxColumns for horizontal scroll
+                graphHScroll.maxColumns = lazyGraph.maxColumns
+            }
 
             let cellID = NSUserInterfaceItemIdentifier("CommitRow")
             let cell: CommitRowCellView
@@ -511,7 +532,7 @@ struct CommitTableView: NSViewRepresentable {
             guard row >= 0 && row < commits.count else { return }
             let commit = commits[row]
             cell.commit = commit
-            cell.graphEntry = graphEntries[commit.hash]
+            cell.graphEntry = lazyGraph.entry(at: row)
             cell.isSelectedRow = selectedRowHashes.contains(commit.hash)
             cell.currentBranch = currentBranch
             cell.isRebaseConflict = commit.isUncommitted && hasUnresolvedConflicts

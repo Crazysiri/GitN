@@ -17,7 +17,6 @@ final class RepoViewModel {
     var isDetachedHead: Bool = false
 
     var commits: [CommitInfo] = []
-    var graphEntries: [String: CommitGraphEntry] = [:]
     private(set) var headCommitHash: String?
     private(set) var currentBranchHashes: Set<String> = []
 
@@ -281,7 +280,6 @@ final class RepoViewModel {
                     )
                     commits.insert(uncommitted, at: 0)
                 }
-                graphEntries = GraphLayoutEngine.computeEntries(for: commits)
             }
 
             if let file = selectedDiffFile, selectedCommit?.isUncommitted == true {
@@ -323,10 +321,8 @@ final class RepoViewModel {
             isDetachedHead = dh
             currentBranchHashes = await branchHashes
 
-            // Phase 2: Stream commits with incremental graph (like gitx's PBGitRevList)
-            let graphEngine = IncrementalGraphLayoutEngine()
+            // Phase 2: Stream commits (graph is computed lazily by the view layer)
             var loadedCommits: [CommitInfo] = []
-            var loadedGraph: [String: CommitGraphEntry] = [:]
 
             // Check rebase state early so we know if we need a WIP entry
             if let state = try? await git.rebaseState() {
@@ -344,23 +340,18 @@ final class RepoViewModel {
                     parentHash: hc, stagedCount: staged, unstagedCount: unstaged
                 )
                 loadedCommits.append(uncommitted)
-                loadedGraph[uncommitted.hash] = graphEngine.processCommit(uncommitted)
             }
 
             let stream = await git.commitLogStream()
             for await batch in stream {
                 loadedCommits.reserveCapacity(loadedCommits.count + batch.count)
-                loadedGraph.reserveCapacity(loadedGraph.count + batch.count)
                 for commit in batch {
                     loadedCommits.append(commit)
-                    loadedGraph[commit.hash] = graphEngine.processCommit(commit)
                 }
                 commits = loadedCommits
-                graphEntries = loadedGraph
             }
 
             commits = loadedCommits
-            graphEntries = loadedGraph
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -663,7 +654,6 @@ final class RepoViewModel {
                 )
                 commits.insert(uncommitted, at: 0)
             }
-            graphEntries = GraphLayoutEngine.computeEntries(for: commits)
         }
     }
 
