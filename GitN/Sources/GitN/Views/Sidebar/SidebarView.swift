@@ -28,6 +28,9 @@ struct SidebarView: View {
     @State private var upstreamRemote = "origin"
     @State private var upstreamBranch = ""
 
+    @State private var showMergeConfirm = false
+    @State private var mergingMR: GitLabMR?
+
     var body: some View {
         VStack(spacing: 0) {
             repoHeader
@@ -39,6 +42,7 @@ struct SidebarView: View {
                     tagsSection
                     stashesSection
                     submodulesSection
+                    mergeRequestsSection
                 }
                 .padding(.vertical, 8)
             }
@@ -52,6 +56,20 @@ struct SidebarView: View {
         .sheet(isPresented: $showCreateTagAtBranch) { createTagAtBranchSheet }
         .sheet(isPresented: $showCreateBranchFrom) { createBranchFromSheet }
         .sheet(isPresented: $showSetUpstream) { setUpstreamSheet }
+        .alert("Merge MR", isPresented: $showMergeConfirm) {
+            Button("Merge", role: .destructive) {
+                guard let mr = mergingMR else { return }
+                Task { await viewModel.performMRMerge(mr: mr) }
+                mergingMR = nil
+            }
+            Button("Cancel", role: .cancel) {
+                mergingMR = nil
+            }
+        } message: {
+            if let mr = mergingMR {
+                Text("Will rebase '\(mr.sourceBranch)' onto '\(mr.targetBranch)' and merge MR !\(mr.iid).\n\nCurrent working directory will be stashed and restored after the operation.")
+            }
+        }
     }
 
     // MARK: - Add Remote Sheet
@@ -585,6 +603,121 @@ struct SidebarView: View {
             }
         }
     }
+
+    // MARK: - Merge Requests
+
+    private var mergeRequestsSection: some View {
+        SidebarSection(
+            title: "MERGE REQUESTS",
+            icon: "arrow.triangle.pull",
+            count: viewModel.mergeRequests.count,
+            isCollapsed: viewModel.isSectionCollapsed("mergeRequests"),
+            onToggle: {
+                let wasCollapsed = viewModel.isSectionCollapsed("mergeRequests")
+                viewModel.toggleSection("mergeRequests")
+                // 展开时加载数据
+                if wasCollapsed {
+                    Task { await viewModel.loadMergeRequests() }
+                }
+            },
+            onRefresh: {
+                Task { await viewModel.loadMergeRequests() }
+            }
+        ) {
+            // State filter picker
+            HStack(spacing: 2) {
+                ForEach(MRStateFilter.allCases) { filter in
+                    Button {
+                        Task { await viewModel.setMRFilter(filter) }
+                    } label: {
+                        Text(filter.displayName)
+                            .font(.system(size: 9, weight: viewModel.mrStateFilter == filter ? .bold : .regular))
+                            .foregroundStyle(viewModel.mrStateFilter == filter ? .white : .secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule().fill(
+                                    viewModel.mrStateFilter == filter
+                                        ? Color.accentColor.opacity(0.8)
+                                        : Color(.separatorColor).opacity(0.5)
+                                )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.leading, 28)
+            .padding(.trailing, 12)
+            .padding(.vertical, 4)
+
+            if viewModel.isMRLoading {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.small)
+                    Spacer()
+                }
+                .padding(.vertical, 8)
+            } else if let error = viewModel.mrError {
+                Text(error)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+                    .padding(.leading, 28)
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 4)
+            } else if viewModel.mergeRequests.isEmpty {
+                Text("No merge requests")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 28)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(viewModel.mergeRequests) { mr in
+                    SidebarMRRow(mr: mr)
+                        .contextMenu {
+                            mrContextMenu(mr)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .onTapGesture(count: 2) {
+                            viewModel.openMRInBrowser(mr)
+                        }
+                        .onTapGesture { }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mrContextMenu(_ mr: GitLabMR) -> some View {
+        Button("Open in Browser") {
+            viewModel.openMRInBrowser(mr)
+        }
+
+        if mr.stateEnum == .opened {
+            Divider()
+            Button("Rebase & Merge") {
+                mergingMR = mr
+                showMergeConfirm = true
+            }
+            .disabled(viewModel.isMRMerging)
+        }
+
+        Divider()
+
+        Button("Copy MR Title") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(mr.title, forType: .string)
+        }
+        Button("Copy Source Branch") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(mr.sourceBranch, forType: .string)
+        }
+        Button("Copy MR URL") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(mr.webUrl, forType: .string)
+        }
+    }
 }
 
 // MARK: - Reusable Components
@@ -596,6 +729,7 @@ struct SidebarSection<Content: View>: View {
     let isCollapsed: Bool
     let onToggle: () -> Void
     let onAdd: (() -> Void)?
+    let onRefresh: (() -> Void)?
     @ViewBuilder let content: () -> Content
 
     init(
@@ -605,6 +739,7 @@ struct SidebarSection<Content: View>: View {
         isCollapsed: Bool,
         onToggle: @escaping () -> Void,
         onAdd: (() -> Void)? = nil,
+        onRefresh: (() -> Void)? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
@@ -613,6 +748,7 @@ struct SidebarSection<Content: View>: View {
         self.isCollapsed = isCollapsed
         self.onToggle = onToggle
         self.onAdd = onAdd
+        self.onRefresh = onRefresh
         self.content = content
     }
 
@@ -645,6 +781,16 @@ struct SidebarSection<Content: View>: View {
                 .buttonStyle(.plain)
 
                 Spacer()
+
+                if let onRefresh {
+                    Button(action: onRefresh) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Refresh")
+                }
 
                 if let onAdd {
                     Button(action: onAdd) {
@@ -784,5 +930,108 @@ struct SidebarDetachedHeadRow: View {
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Merge Request Row
+
+struct SidebarMRRow: View {
+    let mr: GitLabMR
+
+    @State private var isHovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                // State icon
+                Image(systemName: mrStateIcon)
+                    .font(.caption2)
+                    .foregroundStyle(mrStateColor)
+
+                // MR IID badge
+                Text("!\(mr.iid)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(mrStateColor.opacity(0.75)))
+
+                if mr.isDraft {
+                    Text("Draft")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color(.separatorColor)))
+                }
+
+                Spacer()
+
+                if let author = mr.author {
+                    Text(author.name)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            Text(mr.title)
+                .font(.caption)
+                .lineLimit(2)
+                .foregroundStyle(.primary)
+
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                Text(mr.sourceBranch)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.tertiary)
+                Text(mr.targetBranch)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if let conflicts = mr.hasConflicts, conflicts {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.yellow)
+                    Text("Has conflicts")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.yellow)
+                }
+            }
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .onHover { isHovering = $0 }
+    }
+
+    private var mrStateIcon: String {
+        switch mr.stateEnum {
+        case .opened: return "arrow.triangle.pull"
+        case .closed: return "xmark.circle"
+        case .merged: return "arrow.triangle.merge"
+        }
+    }
+
+    private var mrStateColor: Color {
+        switch mr.stateEnum {
+        case .opened: return .green
+        case .closed: return .red
+        case .merged: return .purple
+        }
     }
 }

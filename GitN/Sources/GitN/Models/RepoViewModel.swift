@@ -46,10 +46,24 @@ final class RepoViewModel {
 
     var showTerminal = true
     var isLoading = false
-    var collapsedSections: Set<String> = {
-        let saved = UserDefaults.standard.stringArray(forKey: "SidebarCollapsedSections") ?? []
-        return Set(saved)
-    }()
+    var collapsedSections: Set<String> = []
+
+    private var collapsedSectionsKey: String { "SidebarCollapsedSections.\(repoPath)" }
+
+    private func loadCollapsedSections() {
+        let saved = UserDefaults.standard.stringArray(forKey: collapsedSectionsKey) ?? []
+        collapsedSections = Set(saved)
+        // MR section 默认折叠
+        if !UserDefaults.standard.bool(forKey: collapsedSectionsKey + ".initialized") {
+            collapsedSections.insert("mergeRequests")
+            UserDefaults.standard.set(true, forKey: collapsedSectionsKey + ".initialized")
+            saveCollapsedSections()
+        }
+    }
+
+    private func saveCollapsedSections() {
+        UserDefaults.standard.set(Array(collapsedSections), forKey: collapsedSectionsKey)
+    }
 
     // MARK: - File Context Menu Actions
 
@@ -184,6 +198,14 @@ final class RepoViewModel {
         fileHistoryParsedDiff = nil
     }
 
+    // MARK: - GitLab MR
+    var mergeRequests: [GitLabMR] = []
+    var mrStateFilter: MRStateFilter = .opened
+    var isMRLoading = false
+    var mrError: String?
+    var isMRMerging = false
+    private var gitlabService: GitLabService?
+
     // MARK: - Rebase Conflict State
     var rebaseState: RebaseState?
     var isRebaseConflict: Bool { rebaseState != nil }
@@ -224,6 +246,7 @@ final class RepoViewModel {
         self.repoPath = path
         self.repoName = name
         self.git = GitService(repoPath: path)
+        loadCollapsedSections()
     }
 
     // MARK: - File System Watcher
@@ -1274,10 +1297,66 @@ final class RepoViewModel {
         } else {
             collapsedSections.insert(section)
         }
-        UserDefaults.standard.set(Array(collapsedSections), forKey: "SidebarCollapsedSections")
+        saveCollapsedSections()
     }
 
     func isSectionCollapsed(_ section: String) -> Bool {
         collapsedSections.contains(section)
+    }
+
+    // MARK: - GitLab MR Operations
+
+    private func getGitLabService() -> GitLabService {
+        if let svc = gitlabService { return svc }
+        let svc = GitLabService(repoPath: repoPath)
+        gitlabService = svc
+        return svc
+    }
+
+    func loadMergeRequests() async {
+        guard await GitLabService.isConfigured else {
+            mergeRequests = []
+            mrError = nil
+            return
+        }
+
+        isMRLoading = true
+        mrError = nil
+        do {
+            let mrs = try await getGitLabService().listMergeRequests(state: mrStateFilter)
+            mergeRequests = mrs
+        } catch {
+            mrError = error.localizedDescription
+            mergeRequests = []
+        }
+        isMRLoading = false
+    }
+
+    func setMRFilter(_ filter: MRStateFilter) async {
+        mrStateFilter = filter
+        await loadMergeRequests()
+    }
+
+    func performMRMerge(mr: GitLabMR) async {
+        isMRMerging = true
+        do {
+            try await getGitLabService().performRebaseAndMerge(
+                mrIID: mr.iid,
+                sourceBranch: mr.sourceBranch,
+                targetBranch: mr.targetBranch
+            )
+            showToast(title: "MR Merged", detail: "!\(mr.iid) \(mr.title)", style: .success)
+            await loadMergeRequests()
+            await loadAll()
+        } catch {
+            showToast(title: "MR Merge Failed", detail: error.localizedDescription, style: .error)
+        }
+        isMRMerging = false
+    }
+
+    func openMRInBrowser(_ mr: GitLabMR) {
+        if let url = URL(string: mr.webUrl) {
+            NSWorkspace.shared.open(url)
+        }
     }
 }

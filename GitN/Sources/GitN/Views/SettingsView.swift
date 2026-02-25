@@ -6,11 +6,21 @@ struct SettingsView: View {
     @State private var promptHasChanges = false
     @State private var keyHasChanges = false
 
+    @State private var gitlabURL: String = GitLabService.gitlabURL
+    @State private var gitlabToken: String = GitLabService.gitlabToken
+    @State private var gitlabURLHasChanges = false
+    @State private var gitlabTokenHasChanges = false
+
     var body: some View {
         TabView {
             aiSettingsTab
                 .tabItem {
                     Label("AI", systemImage: "sparkles")
+                }
+
+            gitlabSettingsTab
+                .tabItem {
+                    Label("GitLab", systemImage: "network")
                 }
 
             aboutTab
@@ -171,6 +181,123 @@ struct SettingsView: View {
                 .controlSize(.small)
                 .disabled(!promptHasChanges)
             }
+        }
+    }
+
+    // MARK: - GitLab Settings
+
+    private var gitlabSettingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                gitlabURLSection
+                Divider()
+                gitlabTokenSection
+            }
+            .padding(20)
+        }
+    }
+
+    private var gitlabURLSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("GitLab URL")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Your self-hosted GitLab instance URL (e.g. https://gitlab.example.com)")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField("https://gitlab.example.com", text: $gitlabURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onChange(of: gitlabURL) {
+                        gitlabURLHasChanges = true
+                    }
+
+                Button("Save") {
+                    GitLabService.gitlabURL = gitlabURL
+                    gitlabURLHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!gitlabURLHasChanges)
+
+                if !GitLabService.gitlabURL.isEmpty {
+                    Button(role: .destructive) {
+                        gitlabURL = ""
+                        GitLabService.gitlabURL = ""
+                        gitlabURLHasChanges = false
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Clear GitLab URL")
+                }
+            }
+        }
+    }
+
+    private var gitlabTokenSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Private Token")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Your GitLab private access token. Create one at GitLab → Preferences → Access Tokens with api scope.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                SecureField("glpat-xxxxxxxxxxxxxxxxxxxx", text: $gitlabToken)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onChange(of: gitlabToken) {
+                        gitlabTokenHasChanges = true
+                    }
+
+                Button("Save") {
+                    GitLabService.gitlabToken = gitlabToken
+                    gitlabTokenHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!gitlabTokenHasChanges)
+
+                if !GitLabService.gitlabToken.isEmpty {
+                    Button(role: .destructive) {
+                        gitlabToken = ""
+                        GitLabService.gitlabToken = ""
+                        gitlabTokenHasChanges = false
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Clear token")
+                }
+            }
+
+            // Status indicator
+            HStack(spacing: 6) {
+                if !GitLabService.gitlabURL.isEmpty && !GitLabService.gitlabToken.isEmpty {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 12))
+                    Text("GitLab configured")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.system(size: 12))
+                    Text("GitLab not configured — set both URL and token to enable MR features")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 4)
         }
     }
 
