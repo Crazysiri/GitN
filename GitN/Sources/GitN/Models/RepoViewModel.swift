@@ -18,7 +18,8 @@ final class RepoViewModel {
 
     var commits: [CommitInfo] = []
     var graphEntries: [String: CommitGraphEntry] = [:]
-    private var headCommitHash: String?
+    private(set) var headCommitHash: String?
+    private(set) var currentBranchHashes: Set<String> = []
 
     var selectedCommit: CommitInfo?
     var diffFiles: [DiffFile] = []
@@ -258,6 +259,7 @@ final class RepoViewModel {
             fileStatuses = sts
             let hc = try await git.headCommitHash()
             headCommitHash = hc
+            currentBranchHashes = (try? await git.commitHashesOnCurrentBranch()) ?? currentBranchHashes
 
             let hadUncommitted = commits.first?.isUncommitted == true
             let needsUncommitted = !sts.isEmpty || rebaseState != nil
@@ -304,9 +306,10 @@ final class RepoViewModel {
             async let stat = git.status()
             async let hch = git.headCommitHash()
             async let detached = git.isDetachedHead()
+            async let branchHashes = git.commitHashesOnCurrentBranch()
 
-            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh) = try await (
-                b, rb, r, t, st, sub, cur, stat, hch, detached
+            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh, bh) = try await (
+                b, rb, r, t, st, sub, cur, stat, hch, detached, branchHashes
             )
             localBranches = lb
             remoteBranches = rbs
@@ -318,6 +321,7 @@ final class RepoViewModel {
             fileStatuses = sts
             headCommitHash = hc
             isDetachedHead = dh
+            currentBranchHashes = bh
 
             // Phase 2: Stream commits with incremental graph (like gitx's PBGitRevList)
             let graphEngine = IncrementalGraphLayoutEngine()
@@ -770,7 +774,17 @@ final class RepoViewModel {
         if hash == headCommitHash {
             await performRemoteOperation { try await $0.git.amendCommitMessage(newMessage) }
         } else {
-            operationError = "Can only edit the HEAD commit message (amend)."
+            // Non-HEAD commit: use interactive rebase to reword
+            operationInProgress = true
+            operationError = nil
+            do {
+                try await git.rewordCommitMessage(hash: hash, newMessage: newMessage)
+                await loadAll()
+                showToast(title: "Message Updated", style: .success)
+            } catch {
+                await checkForRebaseConflict(errorMessage: error.localizedDescription)
+            }
+            operationInProgress = false
         }
     }
 

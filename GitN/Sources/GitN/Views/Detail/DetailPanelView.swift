@@ -3,6 +3,10 @@ import SwiftUI
 struct DetailPanelView: View {
     let viewModel: RepoViewModel
 
+    @State private var isEditingMessage = false
+    @State private var editedMessage = ""
+    @State private var isHoveringMessage = false
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.isRebaseConflict, let state = viewModel.rebaseState {
@@ -33,30 +37,151 @@ struct DetailPanelView: View {
         .background(Color(.controlBackgroundColor).opacity(0.3))
     }
 
+    /// Only commits on the current branch (reachable from HEAD) can be edited
+    private var isEditableCommit: Bool {
+        guard let commit = viewModel.selectedCommit, !commit.isUncommitted else { return false }
+        return viewModel.currentBranchHashes.contains(commit.hash)
+    }
+
     private func commitInfoHeader(_ commit: CommitInfo) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(commit.message)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(3)
-
-            HStack(spacing: 8) {
-                Label(commit.authorName, systemImage: "person")
-                Label(formattedDate(commit.date), systemImage: "calendar")
-            }
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
-
-            HStack(spacing: 4) {
+            // Commit hash + label
+            HStack(spacing: 6) {
+                Text("commit:")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
                 Text(commit.shortHash)
-                    .font(.system(size: 10, design: .monospaced))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color(.separatorColor).opacity(0.4))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Spacer()
+            }
+
+            if isEditingMessage {
+                // Editable message area
+                VStack(alignment: .leading, spacing: 6) {
+                    // Summary field with char count
+                    HStack(spacing: 0) {
+                        TextField("Summary", text: $editedMessage, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11))
+                            .lineLimit(1...5)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
+
+                        Text("\(72 - editedMessage.count)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(editedMessage.count > 72 ? .red : .secondary)
+                            .padding(.trailing, 6)
+                    }
+                    .background(Color(.textBackgroundColor).opacity(0.5))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
                     )
 
-                if commit.isMerge {
+                    // Description field
+                    CommitMessageEditor(
+                        text: .constant(""),
+                        placeholder: "Description"
+                    )
+                    .frame(minHeight: 30, maxHeight: 50)
+                    .background(Color(.textBackgroundColor).opacity(0.5))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+                    )
+
+                    // Update / Cancel buttons
+                    HStack(spacing: 8) {
+                        Button(action: {
+                            let msg = editedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !msg.isEmpty else { return }
+                            isEditingMessage = false
+                            Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: msg) }
+                        }) {
+                            Text("Update Message")
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .tint(.green)
+                        .disabled(editedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button(action: {
+                            isEditingMessage = false
+                            editedMessage = ""
+                        }) {
+                            Text("Cancel Amend")
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(.red)
+                    }
+                }
+            } else {
+                // Read-only message with hover border
+                Text(commit.message)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(
+                                isHoveringMessage && isEditableCommit
+                                    ? Color.accentColor.opacity(0.5)
+                                    : Color.clear,
+                                lineWidth: 1
+                            )
+                    )
+                    .onHover { hovering in
+                        isHoveringMessage = hovering
+                    }
+                    .onTapGesture {
+                        guard isEditableCommit else { return }
+                        editedMessage = commit.message
+                        isEditingMessage = true
+                    }
+                    .help(isEditableCommit ? "Click to edit commit message" : "")
+            }
+
+            // Author info and parent hash
+            HStack(spacing: 0) {
+                // Avatar
+                ZStack {
+                    Circle()
+                        .fill(avatarColor(for: commit.authorName))
+                        .frame(width: 28, height: 28)
+                    Text(avatarInitial(commit.authorName))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(commit.authorName)
+                        .font(.system(size: 11, weight: .medium))
+                    Text("authored \(formattedDate(commit.date))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 6)
+
+                Spacer()
+
+                if let parentHash = commit.parentHashes.first {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text("parent: \(String(parentHash.prefix(6)))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            // Merge badge
+            if commit.isMerge {
+                HStack(spacing: 4) {
                     Text("Merge")
                         .font(.system(size: 9, weight: .medium))
                         .padding(.horizontal, 5)
@@ -66,12 +191,33 @@ struct DetailPanelView: View {
                                 .fill(Color.purple.opacity(0.2))
                         )
                         .foregroundStyle(.purple)
+                    Spacer()
                 }
-
-                Spacer()
             }
         }
         .padding(10)
+        .onChange(of: viewModel.selectedCommit?.hash) { _, _ in
+            // Reset editing state when selecting a different commit
+            isEditingMessage = false
+            editedMessage = ""
+            isHoveringMessage = false
+        }
+    }
+
+    // MARK: - Avatar Helpers
+
+    private func avatarInitial(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "?" : String(trimmed.first!).uppercased()
+    }
+
+    private func avatarColor(for name: String) -> Color {
+        var hash = 5381
+        for char in name.unicodeScalars {
+            hash = ((hash << 5) &+ hash) &+ Int(char.value)
+        }
+        let hue = Double(abs(hash) % 360) / 360.0
+        return Color(hue: hue, saturation: 0.35, brightness: 0.45)
     }
 
     // MARK: - Compare mode

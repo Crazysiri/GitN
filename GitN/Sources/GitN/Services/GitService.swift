@@ -122,6 +122,12 @@ actor GitService {
         return oidToHash(oid)
     }
 
+    /// Returns the set of commit hashes reachable from HEAD (i.e. on the current branch).
+    func commitHashesOnCurrentBranch() async throws -> Set<String> {
+        let output = try await runGitOutput(["rev-list", "HEAD"])
+        return Set(output.components(separatedBy: "\n").filter { !$0.isEmpty })
+    }
+
     // MARK: - Branches
 
     func localBranches() throws -> [BranchInfo] {
@@ -1334,6 +1340,29 @@ actor GitService {
 
     func amendCommitMessage(_ newMessage: String) async throws {
         try await runGit(["commit", "--amend", "-m", newMessage])
+    }
+
+    /// Reword a non-HEAD commit message using interactive rebase with GIT_SEQUENCE_EDITOR.
+    func rewordCommitMessage(hash: String, newMessage: String) async throws {
+        // Write the new message to a temp file so it can handle multi-line and special characters
+        let tmpFile = FileManager.default.temporaryDirectory.appendingPathComponent("gitn_reword_\(UUID().uuidString).txt")
+        try newMessage.write(to: tmpFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+
+        // GIT_SEQUENCE_EDITOR: change 'pick <hash>' to 'reword <hash>' for the target commit
+        let shortHash = String(hash.prefix(7))
+        let seqEditor = "sed -i '' 's/^pick \(shortHash)/reword \(shortHash)/'"
+
+        // GIT_EDITOR: use a script that replaces the commit message with our temp file content
+        let editor = "cp \(tmpFile.path)"
+
+        try await runGitWithEnv(
+            ["rebase", "-i", "\(hash)^"],
+            env: [
+                "GIT_SEQUENCE_EDITOR": seqEditor,
+                "GIT_EDITOR": editor
+            ]
+        )
     }
 
     /// Squash multiple commits into one using interactive rebase with GIT_SEQUENCE_EDITOR.
