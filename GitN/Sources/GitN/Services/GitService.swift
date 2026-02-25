@@ -1585,6 +1585,27 @@ actor GitService {
 
     // MARK: - Git CLI helper
 
+    /// Extend PATH so git hooks (e.g. git-lfs pre-push) can find tools installed
+    /// in locations not present in a GUI app's default environment.
+    private static func enrichedEnvironment(extra: [String: String]? = nil) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            NSHomeDirectory() + "/.local/bin",
+        ]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let missing = extraPaths.filter { !currentPath.contains($0) }
+        if !missing.isEmpty {
+            env["PATH"] = (missing + [currentPath]).joined(separator: ":")
+        }
+        if let extra {
+            for (key, value) in extra { env[key] = value }
+        }
+        return env
+    }
+
     private func runGit(_ args: [String]) async throws {
         try await runGitWithEnv(args, env: nil)
     }
@@ -1597,11 +1618,7 @@ actor GitService {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                if let env {
-                    var merged = ProcessInfo.processInfo.environment
-                    for (key, value) in env { merged[key] = value }
-                    proc.environment = merged
-                }
+                proc.environment = Self.enrichedEnvironment(extra: env)
                 let pipe = Pipe()
                 let errPipe = Pipe()
                 proc.standardOutput = pipe
@@ -1635,6 +1652,7 @@ actor GitService {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                proc.environment = Self.enrichedEnvironment()
                 let pipe = Pipe()
                 let errPipe = Pipe()
                 proc.standardOutput = pipe
@@ -1679,6 +1697,7 @@ actor GitService {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                proc.environment = Self.enrichedEnvironment()
 
                 let inputPipe = Pipe()
                 let outPipe = Pipe()

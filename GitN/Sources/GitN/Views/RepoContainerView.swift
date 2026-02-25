@@ -55,6 +55,24 @@ struct RepoContainerView: View {
                     }
                 }
             }
+
+            // Global MR merging overlay — blocks all interaction
+            if viewModel.isMRMerging {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle()) // absorb all clicks
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text(viewModel.mrMergingStatus)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                }
+                .padding(32)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
         }
         .task {
             await viewModel.loadAll()

@@ -230,47 +230,78 @@ actor GitLabService {
             try await runGit(["stash", "save", "GitN: auto-stash before MR rebase"])
         }
         
+        // Helper: restore original branch and stash
+        func restore() async {
+            if originalBranch != sourceBranch {
+                try? await runGit(["checkout", originalBranch])
+            }
+            if hasChanges { try? await runGit(["stash", "pop"]) }
+        }
+        
         do {
             // Step 2: Fetch latest
             try await runGit(["fetch", "origin"])
             
             // Step 3: Checkout source branch
-            try await runGit(["checkout", sourceBranch])
+            // Check if we're already on the source branch
+            let currentBranch = try await runGitOutput(["rev-parse", "--abbrev-ref", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentBranch != sourceBranch {
+                // Check if local branch exists
+                let branchExists = (try? await runGitOutput(["rev-parse", "--verify", sourceBranch])) != nil
+                if branchExists {
+                    try await runGit(["checkout", sourceBranch])
+                } else {
+                    // Create local tracking branch from origin
+                    try await runGit(["checkout", "-b", sourceBranch, "origin/\(sourceBranch)"])
+                }
+            }
             
-            // Step 4: Rebase onto target
+            // Step 4: Reset source branch to match remote (in case local is stale)
+            try await runGit(["reset", "--hard", "origin/\(sourceBranch)"])
+            
+            // Step 5: Rebase onto target
             do {
                 try await runGit(["rebase", "origin/\(targetBranch)"])
             } catch {
                 // Rebase failed, abort and restore
                 try? await runGit(["rebase", "--abort"])
-                try? await runGit(["checkout", originalBranch])
-                if hasChanges { try? await runGit(["stash", "pop"]) }
+                await restore()
                 throw GitLabError.rebaseFailed(sourceBranch, targetBranch, error.localizedDescription)
             }
             
-            // Step 5: Force push the rebased source branch
+            // Step 6: Force push the rebased source branch
             try await runGit(["push", "origin", sourceBranch, "--force-with-lease"])
             
-            // Step 6: Call API to merge
-            do {
-                try await acceptMergeRequest(mrIID: mrIID)
-            } catch {
-                // API merge failed, restore
-                try? await runGit(["checkout", originalBranch])
-                if hasChanges { try? await runGit(["stash", "pop"]) }
-                throw GitLabError.mergeFailed(error.localizedDescription)
+            // Step 7: Wait for GitLab to process the push, then call API to merge (with retry)
+            try await Task.sleep(nanoseconds: 2_000_000_000) // 2s
+            
+            let maxRetries = 2
+            var lastMergeError: Error?
+            for attempt in 0...maxRetries {
+                do {
+                    try await acceptMergeRequest(mrIID: mrIID)
+                    lastMergeError = nil
+                    break
+                } catch {
+                    lastMergeError = error
+                    if attempt < maxRetries {
+                        try await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                    }
+                }
+            }
+            if let mergeError = lastMergeError {
+                await restore()
+                throw GitLabError.mergeFailed(mergeError.localizedDescription)
             }
             
-            // Step 7: Restore original branch
-            try? await runGit(["checkout", originalBranch])
-            if hasChanges { try? await runGit(["stash", "pop"]) }
+            // Step 8: Restore original branch & stash
+            await restore()
             
         } catch let error as GitLabError {
             throw error
         } catch {
             // Generic failure, restore
-            try? await runGit(["checkout", originalBranch])
-            if hasChanges { try? await runGit(["stash", "pop"]) }
+            await restore()
             throw error
         }
     }
@@ -309,6 +340,23 @@ actor GitLabService {
     
     // MARK: - Git CLI helpers (same pattern as GitService)
     
+    /// Extend PATH so git hooks (e.g. git-lfs) can find tools installed via Homebrew etc.
+    private static func enrichedEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            NSHomeDirectory() + "/.local/bin",
+        ]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let missing = extraPaths.filter { !currentPath.contains($0) }
+        if !missing.isEmpty {
+            env["PATH"] = (missing + [currentPath]).joined(separator: ":")
+        }
+        return env
+    }
+    
     private func runGit(_ args: [String]) async throws {
         let path = repoPath
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -317,6 +365,7 @@ actor GitLabService {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                proc.environment = Self.enrichedEnvironment()
                 let pipe = Pipe()
                 let errPipe = Pipe()
                 proc.standardOutput = pipe
@@ -347,6 +396,7 @@ actor GitLabService {
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
                 proc.arguments = args
                 proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                proc.environment = Self.enrichedEnvironment()
                 let pipe = Pipe()
                 let errPipe = Pipe()
                 proc.standardOutput = pipe

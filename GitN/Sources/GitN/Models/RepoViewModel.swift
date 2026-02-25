@@ -204,6 +204,7 @@ final class RepoViewModel {
     var isMRLoading = false
     var mrError: String?
     var isMRMerging = false
+    var mrMergingStatus: String = ""
     private var gitlabService: GitLabService?
 
     // MARK: - Rebase Conflict State
@@ -1339,6 +1340,7 @@ final class RepoViewModel {
 
     func performMRMerge(mr: GitLabMR) async {
         isMRMerging = true
+        mrMergingStatus = "Rebase & Merge !\(mr.iid) \(mr.title) …"
         do {
             try await getGitLabService().performRebaseAndMerge(
                 mrIID: mr.iid,
@@ -1352,6 +1354,7 @@ final class RepoViewModel {
             showToast(title: "MR Merge Failed", detail: error.localizedDescription, style: .error)
         }
         isMRMerging = false
+        mrMergingStatus = ""
     }
 
     func openMRInBrowser(_ mr: GitLabMR) {
