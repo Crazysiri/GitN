@@ -77,11 +77,15 @@ struct RepoContainerView: View {
             "Branch Not Fully Merged",
             isPresented: Binding(
                 get: { viewModel.showForceDeleteBranchPrompt },
-                set: { if !$0 { viewModel.cancelForceDeleteBranch() } }
+                set: { if !$0 { viewModel.showForceDeleteBranchPrompt = false } }
             )
         ) {
             Button("Force Delete", role: .destructive) {
-                Task { await viewModel.confirmForceDeleteBranch() }
+                // Capture the name synchronously before the alert dismissal
+                // clears it via the binding setter.
+                let name = viewModel.forceDeleteBranchName
+                viewModel.forceDeleteBranchName = ""
+                Task { await viewModel.performDeleteBranch(name, force: true) }
             }
             Button("Cancel", role: .cancel) {
                 viewModel.cancelForceDeleteBranch()

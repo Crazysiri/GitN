@@ -1891,8 +1891,12 @@ actor GitService {
         }
     }
 
-    /// Stage a conflict-resolved file: removes conflict entries (stages 1/2/3)
-    /// and adds the working directory version as stage 0.
+    /// Stage a conflict-resolved file: adds the working directory version as
+    /// stage 0. `git_index_add_bypath` / `git_index_remove_bypath` internally
+    /// move conflict entries (stages 1/2/3) into the REUC (Resolved Unmerged
+    /// Conflicts) section, so we must NOT call `git_index_conflict_remove`
+    /// beforehand – otherwise the REUC data is lost and we can't later
+    /// restore the conflict via "Mark as Conflicted".
     private func stageConflictResolved(path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
         var index: OpaquePointer?
@@ -1901,10 +1905,8 @@ actor GitService {
         }
         defer { git_index_free(index) }
 
-        // 1. Remove conflict entries (stages 1/2/3) for this path
-        git_index_conflict_remove(index, path)
-
-        // 2. Add the working directory version as stage 0
+        // Add working directory version as stage 0.
+        // This also moves any existing conflict entries to REUC automatically.
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         if FileManager.default.fileExists(atPath: fullPath) {
             git_index_add_bypath(index, path)
@@ -1912,18 +1914,100 @@ actor GitService {
             git_index_remove_bypath(index, path)
         }
 
-        // 3. Write the index back to disk
         git_index_write(index)
     }
 
-    /// Mark a resolved file as conflicted again by unstaging it first
-    /// (so stage-0 entry is removed), then re-creating the merge conflict
-    /// via `git checkout -m`.
-    func markFileConflicted(path: String) async throws {
-        // 1. Unstage the file first (remove stage-0 entry) so checkout -m can work
-        try await runGit(["reset", "HEAD", "--", path])
-        // 2. Re-create the merge conflict markers and index conflict entries
-        try await runGit(["checkout", "-m", "--", path])
+    /// Mark a resolved file as conflicted again by restoring the original
+    /// conflict entries from the REUC (Resolved Unmerged Conflicts) section
+    /// of the index, and regenerating the conflicted file with merge markers
+    /// using `git_merge_file_from_index`.
+    func markFileConflicted(path: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot get index")
+        }
+        defer { git_index_free(index) }
+
+        // 1. Look up the REUC entry that was saved when the conflict was resolved.
+        guard let reucEntry = git_index_reuc_get_bypath(index, path) else {
+            throw GitError.operationFailed("No resolved conflict info for '\(path)'")
+        }
+
+        // Extract the three-way merge OIDs and modes before mutating the index.
+        let ancestorMode = reucEntry.pointee.mode.0
+        let oursMode     = reucEntry.pointee.mode.1
+        let theirsMode   = reucEntry.pointee.mode.2
+        let ancestorOid  = reucEntry.pointee.oid.0
+        let oursOid      = reucEntry.pointee.oid.1
+        let theirsOid    = reucEntry.pointee.oid.2
+
+        // 2. Remove the current stage-0 (resolved) entry.
+        git_index_remove_bypath(index, path)
+
+        // 3. Build heap-allocated entry pointers (nil when mode == 0).
+        let cPath = strdup(path)
+        defer { free(cPath) }
+
+        func makeEntryPtr(mode: UInt32, oid: git_oid) -> UnsafeMutablePointer<git_index_entry>? {
+            guard mode != 0 else { return nil }
+            let p = UnsafeMutablePointer<git_index_entry>.allocate(capacity: 1)
+            p.initialize(to: git_index_entry())
+            p.pointee.path = UnsafePointer(cPath)
+            p.pointee.mode = mode
+            p.pointee.id   = oid
+            return p
+        }
+
+        let ancestorPtr = makeEntryPtr(mode: ancestorMode, oid: ancestorOid)
+        let oursPtr     = makeEntryPtr(mode: oursMode,     oid: oursOid)
+        let theirsPtr   = makeEntryPtr(mode: theirsMode,   oid: theirsOid)
+        defer {
+            ancestorPtr?.deinitialize(count: 1); ancestorPtr?.deallocate()
+            oursPtr?.deinitialize(count: 1);     oursPtr?.deallocate()
+            theirsPtr?.deinitialize(count: 1);   theirsPtr?.deallocate()
+        }
+
+        // 4. Re-add conflict entries (stages 1/2/3) to the index.
+        let addRc = git_index_conflict_add(index, ancestorPtr, oursPtr, theirsPtr)
+        guard addRc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Restore conflict failed", code: addRc))
+        }
+
+        // 5. Regenerate the working-tree file with conflict markers.
+        let oursLabel    = conflictOursLabel()
+        let theirsLabel  = conflictTheirsLabel()
+        let cOursLabel   = strdup(oursLabel)
+        let cTheirsLabel = strdup(theirsLabel)
+        defer { free(cOursLabel); free(cTheirsLabel) }
+
+        var opts = git_merge_file_options()
+        git_merge_file_options_init(&opts, UInt32(GIT_MERGE_FILE_OPTIONS_VERSION))
+        opts.our_label   = UnsafePointer(cOursLabel)
+        opts.their_label = UnsafePointer(cTheirsLabel)
+
+        var mergeResult = git_merge_file_result()
+        let mergeRc = git_merge_file_from_index(
+            &mergeResult, repo, ancestorPtr, oursPtr, theirsPtr, &opts
+        )
+        defer { git_merge_file_result_free(&mergeResult) }
+
+        guard mergeRc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Cannot recreate conflict", code: mergeRc))
+        }
+
+        if let ptr = mergeResult.ptr {
+            let data = Data(bytes: ptr, count: mergeResult.len)
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            try data.write(to: URL(fileURLWithPath: fullPath))
+        }
+
+        // 6. Remove the now-obsolete REUC entry and write the index.
+        var reucPos: Int = 0
+        if git_index_reuc_find(&reucPos, index, path) == 0 {
+            git_index_reuc_remove(index, reucPos)
+        }
+        git_index_write(index)
     }
 
     func rebaseCommitMessage() -> String {
