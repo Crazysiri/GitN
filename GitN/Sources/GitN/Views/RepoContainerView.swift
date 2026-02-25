@@ -250,10 +250,10 @@ struct RepoContainerView: View {
                 HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.yellow)
                     Text(error)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.red)
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.orange)
                         .lineLimit(1)
                 }
                 .padding(.trailing, 4)

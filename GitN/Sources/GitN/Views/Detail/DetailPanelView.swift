@@ -835,7 +835,7 @@ struct DetailPanelView: View {
             Divider()
 
             // Commit section
-            VStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 4) {
                     Image(systemName: "circle.dotted")
                         .font(.system(size: 10))
@@ -857,6 +857,7 @@ struct DetailPanelView: View {
                 Text("Rebasing commit \(state.currentStep) out of \(state.totalSteps)")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Commit message editor
                 TextEditor(text: Binding(
@@ -899,14 +900,6 @@ struct DetailPanelView: View {
 
             // Action Buttons
             HStack(spacing: 8) {
-                Button(action: { Task { await viewModel.rebaseSkip() } }) {
-                    Text("Skip Commit")
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
                 Button(action: { Task { await viewModel.rebaseAbort() } }) {
                     Text("Abort Rebase")
                         .font(.system(size: 11, weight: .medium))
@@ -915,12 +908,7 @@ struct DetailPanelView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .tint(.red)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
 
-            // Continue button (only when all conflicts resolved)
-            if state.conflictedFiles.isEmpty {
                 Button(action: { Task { await viewModel.rebaseContinue() } }) {
                     Text("Continue Rebase")
                         .font(.system(size: 11, weight: .medium))
@@ -928,9 +916,10 @@ struct DetailPanelView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
+                .disabled(!state.conflictedFiles.isEmpty)
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
         }
     }
 
