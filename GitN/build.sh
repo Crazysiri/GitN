@@ -55,6 +55,10 @@ fi
 echo ""
 echo "[2/3] Building Swift package (${BUILD_CONFIG})..."
 
+echo "       Cleaning previous build..."
+swift package clean 2>/dev/null || true
+rm -rf .build
+
 swift build -c "$BUILD_CONFIG" 2>&1
 
 BINARY="${BUILD_DIR}/${APP_NAME}"

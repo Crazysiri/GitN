@@ -417,23 +417,34 @@ actor GitService {
         batchSize: Int,
         continuation: AsyncStream<[CommitInfo]>.Continuation
     ) {
+        // Ensure libgit2 is initialized on this detached thread
+        git_libgit2_init()
+        defer { git_libgit2_shutdown() }
+
         var repo: OpaquePointer?
-        guard git_repository_open(&repo, repoPath) == 0, let repo else {
+        let openResult = git_repository_open(&repo, repoPath)
+        guard openResult == 0, let repo else {
+            print("[GitService] _produceCommitBatches: git_repository_open failed for '\(repoPath)', error=\(openResult)")
             continuation.finish()
             return
         }
         defer { git_repository_free(repo) }
 
         var walker: OpaquePointer?
-        guard git_revwalk_new(&walker, repo) == 0, let walker else {
+        let walkResult = git_revwalk_new(&walker, repo)
+        guard walkResult == 0, let walker else {
+            print("[GitService] _produceCommitBatches: git_revwalk_new failed, error=\(walkResult)")
             continuation.finish()
             return
         }
         defer { git_revwalk_free(walker) }
 
         git_revwalk_sorting(walker, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
-        git_revwalk_push_glob(walker, "refs/heads/*")
-        git_revwalk_push_glob(walker, "refs/remotes/*")
+        let headsResult = git_revwalk_push_glob(walker, "refs/heads/*")
+        let remotesResult = git_revwalk_push_glob(walker, "refs/remotes/*")
+        if headsResult != 0 || remotesResult != 0 {
+            print("[GitService] _produceCommitBatches: push_glob heads=\(headsResult) remotes=\(remotesResult)")
+        }
 
         func oidStr(_ ptr: UnsafePointer<git_oid>) -> String {
             var buf = [CChar](repeating: 0, count: 41)
@@ -457,6 +468,7 @@ actor GitService {
         }
 
         var batch: [CommitInfo] = []
+        var totalYielded = 0
         var isFirstBatch = true
         let currentLimit = firstBatch
         batch.reserveCapacity(currentLimit)
@@ -505,6 +517,7 @@ actor GitService {
 
             let limit = isFirstBatch ? firstBatch : batchSize
             if batch.count >= limit {
+                totalYielded += batch.count
                 continuation.yield(batch)
                 batch = []
                 batch.reserveCapacity(batchSize)
@@ -513,8 +526,10 @@ actor GitService {
         }
 
         if !batch.isEmpty {
+            totalYielded += batch.count
             continuation.yield(batch)
         }
+        print("[GitService] _produceCommitBatches: finished for '\(repoPath)', total commits=\(totalYielded)")
         continuation.finish()
     }
 
@@ -1565,59 +1580,73 @@ actor GitService {
     }
 
     private func runGitWithEnv(_ args: [String], env: [String: String]?) async throws {
+        let path = repoPath
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = args
-            proc.currentDirectoryURL = URL(fileURLWithPath: repoPath)
-            if let env {
-                var merged = ProcessInfo.processInfo.environment
-                for (key, value) in env { merged[key] = value }
-                proc.environment = merged
-            }
-            let pipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = errPipe
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus != 0 {
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                    continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                } else {
-                    continuation.resume()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                proc.arguments = args
+                proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                if let env {
+                    var merged = ProcessInfo.processInfo.environment
+                    for (key, value) in env { merged[key] = value }
+                    proc.environment = merged
                 }
-            } catch {
-                continuation.resume(throwing: error)
+                let pipe = Pipe()
+                let errPipe = Pipe()
+                proc.standardOutput = pipe
+                proc.standardError = errPipe
+                do {
+                    try proc.run()
+                    // Drain stdout BEFORE waitUntilExit to prevent pipe buffer deadlock.
+                    // When output exceeds the ~64 KB pipe buffer the subprocess blocks
+                    // waiting for a reader, so we must read first.
+                    let _ = pipe.fileHandleForReading.readDataToEndOfFile()
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    proc.waitUntilExit()
+                    if proc.terminationStatus != 0 {
+                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
+                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    } else {
+                        continuation.resume()
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
 
     private func runGitOutput(_ args: [String]) async throws -> String {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = args
-            proc.currentDirectoryURL = URL(fileURLWithPath: repoPath)
-            let pipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = errPipe
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                if proc.terminationStatus != 0 {
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                    continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                } else {
+        let path = repoPath
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                proc.arguments = args
+                proc.currentDirectoryURL = URL(fileURLWithPath: path)
+                let pipe = Pipe()
+                let errPipe = Pipe()
+                proc.standardOutput = pipe
+                proc.standardError = errPipe
+                do {
+                    try proc.run()
+                    // Read stdout BEFORE waitUntilExit to prevent pipe buffer deadlock.
+                    // For large repos, commands like `git rev-list HEAD` can produce output
+                    // exceeding the ~64 KB pipe buffer, causing the subprocess to block
+                    // if no one is reading.
                     let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    proc.waitUntilExit()
+                    if proc.terminationStatus != 0 {
+                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
+                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    } else {
+                        continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-            } catch {
-                continuation.resume(throwing: error)
             }
         }
     }
@@ -1632,36 +1661,42 @@ actor GitService {
         if cached { args.append("--cached") }
         if reverse { args.append("--reverse") }
         args.append("-")
+        let path = repoPath
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            proc.arguments = args
-            proc.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                proc.arguments = args
+                proc.currentDirectoryURL = URL(fileURLWithPath: path)
 
-            let inputPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardInput = inputPipe
-            proc.standardOutput = Pipe()
-            proc.standardError = errPipe
+                let inputPipe = Pipe()
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                proc.standardInput = inputPipe
+                proc.standardOutput = outPipe
+                proc.standardError = errPipe
 
-            do {
-                try proc.run()
-                if let data = patch.data(using: .utf8) {
-                    inputPipe.fileHandleForWriting.write(data)
-                }
-                inputPipe.fileHandleForWriting.closeFile()
-                proc.waitUntilExit()
-
-                if proc.terminationStatus != 0 {
+                do {
+                    try proc.run()
+                    if let data = patch.data(using: .utf8) {
+                        inputPipe.fileHandleForWriting.write(data)
+                    }
+                    inputPipe.fileHandleForWriting.closeFile()
+                    // Drain pipes before waitUntilExit to prevent buffer deadlock
+                    let _ = outPipe.fileHandleForReading.readDataToEndOfFile()
                     let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let msg = String(data: errData, encoding: .utf8) ?? "git apply failed"
-                    continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                } else {
-                    continuation.resume()
+                    proc.waitUntilExit()
+
+                    if proc.terminationStatus != 0 {
+                        let msg = String(data: errData, encoding: .utf8) ?? "git apply failed"
+                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    } else {
+                        continuation.resume()
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-            } catch {
-                continuation.resume(throwing: error)
             }
         }
     }
@@ -2117,20 +2152,32 @@ actor GitService {
             try fm.createDirectory(atPath: sshDir, withIntermediateDirectories: true)
         }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keyscan")
-        proc.arguments = ["-H", host]
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keyscan")
+                proc.arguments = ["-H", host]
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                proc.standardOutput = outPipe
+                proc.standardError = errPipe
 
-        try proc.run()
-        proc.waitUntilExit()
+                do {
+                    try proc.run()
+                    // Read pipes before waitUntilExit to prevent buffer deadlock
+                    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    let _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    proc.waitUntilExit()
 
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        guard !data.isEmpty else {
-            throw GitError.operationFailed("ssh-keyscan returned no keys for \(host)")
+                    guard !outData.isEmpty else {
+                        continuation.resume(throwing: GitError.operationFailed("ssh-keyscan returned no keys for \(host)"))
+                        return
+                    }
+                    continuation.resume(returning: outData)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
 
         if let fh = FileHandle(forWritingAtPath: knownHostsPath) {
