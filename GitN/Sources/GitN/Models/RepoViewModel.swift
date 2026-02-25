@@ -259,7 +259,7 @@ final class RepoViewModel {
             fileStatuses = sts
             let hc = try await git.headCommitHash()
             headCommitHash = hc
-            currentBranchHashes = (try? await git.commitHashesOnCurrentBranch()) ?? currentBranchHashes
+            currentBranchHashes = await git.commitHashesOnCurrentBranch()
 
             let hadUncommitted = commits.first?.isUncommitted == true
             let needsUncommitted = !sts.isEmpty || rebaseState != nil
@@ -308,8 +308,8 @@ final class RepoViewModel {
             async let detached = git.isDetachedHead()
             async let branchHashes = git.commitHashesOnCurrentBranch()
 
-            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh, bh) = try await (
-                b, rb, r, t, st, sub, cur, stat, hch, detached, branchHashes
+            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh) = try await (
+                b, rb, r, t, st, sub, cur, stat, hch, detached
             )
             localBranches = lb
             remoteBranches = rbs
@@ -321,7 +321,7 @@ final class RepoViewModel {
             fileStatuses = sts
             headCommitHash = hc
             isDetachedHead = dh
-            currentBranchHashes = bh
+            currentBranchHashes = await branchHashes
 
             // Phase 2: Stream commits with incremental graph (like gitx's PBGitRevList)
             let graphEngine = IncrementalGraphLayoutEngine()

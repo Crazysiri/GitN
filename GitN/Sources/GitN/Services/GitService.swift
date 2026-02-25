@@ -123,8 +123,10 @@ actor GitService {
     }
 
     /// Returns the set of commit hashes reachable from HEAD (i.e. on the current branch).
-    func commitHashesOnCurrentBranch() async throws -> Set<String> {
-        let output = try await runGitOutput(["rev-list", "HEAD"])
+    func commitHashesOnCurrentBranch() async -> Set<String> {
+        guard let output = try? await runGitOutput(["rev-list", "HEAD"]) else {
+            return []
+        }
         return Set(output.components(separatedBy: "\n").filter { !$0.isEmpty })
     }
 
