@@ -31,6 +31,11 @@ struct GitNApp: App {
                     Text("System").tag(AppTheme.system)
                 }
             }
+
+        }
+
+        Settings {
+            SettingsView()
         }
     }
 }

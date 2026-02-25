@@ -419,6 +419,64 @@ final class RepoViewModel {
     }
 
     var isAmend = false
+    var isGeneratingAICommit = false
+
+    /// Generate commit message from staged diff using cursor-agent
+    func generateAICommitMessage() async {
+        isGeneratingAICommit = true
+        defer { isGeneratingAICommit = false }
+        do {
+            let diff = try await git.diffStaged()
+            guard !diff.isEmpty else {
+                showToast(title: "No staged changes", detail: "Stage files first to generate a commit message", style: .info)
+                return
+            }
+            let (title, description) = try await AICommitService.generateCommitMessage(diff: diff)
+            commitSummary = title
+            commitDescription = description
+        } catch let error as AICommitError {
+            switch error {
+            case .notFound:
+                showToast(title: "cursor-agent Not Found", detail: "Install Cursor IDE or configure cursor-agent. See Settings → AI Commit.", style: .error)
+            case .apiKeyMissing:
+                showToast(title: "API Key Required", detail: "Set CURSOR_API_KEY in Settings → AI Commit.", style: .error)
+                openSettings()
+            default:
+                showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
+            }
+        } catch {
+            showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    /// Generate commit message for an existing commit's diff (for reword)
+    func generateAICommitMessageForCommit(hash: String) async -> (title: String, description: String)? {
+        isGeneratingAICommit = true
+        defer { isGeneratingAICommit = false }
+        do {
+            let diff = try await git.commitDiff(hash: hash)
+            guard !diff.isEmpty else {
+                showToast(title: "No diff found", style: .info)
+                return nil
+            }
+            let result = try await AICommitService.generateCommitMessage(diff: diff)
+            return result
+        } catch let error as AICommitError {
+            switch error {
+            case .notFound:
+                showToast(title: "cursor-agent Not Found", detail: "Install Cursor IDE or configure cursor-agent. See Settings → AI Commit.", style: .error)
+            case .apiKeyMissing:
+                showToast(title: "API Key Required", detail: "Set CURSOR_API_KEY in Settings → AI Commit.", style: .error)
+                openSettings()
+            default:
+                showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
+            }
+            return nil
+        } catch {
+            showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
+            return nil
+        }
+    }
 
     func performCommit() async {
         guard !commitSummary.isEmpty else { return }
@@ -1169,6 +1227,15 @@ final class RepoViewModel {
 
     func dismissToast() {
         toastMessage = nil
+    }
+
+    /// Open the app's Settings window
+    func openSettings() {
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
     }
 
     func toggleSection(_ section: String) {

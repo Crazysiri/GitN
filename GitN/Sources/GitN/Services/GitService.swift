@@ -898,6 +898,11 @@ actor GitService {
         return ""
     }
 
+    /// Get the full diff for a specific commit (all files).
+    func commitDiff(hash: String) async throws -> String {
+        try await runGitOutput(["diff", "\(hash)^", hash])
+    }
+
     // MARK: - Status
 
     func status() throws -> [FileStatus] {

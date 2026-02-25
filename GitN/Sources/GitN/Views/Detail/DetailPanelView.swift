@@ -5,6 +5,7 @@ struct DetailPanelView: View {
 
     @State private var isEditingMessage = false
     @State private var editedMessage = ""
+    @State private var originalMessage = ""   // track original to detect changes
     @State private var isHoveringMessage = false
 
     var body: some View {
@@ -35,6 +36,13 @@ struct DetailPanelView: View {
             }
         }
         .background(Color(.controlBackgroundColor).opacity(0.3))
+        .onChange(of: viewModel.selectedCommit?.hash) { _, _ in
+            // Reset editing state when selecting a different commit (or switching to uncommitted)
+            isEditingMessage = false
+            editedMessage = ""
+            originalMessage = ""
+            isHoveringMessage = false
+        }
     }
 
     /// Only commits on the current branch (reachable from HEAD) can be edited
@@ -45,7 +53,7 @@ struct DetailPanelView: View {
 
     private func commitInfoHeader(_ commit: CommitInfo) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Commit hash + label
+            // Commit hash + label + AI button
             HStack(spacing: 6) {
                 Text("commit:")
                     .font(.system(size: 10))
@@ -53,6 +61,44 @@ struct DetailPanelView: View {
                 Text(commit.shortHash)
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 Spacer()
+                if isEditableCommit && isEditingMessage {
+                    Button(action: {
+                        Task {
+                            if let result = await viewModel.generateAICommitMessageForCommit(hash: commit.hash) {
+                                editedMessage = result.description.isEmpty
+                                    ? result.title
+                                    : result.title + "\n\n" + result.description
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 3) {
+                            if viewModel.isGeneratingAICommit {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .scaleEffect(0.7)
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 9))
+                            }
+                            Text("AI")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(.purple)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.purple.opacity(0.12))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .strokeBorder(Color.purple.opacity(0.3), lineWidth: 0.5)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isGeneratingAICommit)
+                    .help("Regenerate commit message with AI")
+                }
             }
 
             if isEditingMessage {
@@ -105,7 +151,10 @@ struct DetailPanelView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .tint(.green)
-                        .disabled(editedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(
+                            editedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || editedMessage.trimmingCharacters(in: .whitespacesAndNewlines) == originalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                        )
 
                         Button(action: {
                             isEditingMessage = false
@@ -141,6 +190,7 @@ struct DetailPanelView: View {
                     }
                     .onTapGesture {
                         guard isEditableCommit else { return }
+                        originalMessage = commit.message
                         editedMessage = commit.message
                         isEditingMessage = true
                     }
@@ -196,12 +246,6 @@ struct DetailPanelView: View {
             }
         }
         .padding(10)
-        .onChange(of: viewModel.selectedCommit?.hash) { _, _ in
-            // Reset editing state when selecting a different commit
-            isEditingMessage = false
-            editedMessage = ""
-            isHoveringMessage = false
-        }
     }
 
     // MARK: - Avatar Helpers
@@ -785,11 +829,46 @@ struct DetailPanelView: View {
         }
     }
 
+    // MARK: - AI Commit Button
+
+    private var aiCommitButton: some View {
+        Button(action: {
+            Task { await viewModel.generateAICommitMessage() }
+        }) {
+            HStack(spacing: 3) {
+                if viewModel.isGeneratingAICommit {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.7)
+                } else {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 9))
+                }
+                Text("AI")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(.purple)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.purple.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.purple.opacity(0.3), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isGeneratingAICommit)
+        .help("Generate commit message with AI")
+    }
+
     // MARK: - Commit Input (shown at bottom when uncommitted)
 
     private var commitInputArea: some View {
         VStack(spacing: 0) {
-            // Header: "Commit Message" + Amend checkbox
+            // Header: "Commit Message" + Amend checkbox + AI button
             HStack {
                 Text("Commit Message")
                     .font(.system(size: 11, weight: .medium))
@@ -812,6 +891,8 @@ struct DetailPanelView: View {
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
+
+                aiCommitButton
             }
             .padding(.horizontal, 8)
             .padding(.top, 8)
