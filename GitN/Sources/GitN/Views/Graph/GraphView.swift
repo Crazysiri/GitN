@@ -36,6 +36,7 @@ struct GraphView: View {
                     currentBranch: viewModel.currentBranch,
                     hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
                     scrollToHash: viewModel.scrollToCommitHash,
+                    allCommitsLoaded: viewModel.allCommitsLoaded,
                     rowHeight: rowHeight,
                     columnWidth: columnWidth,
                     avatarSize: avatarSize,
@@ -49,6 +50,9 @@ struct GraphView: View {
                     },
                     onContextAction: { commit, action in
                         handleContextAction(commit: commit, action: action)
+                    },
+                    onLoadMore: {
+                        Task { await viewModel.loadMoreCommits() }
                     }
                 )
             }
@@ -296,6 +300,7 @@ struct CommitTableView: NSViewRepresentable {
     let currentBranch: String
     let hasUnresolvedConflicts: Bool
     let scrollToHash: String?
+    let allCommitsLoaded: Bool
     let rowHeight: CGFloat
     let columnWidth: CGFloat
     let avatarSize: CGFloat
@@ -304,6 +309,7 @@ struct CommitTableView: NSViewRepresentable {
     let onSelectCommit: (CommitInfo) -> Void
     let onConsumeScrollToHash: () -> Void
     let onContextAction: (CommitInfo, CommitContextAction) -> Void
+    let onLoadMore: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -363,8 +369,10 @@ struct CommitTableView: NSViewRepresentable {
         coordinator.selectedCommitHash = selectedCommitHash
         coordinator.currentBranch = currentBranch
         coordinator.hasUnresolvedConflicts = hasUnresolvedConflicts
+        coordinator.allCommitsLoaded = allCommitsLoaded
         coordinator.onSelectCommit = onSelectCommit
         coordinator.onContextAction = onContextAction
+        coordinator.onLoadMore = onLoadMore
         coordinator.columnWidth = columnWidth
         coordinator.avatarSize = avatarSize
         coordinator.graphAreaWidth = graphAreaWidth
@@ -461,8 +469,10 @@ struct CommitTableView: NSViewRepresentable {
         var selectedCommitHash: String?
         var currentBranch: String = ""
         var hasUnresolvedConflicts: Bool = false
+        var allCommitsLoaded: Bool = false
         var onSelectCommit: ((CommitInfo) -> Void)?
         var onContextAction: ((CommitInfo, CommitContextAction) -> Void)?
+        var onLoadMore: (() -> Void)?
         var rowHeight: CGFloat = 24
         var columnWidth: CGFloat = 18
         var avatarSize: CGFloat = 18
@@ -473,6 +483,7 @@ struct CommitTableView: NSViewRepresentable {
         var isUpdatingSelection = false
         var selectedRowHashes: Set<String> = []
         let graphHScroll = GraphHScrollStateNS()
+        private var loadMoreScheduled = false
 
         init(parent: CommitTableView) {
             self.commits = parent.commits
@@ -480,8 +491,10 @@ struct CommitTableView: NSViewRepresentable {
             self.selectedCommitHash = parent.selectedCommitHash
             self.currentBranch = parent.currentBranch
             self.hasUnresolvedConflicts = parent.hasUnresolvedConflicts
+            self.allCommitsLoaded = parent.allCommitsLoaded
             self.onSelectCommit = parent.onSelectCommit
             self.onContextAction = parent.onContextAction
+            self.onLoadMore = parent.onLoadMore
             self.rowHeight = parent.rowHeight
             self.columnWidth = parent.columnWidth
             self.avatarSize = parent.avatarSize
@@ -513,6 +526,15 @@ struct CommitTableView: NSViewRepresentable {
                 lazyGraph.ensureProcessed(through: targetRow)
                 // Update maxColumns for horizontal scroll
                 graphHScroll.maxColumns = lazyGraph.maxColumns
+            }
+
+            // Pagination: trigger loading more when approaching the end
+            if !allCommitsLoaded && !loadMoreScheduled && row >= commits.count - 100 {
+                loadMoreScheduled = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.loadMoreScheduled = false
+                    self?.onLoadMore?()
+                }
             }
 
             let cellID = NSUserInterfaceItemIdentifier("CommitRow")

@@ -20,6 +20,12 @@ final class RepoViewModel {
     private(set) var headCommitHash: String?
     private(set) var currentBranchHashes: Set<String> = []
 
+    // MARK: - Pagination (pull-based via CommitWalker)
+    private var commitWalker: CommitWalker?
+    private(set) var allCommitsLoaded = false
+    private(set) var isLoadingMore = false
+    private let commitPageSize = 2000
+
     var selectedCommit: CommitInfo?
     var diffFiles: [DiffFile] = []
     var fileDiffContent: String = ""
@@ -321,7 +327,7 @@ final class RepoViewModel {
             isDetachedHead = dh
             currentBranchHashes = await branchHashes
 
-            // Phase 2: Stream commits (graph is computed lazily by the view layer)
+            // Phase 2: Load commits with pagination (graph is computed lazily by the view layer)
             var loadedCommits: [CommitInfo] = []
 
             // Check rebase state early so we know if we need a WIP entry
@@ -342,18 +348,52 @@ final class RepoViewModel {
                 loadedCommits.append(uncommitted)
             }
 
-            let stream = await git.commitLogStream()
-            for await batch in stream {
-                loadedCommits.reserveCapacity(loadedCommits.count + batch.count)
-                for commit in batch {
-                    loadedCommits.append(commit)
+            // Create on-demand commit walker (pull-based, no eager traversal)
+            let walker = await git.createCommitWalker()
+            commitWalker = walker
+            allCommitsLoaded = false
+
+            // Load first page on background thread
+            if let walker {
+                let pageSize = commitPageSize
+                let batch = await Task.detached(priority: .userInitiated) {
+                    walker.nextBatch(count: pageSize)
+                }.value
+                loadedCommits.append(contentsOf: batch)
+                if batch.count < pageSize {
+                    allCommitsLoaded = true
+                    commitWalker = nil
                 }
-                commits = loadedCommits
+            } else {
+                allCommitsLoaded = true
             }
 
             commits = loadedCommits
         } catch {
             print("Error loading repo data: \(error)")
+        }
+    }
+
+    /// Load the next page of commits as the user scrolls down.
+    /// Only walks `commitPageSize` commits via git_revwalk – no eager traversal.
+    func loadMoreCommits() async {
+        guard !allCommitsLoaded, !isLoadingMore, let walker = commitWalker else { return }
+
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+
+        let pageSize = commitPageSize
+        let batch = await Task.detached(priority: .userInitiated) {
+            walker.nextBatch(count: pageSize)
+        }.value
+
+        if !batch.isEmpty {
+            commits.append(contentsOf: batch)
+        }
+        if batch.count < pageSize {
+            allCommitsLoaded = true
+            commitWalker = nil
+            print("[RepoViewModel] All commits loaded, total=\(commits.count)")
         }
     }
 

@@ -66,6 +66,150 @@ private func createFallbackSignature() -> UnsafeMutablePointer<git_signature>? {
     return nil
 }
 
+// MARK: - CommitWalker (on-demand pagination, pull-based)
+
+/// A pull-based commit walker that only reads commits from git_revwalk when
+/// `nextBatch(count:)` is called.  This avoids eagerly walking all 50k+ commits
+/// and buffering them in memory.
+///
+/// The walker opens its **own** `git_repository` handle so it can be used
+/// independently of the `GitService` actor, on any thread.
+final class CommitWalker: @unchecked Sendable {
+    private var repo: OpaquePointer?
+    private var walker: OpaquePointer?
+    private let refMap: [String: [String]]
+    private let repoPath: String
+    private var finished = false
+    private let queue = DispatchQueue(label: "com.gitn.commitWalker", qos: .userInitiated)
+
+    /// Total number of commits yielded so far.
+    private(set) var totalYielded: Int = 0
+
+    init?(repoPath: String, refMap: [String: [String]]) {
+        self.repoPath = repoPath
+        self.refMap = refMap
+
+        git_libgit2_init()
+
+        var r: OpaquePointer?
+        guard git_repository_open(&r, repoPath) == 0, let r else {
+            git_libgit2_shutdown()
+            return nil
+        }
+        self.repo = r
+
+        var w: OpaquePointer?
+        guard git_revwalk_new(&w, r) == 0, let w else {
+            git_repository_free(r)
+            self.repo = nil
+            git_libgit2_shutdown()
+            return nil
+        }
+        self.walker = w
+
+        git_revwalk_sorting(w, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
+        git_revwalk_push_glob(w, "refs/heads/*")
+        git_revwalk_push_glob(w, "refs/remotes/*")
+    }
+
+    deinit {
+        if let walker { git_revwalk_free(walker) }
+        if let repo   { git_repository_free(repo) }
+        git_libgit2_shutdown()
+    }
+
+    /// Read the next `count` commits from the rev-walker.
+    /// Returns an empty array once all commits have been exhausted.
+    func nextBatch(count: Int) -> [CommitInfo] {
+        queue.sync {
+            guard !finished, let repo, let walker else { return [] }
+
+            var batch: [CommitInfo] = []
+            batch.reserveCapacity(count)
+            var oid = git_oid()
+
+            while batch.count < count, git_revwalk_next(&oid, walker) == 0 {
+                var commit: OpaquePointer?
+                guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else { continue }
+                defer { git_commit_free(commit) }
+
+                let hash = Self.oidStr(&oid)
+                let shortHash = Self.shortOidStr(&oid)
+
+                let parentCount = git_commit_parentcount(commit)
+                var parentHashes: [String] = []
+                for pi in 0..<parentCount {
+                    if let pid = git_commit_parent_id(commit, pi) {
+                        parentHashes.append(Self.oidStr(pid))
+                    }
+                }
+
+                let authorName: String
+                let authorEmail: String
+                let date: String
+                if let sig = git_commit_author(commit) {
+                    authorName = String(cString: sig.pointee.name)
+                    authorEmail = String(cString: sig.pointee.email)
+                    date = Self.fmtTime(sig.pointee.when)
+                } else {
+                    authorName = ""; authorEmail = ""; date = ""
+                }
+
+                let message = git_commit_message(commit).map(String.init(cString:))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let firstLine = message.components(separatedBy: .newlines).first ?? message
+
+                batch.append(CommitInfo(
+                    hash: hash, shortHash: shortHash,
+                    parentHashes: parentHashes,
+                    authorName: authorName, authorEmail: authorEmail,
+                    date: date, message: firstLine,
+                    refs: refMap[hash] ?? []
+                ))
+            }
+
+            if batch.count < count {
+                finished = true
+            }
+            totalYielded += batch.count
+            if finished || batch.isEmpty {
+                print("[CommitWalker] finished for '\(repoPath)', total commits=\(totalYielded)")
+            }
+            return batch
+        }
+    }
+
+    /// Whether the walker has exhausted all commits.
+    var isFinished: Bool {
+        queue.sync { finished }
+    }
+
+    // MARK: - Static helpers
+
+    private static func oidStr(_ ptr: UnsafePointer<git_oid>) -> String {
+        var buf = [CChar](repeating: 0, count: 41)
+        git_oid_tostr(&buf, 41, ptr)
+        return String(cString: buf)
+    }
+
+    private static func shortOidStr(_ ptr: UnsafePointer<git_oid>) -> String {
+        var buf = [CChar](repeating: 0, count: 8)
+        git_oid_tostr(&buf, 8, ptr)
+        return String(cString: buf)
+    }
+
+    private static func fmtTime(_ time: git_time) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(time.time))
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let totalMinutes = Int(time.offset)
+        fmt.timeZone = TimeZone(secondsFromGMT: totalMinutes * 60)
+        let sign = totalMinutes >= 0 ? "+" : "-"
+        let absMin = Swift.abs(totalMinutes)
+        return fmt.string(from: date) + " " + String(format: "%@%02d%02d", sign, absMin / 60, absMin % 60)
+    }
+}
+
 // MARK: - Service
 
 actor GitService {
@@ -328,6 +472,14 @@ actor GitService {
         }
     }
 
+    // MARK: - Commit Walker (on-demand pagination)
+
+    /// Create a pull-based commit walker that reads commits only on demand.
+    func createCommitWalker() -> CommitWalker? {
+        let refMap = buildRefMap()
+        return CommitWalker(repoPath: repoPath, refMap: refMap)
+    }
+
     // MARK: - Commit Log
 
     func commitLog(maxCount: Int = 200) throws -> [CommitInfo] {
@@ -389,148 +541,6 @@ actor GitService {
             count += 1
         }
         return result
-    }
-
-    /// Streaming commit log that yields batches progressively (like gitx's PBGitRevList).
-    /// Opens a separate repo handle on a detached task for true parallelism.
-    /// The first batch is smaller for fast initial display; subsequent batches are larger.
-    func commitLogStream(firstBatch: Int = 500, batchSize: Int = 5000) -> AsyncStream<[CommitInfo]> {
-        let refMap = buildRefMap()
-        let path = repoPath
-        let (stream, continuation) = AsyncStream.makeStream(of: [CommitInfo].self)
-
-        Task.detached(priority: .userInitiated) {
-            Self._produceCommitBatches(
-                repoPath: path, refMap: refMap,
-                firstBatch: firstBatch, batchSize: batchSize,
-                continuation: continuation
-            )
-        }
-
-        return stream
-    }
-
-    private nonisolated static func _produceCommitBatches(
-        repoPath: String,
-        refMap: [String: [String]],
-        firstBatch: Int,
-        batchSize: Int,
-        continuation: AsyncStream<[CommitInfo]>.Continuation
-    ) {
-        // Ensure libgit2 is initialized on this detached thread
-        git_libgit2_init()
-        defer { git_libgit2_shutdown() }
-
-        var repo: OpaquePointer?
-        let openResult = git_repository_open(&repo, repoPath)
-        guard openResult == 0, let repo else {
-            print("[GitService] _produceCommitBatches: git_repository_open failed for '\(repoPath)', error=\(openResult)")
-            continuation.finish()
-            return
-        }
-        defer { git_repository_free(repo) }
-
-        var walker: OpaquePointer?
-        let walkResult = git_revwalk_new(&walker, repo)
-        guard walkResult == 0, let walker else {
-            print("[GitService] _produceCommitBatches: git_revwalk_new failed, error=\(walkResult)")
-            continuation.finish()
-            return
-        }
-        defer { git_revwalk_free(walker) }
-
-        git_revwalk_sorting(walker, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
-        let headsResult = git_revwalk_push_glob(walker, "refs/heads/*")
-        let remotesResult = git_revwalk_push_glob(walker, "refs/remotes/*")
-        if headsResult != 0 || remotesResult != 0 {
-            print("[GitService] _produceCommitBatches: push_glob heads=\(headsResult) remotes=\(remotesResult)")
-        }
-
-        func oidStr(_ ptr: UnsafePointer<git_oid>) -> String {
-            var buf = [CChar](repeating: 0, count: 41)
-            git_oid_tostr(&buf, 41, ptr)
-            return String(cString: buf)
-        }
-        func shortOidStr(_ ptr: UnsafePointer<git_oid>) -> String {
-            var buf = [CChar](repeating: 0, count: 8)
-            git_oid_tostr(&buf, 8, ptr)
-            return String(cString: buf)
-        }
-        func fmtTime(_ time: git_time) -> String {
-            let date = Date(timeIntervalSince1970: TimeInterval(time.time))
-            let fmt = DateFormatter()
-            fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            let totalMinutes = Int(time.offset)
-            fmt.timeZone = TimeZone(secondsFromGMT: totalMinutes * 60)
-            let sign = totalMinutes >= 0 ? "+" : "-"
-            let absMin = Swift.abs(totalMinutes)
-            return fmt.string(from: date) + " " + String(format: "%@%02d%02d", sign, absMin / 60, absMin % 60)
-        }
-
-        var batch: [CommitInfo] = []
-        var totalYielded = 0
-        var isFirstBatch = true
-        let currentLimit = firstBatch
-        batch.reserveCapacity(currentLimit)
-        var oid = git_oid()
-
-        while git_revwalk_next(&oid, walker) == 0 {
-            guard !Task.isCancelled else { break }
-
-            var commit: OpaquePointer?
-            guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else { continue }
-            defer { git_commit_free(commit) }
-
-            let hash = oidStr(&oid)
-            let shortHash = shortOidStr(&oid)
-
-            let parentCount = git_commit_parentcount(commit)
-            var parentHashes: [String] = []
-            for pi in 0..<parentCount {
-                if let pid = git_commit_parent_id(commit, pi) {
-                    parentHashes.append(oidStr(pid))
-                }
-            }
-
-            let authorName: String
-            let authorEmail: String
-            let date: String
-            if let sig = git_commit_author(commit) {
-                authorName = String(cString: sig.pointee.name)
-                authorEmail = String(cString: sig.pointee.email)
-                date = fmtTime(sig.pointee.when)
-            } else {
-                authorName = ""; authorEmail = ""; date = ""
-            }
-
-            let message = git_commit_message(commit).map(String.init(cString:))?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let firstLine = message.components(separatedBy: .newlines).first ?? message
-
-            batch.append(CommitInfo(
-                hash: hash, shortHash: shortHash,
-                parentHashes: parentHashes,
-                authorName: authorName, authorEmail: authorEmail,
-                date: date, message: firstLine,
-                refs: refMap[hash] ?? []
-            ))
-
-            let limit = isFirstBatch ? firstBatch : batchSize
-            if batch.count >= limit {
-                totalYielded += batch.count
-                continuation.yield(batch)
-                batch = []
-                batch.reserveCapacity(batchSize)
-                isFirstBatch = false
-            }
-        }
-
-        if !batch.isEmpty {
-            totalYielded += batch.count
-            continuation.yield(batch)
-        }
-        print("[GitService] _produceCommitBatches: finished for '\(repoPath)', total commits=\(totalYielded)")
-        continuation.finish()
     }
 
     private func buildRefMap() -> [String: [String]] {
