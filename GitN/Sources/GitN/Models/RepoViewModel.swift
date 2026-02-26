@@ -207,15 +207,39 @@ final class RepoViewModel {
     var mrMergingStatus: String = ""
     private var gitlabService: GitLabService?
 
-    // MARK: - Rebase Conflict State
+    // MARK: - Conflict State (Rebase / Merge / Stash)
+    var conflictType: ConflictType?
     var rebaseState: RebaseState?
     var isRebaseConflict: Bool { rebaseState != nil }
-    var hasUnresolvedConflicts: Bool { rebaseState?.conflictedFiles.isEmpty == false }
+    var isInConflict: Bool { conflictType != nil }
+    var hasUnresolvedConflicts: Bool { currentConflictedFiles.isEmpty == false }
     var conflictMergeFile: ConflictFile?
     var conflictSides: ConflictSides?
     var conflictOutputLines: [String] = []
     var showConflictMergeView = false
     var rebaseCommitMessage = ""
+    // Merge/Stash conflict files (rebase uses rebaseState.conflictedFiles)
+    var mergeConflictedFiles: [ConflictFile] = []
+    var mergeResolvedFiles: [ConflictFile] = []
+    var mergeCommitMessage = ""
+
+    /// Unified access to conflicted files regardless of conflict type.
+    var currentConflictedFiles: [ConflictFile] {
+        switch conflictType {
+        case .rebase: return rebaseState?.conflictedFiles ?? []
+        case .merge, .stashApply: return mergeConflictedFiles
+        case nil: return []
+        }
+    }
+
+    /// Unified access to resolved files regardless of conflict type.
+    var currentResolvedFiles: [ConflictFile] {
+        switch conflictType {
+        case .rebase: return rebaseState?.resolvedFiles ?? []
+        case .merge, .stashApply: return mergeResolvedFiles
+        case nil: return []
+        }
+    }
 
     // MARK: - Push Upstream Prompt
     var showPushUpstreamPrompt = false
@@ -354,15 +378,31 @@ final class RepoViewModel {
             // Phase 2: Load commits with pagination (graph is computed lazily by the view layer)
             var loadedCommits: [CommitInfo] = []
 
-            // Check rebase state early so we know if we need a WIP entry
+            // Check conflict state early so we know if we need a WIP entry
             if let state = try? await git.rebaseState() {
                 rebaseState = state
+                conflictType = .rebase
                 rebaseCommitMessage = await git.rebaseCommitMessage()
+            } else if let mergeState = try? await git.mergeConflictState() {
+                rebaseState = nil
+                if await git.isMergeInProgress() {
+                    conflictType = .merge(branch: mergeState.sourceBranch)
+                    mergeCommitMessage = await git.mergeCommitMessage()
+                } else if !mergeState.conflictedFiles.isEmpty {
+                    conflictType = .stashApply
+                } else {
+                    conflictType = nil
+                }
+                mergeConflictedFiles = mergeState.conflictedFiles
+                mergeResolvedFiles = mergeState.resolvedFiles
             } else {
                 rebaseState = nil
+                conflictType = nil
+                mergeConflictedFiles = []
+                mergeResolvedFiles = []
             }
 
-            let needsWIP = !sts.isEmpty || rebaseState != nil
+            let needsWIP = !sts.isEmpty || conflictType != nil
             if needsWIP {
                 let staged = sts.filter(\.hasStagedChanges).count
                 let unstaged = sts.filter(\.hasUnstagedChanges).count
@@ -442,8 +482,8 @@ final class RepoViewModel {
     var currentDiffContext: DiffContext = .committed
 
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed) async {
-        let isUncommitted = selectedCommit?.isUncommitted == true || isRebaseConflict
-        guard selectedCommit != nil || isRebaseConflict else { return }
+        let isUncommitted = selectedCommit?.isUncommitted == true || isInConflict
+        guard selectedCommit != nil || isInConflict else { return }
         selectedDiffFile = file
         currentDiffContext = context
         do {
@@ -761,7 +801,15 @@ final class RepoViewModel {
     }
 
     func performStashPop() async {
-        await performRemoteOperation { try await $0.git.stashPop() }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.stashPop()
+            await loadAll()
+        } catch {
+            await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .stashApply)
+        }
+        operationInProgress = false
     }
 
     func performCreateBranch(name: String) async {
@@ -788,7 +836,15 @@ final class RepoViewModel {
     // MARK: - Commit Context Menu Operations
 
     func performMerge(_ refName: String) async {
-        await performRemoteOperation { try await $0.git.merge(refName) }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.merge(refName)
+            await loadAll()
+        } catch {
+            await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .merge(branch: refName))
+        }
+        operationInProgress = false
     }
 
     func performRebase(onto target: String) async {
@@ -1010,12 +1066,13 @@ final class RepoViewModel {
         pendingOperationAfterHostKey = nil
     }
 
-    // MARK: - Rebase Conflict Management
+    // MARK: - Conflict Management (Rebase / Merge / Stash)
 
     func checkForRebaseConflict(errorMessage: String? = nil) async {
         do {
             if let state = try await git.rebaseState() {
                 rebaseState = state
+                conflictType = .rebase
                 rebaseCommitMessage = await git.rebaseCommitMessage()
                 if errorMessage != nil {
                     if !state.conflictedFiles.isEmpty {
@@ -1037,19 +1094,61 @@ final class RepoViewModel {
         }
     }
 
-    func refreshRebaseState() async {
+    func checkForMergeOrStashConflict(errorMessage: String, type: ConflictType) async {
         do {
-            rebaseState = try await git.rebaseState()
-            if rebaseState != nil {
-                rebaseCommitMessage = await git.rebaseCommitMessage()
+            let conflicts = try await git.conflictedFiles()
+            if !conflicts.isEmpty {
+                conflictType = type
+                mergeConflictedFiles = conflicts
+                mergeResolvedFiles = (try? await git.resolvedConflictFiles()) ?? []
+                if case .merge = type {
+                    mergeCommitMessage = await git.mergeCommitMessage()
+                }
+                showToast(title: type.title, detail: "There are merge conflicts that need to be resolved", style: .error)
+                await loadAll()
+            } else {
+                operationError = errorMessage
             }
-        } catch {}
+        } catch {
+            operationError = errorMessage
+        }
+    }
+
+    func refreshConflictState() async {
+        switch conflictType {
+        case .rebase:
+            do {
+                rebaseState = try await git.rebaseState()
+                if rebaseState != nil {
+                    rebaseCommitMessage = await git.rebaseCommitMessage()
+                } else {
+                    conflictType = nil
+                }
+            } catch {}
+        case .merge, .stashApply:
+            do {
+                mergeConflictedFiles = try await git.conflictedFiles()
+                mergeResolvedFiles = (try? await git.resolvedConflictFiles()) ?? []
+                if mergeConflictedFiles.isEmpty && mergeResolvedFiles.isEmpty {
+                    conflictType = nil
+                    mergeConflictedFiles = []
+                    mergeResolvedFiles = []
+                }
+            } catch {}
+        case nil:
+            break
+        }
+    }
+
+    /// Legacy compatibility: refresh rebase state only
+    func refreshRebaseState() async {
+        await refreshConflictState()
     }
 
     func markFileResolved(_ file: ConflictFile) async {
         do {
             try await git.markConflictResolved(path: file.path)
-            await refreshRebaseState()
+            await refreshConflictState()
             await refreshStatusAndGraph()
         } catch {
             showToast(title: "Mark Resolved Failed", detail: error.localizedDescription, style: .error)
@@ -1059,7 +1158,7 @@ final class RepoViewModel {
     func markFileConflicted(path: String) async {
         do {
             try await git.markFileConflicted(path: path)
-            await refreshRebaseState()
+            await refreshConflictState()
             await refreshStatusAndGraph()
         } catch {
             showToast(title: "Mark Conflicted Failed", detail: error.localizedDescription, style: .error)
@@ -1069,7 +1168,7 @@ final class RepoViewModel {
     func markAllFilesResolved() async {
         do {
             try await git.markAllConflictsResolved()
-            await refreshRebaseState()
+            await refreshConflictState()
             await refreshStatusAndGraph()
         } catch {
             showToast(title: "Mark All Resolved Failed", detail: error.localizedDescription, style: .error)
@@ -1081,6 +1180,7 @@ final class RepoViewModel {
         do {
             try await git.rebaseContinue(message: rebaseCommitMessage.isEmpty ? nil : rebaseCommitMessage)
             rebaseState = nil
+            conflictType = nil
             rebaseCommitMessage = ""
             conflictMergeFile = nil
             showConflictMergeView = false
@@ -1097,11 +1197,12 @@ final class RepoViewModel {
         do {
             try await git.rebaseSkip()
             rebaseState = nil
+            conflictType = nil
             conflictMergeFile = nil
             showConflictMergeView = false
             await loadAll()
-            await refreshRebaseState()
-            if rebaseState == nil {
+            await refreshConflictState()
+            if rebaseState == nil && conflictType == nil {
                 showToast(title: "Rebase Complete", style: .success)
             }
         } catch {
@@ -1114,15 +1215,105 @@ final class RepoViewModel {
         operationInProgress = true
         do {
             try await git.rebaseAbort()
-            rebaseState = nil
-            conflictMergeFile = nil
-            showConflictMergeView = false
+            clearConflictState()
             showToast(title: "Rebase Aborted", style: .info)
             await loadAll()
         } catch {
             showToast(title: "Abort Failed", detail: error.localizedDescription, style: .error)
         }
         operationInProgress = false
+    }
+
+    // MARK: - Merge Conflict Actions
+
+    func mergeContinue() async {
+        operationInProgress = true
+        do {
+            let msg = mergeCommitMessage.isEmpty ? nil : mergeCommitMessage
+            if let msg {
+                try await git.commit(message: msg)
+            } else {
+                // Use default MERGE_MSG
+                let defaultMsg = await git.mergeCommitMessage()
+                try await git.commit(message: defaultMsg.isEmpty ? "Merge commit" : defaultMsg)
+            }
+            clearConflictState()
+            showToast(title: "Merge Complete", style: .success)
+            await loadAll()
+        } catch {
+            showToast(title: "Merge Commit Failed", detail: error.localizedDescription, style: .error)
+        }
+        operationInProgress = false
+    }
+
+    func mergeAbort() async {
+        operationInProgress = true
+        do {
+            try await git.mergeAbort()
+            clearConflictState()
+            showToast(title: "Merge Aborted", style: .info)
+            await loadAll()
+        } catch {
+            showToast(title: "Abort Failed", detail: error.localizedDescription, style: .error)
+        }
+        operationInProgress = false
+    }
+
+    // MARK: - Stash Conflict Actions
+
+    func stashConflictAbort() async {
+        operationInProgress = true
+        do {
+            try await git.stashConflictAbort()
+            clearConflictState()
+            showToast(title: "Stash Apply Aborted", style: .info)
+            await loadAll()
+        } catch {
+            showToast(title: "Abort Failed", detail: error.localizedDescription, style: .error)
+        }
+        operationInProgress = false
+    }
+
+    // MARK: - General Conflict Continue/Abort (dispatches based on type)
+
+    func conflictContinue() async {
+        switch conflictType {
+        case .rebase:
+            await rebaseContinue()
+        case .merge:
+            await mergeContinue()
+        case .stashApply:
+            // For stash, "continue" means all conflicts are resolved - just clear state
+            clearConflictState()
+            showToast(title: "Stash Apply Complete", style: .success)
+            await loadAll()
+        case nil:
+            break
+        }
+    }
+
+    func conflictAbort() async {
+        switch conflictType {
+        case .rebase:
+            await rebaseAbort()
+        case .merge:
+            await mergeAbort()
+        case .stashApply:
+            await stashConflictAbort()
+        case nil:
+            break
+        }
+    }
+
+    private func clearConflictState() {
+        rebaseState = nil
+        conflictType = nil
+        rebaseCommitMessage = ""
+        mergeCommitMessage = ""
+        mergeConflictedFiles = []
+        mergeResolvedFiles = []
+        conflictMergeFile = nil
+        showConflictMergeView = false
     }
 
     func openConflictMerge(_ file: ConflictFile) async {

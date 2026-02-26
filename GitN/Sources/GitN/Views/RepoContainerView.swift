@@ -265,12 +265,12 @@ struct RepoContainerView: View {
                 .onTapGesture { viewModel.operationError = nil }
             }
 
-            if viewModel.isRebaseConflict {
+            if viewModel.isInConflict {
                 HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.yellow)
-                    Text("REBASE")
+                    Text(conflictBadgeText)
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundStyle(.orange)
                 }
@@ -405,6 +405,15 @@ struct RepoContainerView: View {
             }
         }
         .padding(20)
+    }
+
+    private var conflictBadgeText: String {
+        switch viewModel.conflictType {
+        case .rebase: return "REBASE"
+        case .merge: return "MERGE"
+        case .stashApply: return "STASH"
+        case nil: return "CONFLICT"
+        }
     }
 
     // MARK: - Stash Sheet

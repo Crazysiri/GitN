@@ -1557,7 +1557,11 @@ actor GitService {
 
         let rc = git_stash_pop(repo, index, &opts)
         guard rc == 0 else {
-            throw GitError.operationFailed("Stash pop failed (\(rc))")
+            // GIT_EMERGECONFLICT = -13: conflicts during stash apply
+            if rc == -13 {
+                throw GitError.operationFailed("Stash pop resulted in merge conflicts")
+            }
+            throw GitError.operationFailed(libgit2ErrorMsg("Stash pop failed", code: rc))
         }
     }
 
@@ -1570,7 +1574,11 @@ actor GitService {
 
         let rc = git_stash_apply(repo, index, &opts)
         guard rc == 0 else {
-            throw GitError.operationFailed("Stash apply failed (\(rc))")
+            // GIT_EMERGECONFLICT = -13: conflicts during stash apply
+            if rc == -13 {
+                throw GitError.operationFailed("Stash apply resulted in merge conflicts")
+            }
+            throw GitError.operationFailed(libgit2ErrorMsg("Stash apply failed", code: rc))
         }
     }
 
@@ -1784,7 +1792,7 @@ actor GitService {
         try newContent.write(toFile: gitignorePath, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Rebase Conflict Detection & Resolution
+    // MARK: - Conflict Detection & Resolution
 
     func isRebaseInProgress() -> Bool {
         guard let repo else { return false }
@@ -1792,6 +1800,65 @@ actor GitService {
         return state == GIT_REPOSITORY_STATE_REBASE_MERGE.rawValue
             || state == GIT_REPOSITORY_STATE_REBASE_INTERACTIVE.rawValue
             || state == GIT_REPOSITORY_STATE_REBASE.rawValue
+    }
+
+    func isMergeInProgress() -> Bool {
+        guard let repo else { return false }
+        let state = git_repository_state(repo)
+        return state == GIT_REPOSITORY_STATE_MERGE.rawValue
+    }
+
+    func hasIndexConflicts() -> Bool {
+        guard let repo else { return false }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return false }
+        defer { git_index_free(index) }
+        return git_index_has_conflicts(index) == 1
+    }
+
+    /// Detect the current conflict type based on repository state and index.
+    func detectConflictType() -> ConflictType? {
+        if isRebaseInProgress() { return .rebase }
+        if isMergeInProgress() { return .merge(branch: mergeSourceBranch()) }
+        // Stash apply conflicts leave conflicts in index without changing repo state
+        if hasIndexConflicts() { return .stashApply }
+        return nil
+    }
+
+    /// Get the branch being merged (from MERGE_HEAD).
+    private func mergeSourceBranch() -> String {
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let mergeHeadPath = (gitDir as NSString).appendingPathComponent("MERGE_HEAD")
+        let mergeHead = (try? String(contentsOfFile: mergeHeadPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return branchNameForHash(mergeHead) ?? String(mergeHead.prefix(7))
+    }
+
+    /// Get merge conflict state (conflicted files + resolved files + source branch).
+    func mergeConflictState() throws -> (conflictedFiles: [ConflictFile], resolvedFiles: [ConflictFile], sourceBranch: String)? {
+        guard isMergeInProgress() || hasIndexConflicts() else { return nil }
+        let conflicted = try conflictedFiles()
+        let resolved = try resolvedConflictFiles()
+        let source = isMergeInProgress() ? mergeSourceBranch() : "stash"
+        guard !conflicted.isEmpty || !resolved.isEmpty else { return nil }
+        return (conflicted, resolved, source)
+    }
+
+    /// Get the default merge commit message from MERGE_MSG.
+    func mergeCommitMessage() -> String {
+        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let msgPath = (gitDir as NSString).appendingPathComponent("MERGE_MSG")
+        return (try? String(contentsOfFile: msgPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    func mergeAbort() async throws {
+        try await runGit(["merge", "--abort"])
+    }
+
+    /// Reset to abort stash apply conflicts (git reset --merge).
+    func stashConflictAbort() async throws {
+        try await runGit(["reset", "--merge"])
     }
 
     func rebaseState() throws -> RebaseState? {
@@ -1892,7 +1959,7 @@ actor GitService {
         return result
     }
 
-    private func resolvedConflictFiles() throws -> [ConflictFile] {
+    func resolvedConflictFiles() throws -> [ConflictFile] {
         guard let repo else { throw GitError.repoNotOpen }
         var index: OpaquePointer?
         guard git_repository_index(&index, repo) == 0, let index else { return [] }
@@ -1986,6 +2053,30 @@ actor GitService {
     }
 
     private func conflictOursLabel() -> String {
+        if isRebaseInProgress() {
+            return rebaseOursLabel()
+        } else if isMergeInProgress() {
+            let branch = currentBranchForConflictLabel()
+            return "Current branch (\(branch))"
+        } else {
+            // Stash apply or unknown
+            return "Current changes"
+        }
+    }
+
+    private func conflictTheirsLabel() -> String {
+        if isRebaseInProgress() {
+            return rebaseTheirsLabel()
+        } else if isMergeInProgress() {
+            let branch = mergeSourceBranch()
+            return "Incoming (\(branch))"
+        } else {
+            // Stash apply or unknown
+            return "Stashed changes"
+        }
+    }
+
+    private func rebaseOursLabel() -> String {
         let gitDir = (repoPath as NSString).appendingPathComponent(".git")
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         let ontoHash = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("onto"), encoding: .utf8))?
@@ -1995,7 +2086,7 @@ actor GitService {
         return "Commit \(shortHash) on \(branch)"
     }
 
-    private func conflictTheirsLabel() -> String {
+    private func rebaseTheirsLabel() -> String {
         let gitDir = (repoPath as NSString).appendingPathComponent(".git")
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         let headName = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("head-name"), encoding: .utf8))?
@@ -2005,6 +2096,16 @@ actor GitService {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let shortHash = String(origHead.prefix(7))
         return "Commit \(shortHash) on \(headName)"
+    }
+
+    private func currentBranchForConflictLabel() -> String {
+        var headRef: OpaquePointer?
+        guard let repo, git_repository_head(&headRef, repo) == 0, let headRef else { return "HEAD" }
+        defer { git_reference_free(headRef) }
+        if let name = git_reference_shorthand(headRef) {
+            return String(cString: name)
+        }
+        return "HEAD"
     }
 
     func markConflictResolved(path: String) async throws {

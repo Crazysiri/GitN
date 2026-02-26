@@ -134,7 +134,39 @@ struct SubmoduleInfo: Identifiable, Equatable {
     let hash: String
 }
 
-// MARK: - Rebase Conflict
+// MARK: - Conflict Types
+
+enum ConflictType: Equatable {
+    case rebase
+    case merge(branch: String)
+    case stashApply
+
+    var title: String {
+        switch self {
+        case .rebase: return "Rebase conflicts detected"
+        case .merge: return "Merge conflicts detected"
+        case .stashApply: return "Stash apply conflicts detected"
+        }
+    }
+
+    var abortLabel: String {
+        switch self {
+        case .rebase: return "Abort Rebase"
+        case .merge: return "Abort Merge"
+        case .stashApply: return "Abort (Reset)"
+        }
+    }
+
+    var continueLabel: String {
+        switch self {
+        case .rebase: return "Continue Rebase"
+        case .merge: return "Commit Merge"
+        case .stashApply: return "Done"
+        }
+    }
+}
+
+// MARK: - Rebase State
 
 struct RebaseState: Equatable {
     let sourceBranch: String

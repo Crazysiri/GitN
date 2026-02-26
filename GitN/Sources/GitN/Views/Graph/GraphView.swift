@@ -557,7 +557,7 @@ struct CommitTableView: NSViewRepresentable {
             cell.graphEntry = lazyGraph.entry(at: row)
             cell.isSelectedRow = selectedRowHashes.contains(commit.hash)
             cell.currentBranch = currentBranch
-            cell.isRebaseConflict = commit.isUncommitted && hasUnresolvedConflicts
+            cell.isInConflict = commit.isUncommitted && hasUnresolvedConflicts
             cell.rowHeight = rowHeight
             cell.columnWidth = columnWidth
             cell.avatarSize = avatarSize
@@ -904,7 +904,7 @@ final class CommitRowCellView: NSView {
     var graphEntry: CommitGraphEntry?
     var isSelectedRow = false
     var currentBranch = ""
-    var isRebaseConflict = false
+    var isInConflict = false
     var rowHeight: CGFloat = 24
     var columnWidth: CGFloat = 18
     var avatarSize: CGFloat = 18
@@ -919,7 +919,7 @@ final class CommitRowCellView: NSView {
         guard let commit = commit else { return }
         let padding: CGFloat = 8
 
-        if isRebaseConflict {
+        if isInConflict {
             drawConflictBanner()
             return
         }
