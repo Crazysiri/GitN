@@ -5,6 +5,7 @@ struct ConflictMergeView: View {
     let viewModel: RepoViewModel
     @State private var currentConflictIndex = 0
     @State private var scrollOffset: CGPoint = .zero
+    @State private var initialScrollDone = false
 
     private var file: ConflictFile? { viewModel.conflictMergeFile }
     private var sides: ConflictSides? { viewModel.conflictSides }
@@ -26,6 +27,17 @@ struct ConflictMergeView: View {
             }
         }
         .background(Color(.windowBackgroundColor))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                scrollToFirstConflict()
+            }
+        }
+        .onChange(of: file?.id) { _, _ in
+            initialScrollDone = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                scrollToFirstConflict()
+            }
+        }
     }
 
     // MARK: - Toolbar
@@ -102,7 +114,7 @@ struct ConflictMergeView: View {
             panelHeader(label: "A", labelColor: .blue, title: sides?.oursLabel ?? "Ours")
             Divider()
             SyncedScrollCodeView(
-                lines: sides?.oursContent.components(separatedBy: "\n") ?? [],
+                lines: sides?.oursLines ?? [],
                 conflictRegions: sides?.markers ?? [],
                 side: .ours,
                 highlightColor: NSColor.systemBlue,
@@ -120,7 +132,7 @@ struct ConflictMergeView: View {
             panelHeader(label: "B", labelColor: .orange, title: sides?.theirsLabel ?? "Theirs")
             Divider()
             SyncedScrollCodeView(
-                lines: sides?.theirsContent.components(separatedBy: "\n") ?? [],
+                lines: sides?.theirsLines ?? [],
                 conflictRegions: sides?.markers ?? [],
                 side: .theirs,
                 highlightColor: NSColor.systemOrange,
@@ -210,6 +222,15 @@ struct ConflictMergeView: View {
         guard newIdx >= 0, newIdx < totalConflicts else { return }
         currentConflictIndex = newIdx
     }
+
+    private func scrollToFirstConflict() {
+        guard !initialScrollDone,
+              let firstLine = sides?.markers.first?.oursRange.lowerBound,
+              firstLine > 0 else { return }
+        initialScrollDone = true
+        let y = CGFloat(firstLine) * SideCodeContentView.lineHeight - SideCodeContentView.lineHeight * 2
+        scrollOffset = CGPoint(x: 0, y: max(0, y))
+    }
 }
 
 // MARK: - Synced Scroll Code View (ours/theirs panels)
@@ -258,7 +279,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
 
         let lineH = SideCodeContentView.lineHeight
         let contentHeight = CGFloat(lines.count) * lineH + 16
-        let contentWidth = max(scrollView.bounds.width, estimateWidth())
+        let contentWidth = max(scrollView.bounds.width, contentView.cachedEstimatedWidth)
         contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
         contentView.needsDisplay = true
 
@@ -274,11 +295,6 @@ struct SyncedScrollCodeView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    private func estimateWidth() -> CGFloat {
-        let maxLen = lines.reduce(0) { max($0, $1.count) }
-        return CGFloat(maxLen) * 7.2 + 80
-    }
 
     final class Coordinator: NSObject {
         var parent: SyncedScrollCodeView
@@ -336,7 +352,7 @@ struct OutputScrollCodeView: NSViewRepresentable {
 
         let lineH = OutputCodeContentView.lineHeight
         let contentHeight = CGFloat(lines.count) * lineH + 16
-        let contentWidth = max(scrollView.bounds.width, estimateWidth())
+        let contentWidth = max(scrollView.bounds.width, contentView.cachedEstimatedWidth)
         contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
         contentView.needsDisplay = true
 
@@ -352,11 +368,6 @@ struct OutputScrollCodeView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    private func estimateWidth() -> CGFloat {
-        let maxLen = lines.reduce(0) { max($0, $1.count) }
-        return CGFloat(maxLen) * 7.2 + 80
-    }
 
     final class Coordinator: NSObject {
         var parent: OutputScrollCodeView
@@ -618,7 +629,7 @@ enum CodeSyntaxHighlighter {
 
 final class SideCodeContentView: NSView {
     static let lineHeight: CGFloat = 17
-    private static let lineNumWidth: CGFloat = 40
+    private static let lineNumWidth: CGFloat = 56
     private static let checkboxSize: CGFloat = 14
 
     private var lines: [String] = []
@@ -628,6 +639,7 @@ final class SideCodeContentView: NSView {
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var onToggleRegion: ((Int) -> Void)?
     private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
+    private(set) var cachedEstimatedWidth: CGFloat = 400
 
     override var isFlipped: Bool { true }
 
@@ -637,6 +649,10 @@ final class SideCodeContentView: NSView {
         onToggleRegion: @escaping (Int) -> Void,
         filePath: String = ""
     ) {
+        if lines.count != self.lines.count {
+            let maxLen = lines.reduce(0) { max($0, $1.count) }
+            cachedEstimatedWidth = CGFloat(maxLen) * 7.2 + 80
+        }
         self.lines = lines
         self.conflictRegions = conflictRegions
         self.side = side
@@ -757,7 +773,7 @@ final class SideCodeContentView: NSView {
 
 final class OutputCodeContentView: NSView {
     static let lineHeight: CGFloat = 17
-    private static let lineNumWidth: CGFloat = 40
+    private static let lineNumWidth: CGFloat = 56
     private static let originBadgeWidth: CGFloat = 18
 
     private var lines: [String] = []
@@ -765,15 +781,25 @@ final class OutputCodeContentView: NSView {
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var lineOrigins: [(origin: Character?, color: NSColor?)] = []
     private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
+    private(set) var cachedEstimatedWidth: CGFloat = 400
 
     override var isFlipped: Bool { true }
 
     func configure(lines: [String], conflictSides: ConflictSides?, regionChoices: [Int: RepoViewModel.RegionChoice], filePath: String = "") {
+        let linesChanged = lines.count != self.lines.count
+        let sidesChanged = conflictSides != self.conflictSides
+        let choicesChanged = regionChoices != self.regionChoices
+        if linesChanged {
+            let maxLen = lines.reduce(0) { max($0, $1.count) }
+            cachedEstimatedWidth = CGFloat(maxLen) * 7.2 + 80
+        }
         self.lines = lines
         self.conflictSides = conflictSides
         self.regionChoices = regionChoices
         self.syntaxLanguage = CodeSyntaxHighlighter.language(for: filePath)
-        computeLineOrigins()
+        if linesChanged || sidesChanged || choicesChanged {
+            computeLineOrigins()
+        }
     }
 
     private func computeLineOrigins() {
@@ -781,8 +807,8 @@ final class OutputCodeContentView: NSView {
             lineOrigins = lines.map { _ in (nil, nil) }
             return
         }
-        let oursLines = sides.oursContent.components(separatedBy: "\n")
-        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+        let oursLines = sides.oursLines
+        let theirsLines = sides.theirsLines
 
         var origins: [(Character?, NSColor?)] = []
         var oursIdx = 0

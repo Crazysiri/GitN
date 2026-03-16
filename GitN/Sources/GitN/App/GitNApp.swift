@@ -12,6 +12,7 @@ struct GitNApp: App {
                 .environment(appModel)
                 .environment(themeManager)
         }
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(after: .newItem) {
                 Button("Open Repository...") {

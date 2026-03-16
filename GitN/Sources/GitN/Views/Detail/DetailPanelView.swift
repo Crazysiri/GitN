@@ -4,9 +4,14 @@ struct DetailPanelView: View {
     let viewModel: RepoViewModel
 
     @State private var isEditingMessage = false
-    @State private var editedMessage = ""
-    @State private var originalMessage = ""   // track original to detect changes
+    @State private var editedTitle = ""
+    @State private var editedDescription = ""
+    @State private var originalTitle = ""
+    @State private var originalDescription = ""
+    @State private var fullCommitMessage = ""
     @State private var isHoveringMessage = false
+    @State private var discardConfirmPaths: [String] = []
+    @State private var showDiscardConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,6 +21,12 @@ struct DetailPanelView: View {
                 compareHeader(commit)
                 Divider()
                 compareFileList
+                Divider()
+                diffContentView
+            } else if let stash = viewModel.selectedStash {
+                stashInfoHeader(stash)
+                Divider()
+                diffFileList
                 Divider()
                 diffContentView
             } else if let commit = viewModel.selectedCommit {
@@ -36,12 +47,52 @@ struct DetailPanelView: View {
             }
         }
         .background(Color(.controlBackgroundColor).opacity(0.3))
-        .onChange(of: viewModel.selectedCommit?.hash) { _, _ in
+        .onChange(of: viewModel.selectedCommit?.hash) { oldValue, newValue in
             // Reset editing state when selecting a different commit (or switching to uncommitted)
             isEditingMessage = false
-            editedMessage = ""
-            originalMessage = ""
+            editedTitle = ""
+            editedDescription = ""
+            originalTitle = ""
+            originalDescription = ""
+            fullCommitMessage = ""
             isHoveringMessage = false
+            // Load full commit message when commit changes
+            if let hash = newValue, let commit = viewModel.selectedCommit, !commit.isUncommitted {
+                Task {
+                    let fullMessage = await viewModel.getFullCommitMessage(hash: hash)
+                    await MainActor.run {
+                        fullCommitMessage = fullMessage
+                    }
+                }
+            }
+        }
+        .onChange(of: viewModel.selectedStash?.id) { _, _ in
+            // Reset editing state when selecting a different stash
+            isEditingMessage = false
+            editedTitle = ""
+            editedDescription = ""
+            originalTitle = ""
+            originalDescription = ""
+            isHoveringMessage = false
+        }
+        .alert(
+            "Discard Changes",
+            isPresented: $showDiscardConfirm
+        ) {
+            Button("Discard", role: .destructive) {
+                let paths = discardConfirmPaths
+                discardConfirmPaths = []
+                Task { await viewModel.discardChanges(paths: paths) }
+            }
+            Button("Cancel", role: .cancel) {
+                discardConfirmPaths = []
+            }
+        } message: {
+            if discardConfirmPaths.count == 1 {
+                Text("Are you sure you want to discard changes to \"\(discardConfirmPaths.first ?? "")\"? This cannot be undone.")
+            } else {
+                Text("Are you sure you want to discard changes to \(discardConfirmPaths.count) files? This cannot be undone.")
+            }
         }
     }
 
@@ -51,8 +102,21 @@ struct DetailPanelView: View {
         return viewModel.currentBranchHashes.contains(commit.hash)
     }
 
+    /// Load full commit message when needed
+    private func loadFullMessageIfNeeded(commit: CommitInfo) {
+        if fullCommitMessage.isEmpty && !commit.isUncommitted {
+            Task {
+                let message = await viewModel.getFullCommitMessage(hash: commit.hash)
+                await MainActor.run {
+                    fullCommitMessage = message
+                }
+            }
+        }
+    }
+
     private func commitInfoHeader(_ commit: CommitInfo) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let _ = loadFullMessageIfNeeded(commit: commit)
+        return VStack(alignment: .leading, spacing: 6) {
             // Commit hash + label + AI button
             HStack(spacing: 6) {
                 Text("commit:")
@@ -65,9 +129,8 @@ struct DetailPanelView: View {
                     Button(action: {
                         Task {
                             if let result = await viewModel.generateAICommitMessageForCommit(hash: commit.hash) {
-                                editedMessage = result.description.isEmpty
-                                    ? result.title
-                                    : result.title + "\n\n" + result.description
+                                editedTitle = result.title
+                                editedDescription = result.description
                             }
                         }
                     }) {
@@ -102,20 +165,19 @@ struct DetailPanelView: View {
             }
 
             if isEditingMessage {
-                // Editable message area
+                // Editable message area with separate title and description
                 VStack(alignment: .leading, spacing: 6) {
-                    // Summary field with char count
+                    // Title field with char count
                     HStack(spacing: 0) {
-                        TextField("Summary", text: $editedMessage, axis: .vertical)
+                        TextField("Title", text: $editedTitle)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 11))
-                            .lineLimit(1...5)
+                            .font(.system(size: 11, weight: .semibold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 4)
 
-                        Text("\(72 - editedMessage.count)")
+                        Text("\(72 - editedTitle.count)")
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(editedMessage.count > 72 ? .red : .secondary)
+                            .foregroundStyle(editedTitle.count > 72 ? .red : .secondary)
                             .padding(.trailing, 6)
                     }
                     .background(Color(.textBackgroundColor).opacity(0.5))
@@ -126,10 +188,13 @@ struct DetailPanelView: View {
 
                     // Description field
                     CommitMessageEditor(
-                        text: .constant(""),
-                        placeholder: "Description"
+                        text: Binding(
+                            get: { editedDescription },
+                            set: { editedDescription = $0 }
+                        ),
+                        placeholder: "Description (optional)"
                     )
-                    .frame(minHeight: 30, maxHeight: 50)
+                    .frame(minHeight: 30, maxHeight: 100)
                     .background(Color(.textBackgroundColor).opacity(0.5))
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
@@ -139,10 +204,12 @@ struct DetailPanelView: View {
                     // Update / Cancel buttons
                     HStack(spacing: 8) {
                         Button(action: {
-                            let msg = editedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !msg.isEmpty else { return }
+                            let title = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !title.isEmpty else { return }
+                            let description = editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let fullMessage = description.isEmpty ? title : title + "\n\n" + description
                             isEditingMessage = false
-                            Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: msg) }
+                            Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: fullMessage) }
                         }) {
                             Text("Update Message")
                                 .font(.system(size: 11, weight: .medium))
@@ -152,15 +219,16 @@ struct DetailPanelView: View {
                         .controlSize(.small)
                         .tint(.green)
                         .disabled(
-                            editedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || editedMessage.trimmingCharacters(in: .whitespacesAndNewlines) == originalMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+                            editedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || (editedTitle == originalTitle && editedDescription == originalDescription)
                         )
 
                         Button(action: {
                             isEditingMessage = false
-                            editedMessage = ""
+                            editedTitle = originalTitle
+                            editedDescription = originalDescription
                         }) {
-                            Text("Cancel Amend")
+                            Text("Cancel")
                                 .font(.system(size: 11, weight: .medium))
                                 .frame(maxWidth: .infinity)
                         }
@@ -170,31 +238,44 @@ struct DetailPanelView: View {
                     }
                 }
             } else {
-                // Read-only message with hover border
-                Text(commit.message)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(6)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(
-                                isHoveringMessage && isEditableCommit
-                                    ? Color.accentColor.opacity(0.5)
-                                    : Color.clear,
-                                lineWidth: 1
-                            )
-                    )
-                    .onHover { hovering in
-                        isHoveringMessage = hovering
-                    }
-                    .onTapGesture {
-                        guard isEditableCommit else { return }
-                        originalMessage = commit.message
-                        editedMessage = commit.message
-                        isEditingMessage = true
-                    }
-                    .help(isEditableCommit ? "Click to edit commit message" : "")
+                // Read-only message with hover border - show full message, max 3 lines, scrollable
+                ScrollView(.vertical, showsIndicators: true) {
+                    Text(fullCommitMessage.isEmpty ? commit.message : fullCommitMessage)
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }
+                .frame(maxHeight: 60) // Approximately 3 lines
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(
+                            isHoveringMessage && isEditableCommit
+                                ? Color.accentColor.opacity(0.5)
+                                : Color.clear,
+                            lineWidth: 1
+                        )
+                )
+                .onHover { hovering in
+                    isHoveringMessage = hovering
+                }
+                .onTapGesture {
+                    guard isEditableCommit else { return }
+                    // Parse title and description from full message
+                    let message = fullCommitMessage.isEmpty ? commit.message : fullCommitMessage
+                    let lines = message.components(separatedBy: .newlines)
+                    let title = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let description = lines.dropFirst()
+                        .drop(while: { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+                        .joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    originalTitle = title
+                    originalDescription = description
+                    editedTitle = title
+                    editedDescription = description
+                    isEditingMessage = true
+                }
+                .help(isEditableCommit ? "Click to edit commit message" : "")
             }
 
             // Author info and parent hash
@@ -243,6 +324,30 @@ struct DetailPanelView: View {
                         .foregroundStyle(.purple)
                     Spacer()
                 }
+            }
+        }
+        .padding(10)
+    }
+    
+    private func stashInfoHeader(_ stash: StashInfo) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "tray")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text("stash:")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text(stash.index)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Spacer()
+            }
+            
+            if !stash.message.isEmpty {
+                Text(stash.message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
             }
         }
         .padding(10)
@@ -398,6 +503,13 @@ struct DetailPanelView: View {
         Button("Open in Default Editor") {
             viewModel.openInEditor(path: file.path)
         }
+
+        if file.path.isMarkdownFile {
+            Button("Preview Markdown") {
+                let hash = viewModel.selectedCommit.flatMap { $0.isUncommitted ? nil : $0.hash }
+                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: hash) }
+            }
+        }
     }
 
     // MARK: - Staged / Unstaged split list
@@ -407,6 +519,11 @@ struct DetailPanelView: View {
             return Array(viewModel.selectedFilePaths)
         }
         return [path]
+    }
+
+    private func confirmDiscard(_ paths: [String]) {
+        discardConfirmPaths = paths
+        showDiscardConfirm = true
     }
 
     private var stagingFileList: some View {
@@ -435,16 +552,20 @@ struct DetailPanelView: View {
                             isSelected: viewModel.selectedFilePaths.contains(file.path)
                                 || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
                             isStaged: true,
-                            onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
                             onToggle: { Task { await viewModel.unstageFile(file.path) } }
                         )
                         .onTapGesture {
-                            let isMulti = NSEvent.modifierFlags.contains(.command)
-                            viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                            let flags = NSEvent.modifierFlags
+                            viewModel.toggleFileSelection(
+                                file.path,
+                                isMulti: flags.contains(.command),
+                                isRange: flags.contains(.shift),
+                                orderedPaths: stagedFiles.map(\.path)
+                            )
                             Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
                         }
                         .contextMenu { stagedFileContextMenu(file) }
-                        .draggable(file.path)
+                        .draggable(dragPayload(for: file.path))
                     }
 
                     // Empty drop hint when no staged files
@@ -469,6 +590,18 @@ struct DetailPanelView: View {
                         allSelected: false,
                         onToggle: {
                             Task { await viewModel.stageAllFiles() }
+                        },
+                        onDiscard: {
+                            // If files are multi-selected, discard only selected unstaged files;
+                            // otherwise discard all unstaged files.
+                            let selected = viewModel.selectedFilePaths
+                            let unstagedPaths = Set(unstagedFiles.map(\.path))
+                            let targets = selected.filter { unstagedPaths.contains($0) }
+                            if targets.count > 1 {
+                                confirmDiscard(Array(targets))
+                            } else {
+                                confirmDiscard(unstagedFiles.map(\.path))
+                            }
                         }
                     )
 
@@ -478,16 +611,20 @@ struct DetailPanelView: View {
                             isSelected: viewModel.selectedFilePaths.contains(file.path)
                                 || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
                             isStaged: false,
-                            onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
                             onToggle: { Task { await viewModel.stageFile(file.path) } }
                         )
                         .onTapGesture {
-                            let isMulti = NSEvent.modifierFlags.contains(.command)
-                            viewModel.toggleFileSelection(file.path, isMulti: isMulti)
+                            let flags = NSEvent.modifierFlags
+                            viewModel.toggleFileSelection(
+                                file.path,
+                                isMulti: flags.contains(.command),
+                                isRange: flags.contains(.shift),
+                                orderedPaths: unstagedFiles.map(\.path)
+                            )
                             Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
                         }
                         .contextMenu { unstagedFileContextMenu(file) }
-                        .draggable(file.path)
+                        .draggable(dragPayload(for: file.path))
                     }
 
                     // Empty drop hint when no unstaged files
@@ -514,68 +651,104 @@ struct DetailPanelView: View {
 
         return ScrollView {
             VStack(spacing: 0) {
-                stagingSectionHeader(
-                    title: "已暂存",
-                    count: conflictStagedFiles(excludingConflicts: conflictPaths).count,
-                    allSelected: !conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty,
-                    onToggle: {
-                        Task {
-                            if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                                await viewModel.stageAllFiles()
-                            } else {
-                                await viewModel.unstageAllFiles()
+                // Staged section — drop target
+                VStack(spacing: 0) {
+                    stagingSectionHeader(
+                        title: "已暂存",
+                        count: conflictStagedFiles(excludingConflicts: conflictPaths).count,
+                        allSelected: !conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty,
+                        onToggle: {
+                            Task {
+                                if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                                    await viewModel.stageAllFiles()
+                                } else {
+                                    await viewModel.unstageAllFiles()
+                                }
                             }
                         }
-                    }
-                )
-
-                ForEach(conflictStagedFiles(excludingConflicts: conflictPaths)) { file in
-                    StagingFileRow(
-                        file: file,
-                        isSelected: viewModel.selectedFilePaths.contains(file.path)
-                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
-                        isStaged: true,
-                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) } },
-                        onToggle: { Task { await viewModel.unstageFile(file.path) } }
                     )
-                    .onTapGesture {
-                        let isMulti = NSEvent.modifierFlags.contains(.command)
-                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
-                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+
+                    ForEach(conflictStagedFiles(excludingConflicts: conflictPaths)) { file in
+                        StagingFileRow(
+                            file: file,
+                            isSelected: viewModel.selectedFilePaths.contains(file.path)
+                                || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
+                            isStaged: true,
+                            onToggle: { Task { await viewModel.unstageFile(file.path) } }
+                        )
+                        .onTapGesture {
+                            let flags = NSEvent.modifierFlags
+                            viewModel.toggleFileSelection(
+                                file.path,
+                                isMulti: flags.contains(.command),
+                                isRange: flags.contains(.shift),
+                                orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                            )
+                            Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                        }
+                        .contextMenu {
+                            conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                        }
+                        .draggable(dragPayload(for: file.path))
                     }
-                    .contextMenu {
-                        conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+
+                    if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                        Text("Drag files here to stage")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, minHeight: 28)
                     }
+                }
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    handleDrop(providers: providers, toStaged: true)
                 }
 
                 Divider().padding(.vertical, 2)
 
-                stagingSectionHeader(
-                    title: "未暂存",
-                    count: conflictUnstagedFiles(excludingConflicts: conflictPaths).count,
-                    allSelected: false,
-                    onToggle: {
-                        Task { await viewModel.stageAllFiles() }
-                    }
-                )
-
-                ForEach(conflictUnstagedFiles(excludingConflicts: conflictPaths)) { file in
-                    StagingFileRow(
-                        file: file,
-                        isSelected: viewModel.selectedFilePaths.contains(file.path)
-                            || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
-                        isStaged: false,
-                        onTap: { Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) } },
-                        onToggle: { Task { await viewModel.stageFile(file.path) } }
+                // Unstaged section — drop target
+                VStack(spacing: 0) {
+                    stagingSectionHeader(
+                        title: "未暂存",
+                        count: conflictUnstagedFiles(excludingConflicts: conflictPaths).count,
+                        allSelected: false,
+                        onToggle: {
+                            Task { await viewModel.stageAllFiles() }
+                        }
                     )
-                    .onTapGesture {
-                        let isMulti = NSEvent.modifierFlags.contains(.command)
-                        viewModel.toggleFileSelection(file.path, isMulti: isMulti)
-                        Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+
+                    ForEach(conflictUnstagedFiles(excludingConflicts: conflictPaths)) { file in
+                        StagingFileRow(
+                            file: file,
+                            isSelected: viewModel.selectedFilePaths.contains(file.path)
+                                || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
+                            isStaged: false,
+                            onToggle: { Task { await viewModel.stageFile(file.path) } }
+                        )
+                        .onTapGesture {
+                            let flags = NSEvent.modifierFlags
+                            viewModel.toggleFileSelection(
+                                file.path,
+                                isMulti: flags.contains(.command),
+                                isRange: flags.contains(.shift),
+                                orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                            )
+                            Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                        }
+                        .contextMenu {
+                            conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                        }
+                        .draggable(dragPayload(for: file.path))
                     }
-                    .contextMenu {
-                        conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+
+                    if conflictUnstagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                        Text("Drag files here to unstage")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, minHeight: 28)
                     }
+                }
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    handleDrop(providers: providers, toStaged: false)
                 }
             }
         }
@@ -620,6 +793,12 @@ struct DetailPanelView: View {
             viewModel.openInEditor(path: file.path)
         }
 
+        if file.path.isMarkdownFile {
+            Button("Preview Markdown") {
+                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: nil) }
+            }
+        }
+
         Divider()
 
         Button("Delete file", role: .destructive) {
@@ -637,8 +816,8 @@ struct DetailPanelView: View {
             Task { await viewModel.stageFiles(paths) }
         }
 
-        Button("Discard changes") {
-            Task { await viewModel.discardChanges(paths: paths) }
+        Button("Discard changes", role: .destructive) {
+            confirmDiscard(paths)
         }
 
         Menu("Ignore") {
@@ -676,6 +855,12 @@ struct DetailPanelView: View {
 
         Button("Open in Default Editor") {
             viewModel.openInEditor(path: file.path)
+        }
+
+        if file.path.isMarkdownFile {
+            Button("Preview Markdown") {
+                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: nil) }
+            }
         }
 
         Divider()
@@ -753,8 +938,8 @@ struct DetailPanelView: View {
             Task { await viewModel.stageFiles(paths) }
         }
 
-        Button("Discard changes") {
-            Task { await viewModel.discardChanges(paths: paths) }
+        Button("Discard changes", role: .destructive) {
+            confirmDiscard(paths)
         }
 
         if wasConflicted {
@@ -786,7 +971,7 @@ struct DetailPanelView: View {
         }
     }
 
-    private func stagingSectionHeader(title: String, count: Int, allSelected: Bool, onToggle: @escaping () -> Void) -> some View {
+    private func stagingSectionHeader(title: String, count: Int, allSelected: Bool, onToggle: @escaping () -> Void, onDiscard: (() -> Void)? = nil) -> some View {
         HStack(spacing: 6) {
             Button(action: onToggle) {
                 Image(systemName: allSelected ? "checkmark.square.fill" : "square")
@@ -800,6 +985,16 @@ struct DetailPanelView: View {
                 .foregroundStyle(.secondary)
 
             Spacer()
+
+            if let onDiscard, count > 0 {
+                Button(action: onDiscard) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("Discard all unstaged changes")
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -811,15 +1006,28 @@ struct DetailPanelView: View {
             ?? DiffFile(additions: 0, deletions: 0, path: status.path)
     }
 
+    /// Build the drag payload for a file row.
+    /// If the file is part of a multi-selection, all selected paths are included
+    /// (newline-separated) so that the entire selection moves together.
+    private func dragPayload(for filePath: String) -> String {
+        let selected = viewModel.selectedFilePaths
+        if selected.contains(filePath), selected.count > 1 {
+            return selected.sorted().joined(separator: "\n")
+        }
+        return filePath
+    }
+
     private func handleDrop(providers: [NSItemProvider], toStaged: Bool) -> Bool {
         for provider in providers {
             provider.loadObject(ofClass: NSString.self) { item, _ in
-                guard let path = item as? String else { return }
+                guard let payload = item as? String else { return }
+                // Payload may contain multiple newline-separated paths.
+                let paths = payload.components(separatedBy: "\n").filter { !$0.isEmpty }
                 Task { @MainActor in
                     if toStaged {
-                        await viewModel.stageFile(path)
+                        await viewModel.stageFiles(paths)
                     } else {
-                        await viewModel.unstageFile(path)
+                        await viewModel.unstageFiles(paths)
                     }
                 }
             }
@@ -831,7 +1039,9 @@ struct DetailPanelView: View {
 
     private var diffContentView: some View {
         Group {
-            if let diff = viewModel.parsedDiff, !diff.hunks.isEmpty {
+            if viewModel.isFileTooLarge {
+                fileTooLargeView
+            } else if let diff = viewModel.parsedDiff, !diff.hunks.isEmpty {
                 let isUncommitted = viewModel.selectedCommit?.isUncommitted == true
                 DiffHunkView(
                     diff: diff,
@@ -840,8 +1050,37 @@ struct DetailPanelView: View {
                     viewModel: viewModel
                 )
             } else if viewModel.selectedDiffFile != nil {
-                ProgressView("Loading diff...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !viewModel.fileDiffContent.isEmpty {
+                    if viewModel.fileDiffContent == "Failed to load diff" {
+                        VStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.title2)
+                                .foregroundStyle(.orange)
+                            Text("Failed to load diff")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if viewModel.fileDiffContent == "No changes in this file" {
+                        VStack(spacing: 8) {
+                            Image(systemName: "doc.text")
+                                .font(.title2)
+                                .foregroundStyle(.secondary)
+                            Text("No changes in this file")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        Text("No changes to display")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    ProgressView("Loading diff...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 Text("Select a file to view diff")
                     .font(.caption)
@@ -849,6 +1088,39 @@ struct DetailPanelView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    private var fileTooLargeView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("File too large to diff (\(viewModel.fileTooLargeSizeMB) MB)")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button(action: { Task { await viewModel.forceLoadFileDiff() } }) {
+                    Label("Load anyway", systemImage: "eye")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+
+                Button(action: { viewModel.openExternalDiffTool() }) {
+                    Label("Open in External Diff Tool", systemImage: "arrow.up.forward.app")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+            }
+
+            Text("Tip: 通过 `git config diff.tool <tool>` 配置外部 diff 工具")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - AI Commit Button
@@ -1324,7 +1596,6 @@ struct StagingFileRow: View {
     let file: FileStatus
     let isSelected: Bool
     let isStaged: Bool
-    let onTap: () -> Void
     let onToggle: () -> Void
 
     var body: some View {
@@ -1355,7 +1626,6 @@ struct StagingFileRow: View {
         .padding(.vertical, 3)
         .background(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.2) : Color.clear)
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
     }
 
     private var statusColor: Color {
@@ -1492,19 +1762,11 @@ struct DiffHunkView: View {
                 diffToolbar
             }
 
-            GeometryReader { geo in
-                ScrollView([.horizontal, .vertical]) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(diff.hunks.enumerated()), id: \.offset) { hunkIdx, hunk in
-                            hunkHeaderLabel(hunkIndex: hunkIdx, hunk: hunk)
-                            hunkBody(hunkIndex: hunkIdx, hunk: hunk)
-                        }
-                    }
-                    .frame(minWidth: geo.size.width, alignment: .topLeading)
-                    .padding(.bottom, 8)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
+            SelectableDiffView(
+                hunks: diff.hunks,
+                isUncommitted: isUncommitted,
+                selectedLines: $selectedLines
+            )
         }
     }
 
@@ -1567,96 +1829,192 @@ struct DiffHunkView: View {
         .background(Color(.controlBackgroundColor).opacity(0.6))
     }
 
-    // MARK: - Hunk Header (label only, no buttons)
+}
 
-    private func hunkHeaderLabel(hunkIndex: Int, hunk: ParsedHunk) -> some View {
-        HStack {
-            Text("块 \(hunkIndex + 1):  \(hunk.displayRange)")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Color(.controlBackgroundColor).opacity(0.35))
+// MARK: - NSTextView subclass with full cross-line text selection
+
+private final class DiffTextViewNS: NSTextView {
+    struct LineInfo {
+        let range: NSRange
+        let hunkIdx: Int
+        let lineId: Int
+        let kind: HunkLine.Kind
+        let bgColor: NSColor
     }
 
-    // MARK: - Hunk Body
+    var lineInfos: [LineInfo] = []
+    var gutterEndX: CGFloat = 0
+    var onGutterClick: ((Int, Int, HunkLine.Kind) -> Void)?
 
-    private func hunkBody(hunkIndex: Int, hunk: ParsedHunk) -> some View {
-        let selected = selectedLines[hunkIndex] ?? []
-
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(hunk.lines) { line in
-                let isSelected = selected.contains(line.id)
-                let isChangeLine = line.kind == .addition || line.kind == .deletion
-
-                HStack(spacing: 0) {
-                    Text(line.oldLineNum.map(String.init) ?? "")
-                        .frame(width: 38, alignment: .trailing)
-                        .foregroundStyle(.secondary.opacity(0.5))
-
-                    Text(line.newLineNum.map(String.init) ?? "")
-                        .frame(width: 38, alignment: .trailing)
-                        .foregroundStyle(.secondary.opacity(0.5))
-
-                    Rectangle()
-                        .fill(Color(.separatorColor).opacity(0.3))
-                        .frame(width: 1)
-                        .padding(.horizontal, 3)
-
-                    Text(prefixChar(line.kind))
-                        .frame(width: 12, alignment: .center)
-                        .foregroundStyle(lineTextColor(line.kind))
-
-                    Text(line.content)
-                        .foregroundStyle(lineTextColor(line.kind))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .font(.system(size: 10, design: .monospaced))
-                .padding(.vertical, 0.5)
-                .background(lineBackground(line.kind, selected: isSelected))
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    guard isChangeLine && isUncommitted else { return }
-                    var current = selectedLines[hunkIndex] ?? []
-                    if current.contains(line.id) {
-                        current.remove(line.id)
-                    } else {
-                        current.insert(line.id)
-                    }
-                    selectedLines[hunkIndex] = current
-                }
+    /// Draw full-width line backgrounds *before* text is rendered.
+    override func draw(_ dirtyRect: NSRect) {
+        if let lm = layoutManager, let tc = textContainer {
+            for info in lineInfos where info.bgColor != .clear {
+                let gr = lm.glyphRange(forCharacterRange: info.range, actualCharacterRange: nil)
+                var r = lm.boundingRect(forGlyphRange: gr, in: tc)
+                r.origin.x = 0
+                r.origin.y += textContainerOrigin.y
+                r.size.width = bounds.width
+                info.bgColor.setFill()
+                r.fill()
             }
         }
+        super.draw(dirtyRect)
     }
 
-    // MARK: - Helpers
+    /// Detect gutter-area clicks for staging toggle; always pass through to super for normal text selection.
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        let pt = convert(event.locationInWindow, from: nil)
+        guard pt.x < gutterEndX,
+              let lm = layoutManager,
+              let tc = textContainer else { return }
+        let tPt = NSPoint(x: pt.x - textContainerInset.width,
+                          y: pt.y - textContainerInset.height)
+        let charIdx = lm.characterIndex(for: tPt, in: tc,
+                                        fractionOfDistanceBetweenInsertionPoints: nil)
+        for info in lineInfos where NSLocationInRange(charIdx, info.range) {
+            onGutterClick?(info.hunkIdx, info.lineId, info.kind)
+            break
+        }
+    }
+}
 
-    private func prefixChar(_ kind: HunkLine.Kind) -> String {
-        switch kind {
-        case .addition: return "+"
-        case .deletion: return "-"
-        case .context: return " "
+// MARK: - NSViewRepresentable wrapper
+
+private struct SelectableDiffView: NSViewRepresentable {
+    let hunks: [ParsedHunk]
+    let isUncommitted: Bool
+    @Binding var selectedLines: [Int: Set<Int>]
+
+    final class Coordinator: NSObject {
+        /// Live binding kept up-to-date in updateNSView so closures always write to current state.
+        var selectedLines: Binding<[Int: Set<Int>]>?
+        var isUncommitted: Bool = false
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let sv = NSScrollView()
+        sv.borderType = .noBorder
+        sv.hasVerticalScroller = true
+        sv.hasHorizontalScroller = true
+        sv.autohidesScrollers = true
+        sv.drawsBackground = false
+
+        let tv = DiffTextViewNS(frame: NSRect(origin: .zero, size: sv.contentSize))
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.drawsBackground = false
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = true
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 4, height: 4)
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                 height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.lineFragmentPadding = 8
+        tv.autoresizingMask = [.width]
+
+        let coordinator = context.coordinator
+        tv.onGutterClick = { [weak coordinator] hunkIdx, lineId, kind in
+            guard let coord = coordinator,
+                  coord.isUncommitted,
+                  kind == .addition || kind == .deletion else { return }
+            var current = coord.selectedLines?.wrappedValue[hunkIdx] ?? []
+            if current.contains(lineId) { current.remove(lineId) } else { current.insert(lineId) }
+            coord.selectedLines?.wrappedValue[hunkIdx] = current
+        }
+
+        sv.documentView = tv
+        return sv
+    }
+
+    func updateNSView(_ sv: NSScrollView, context: Context) {
+        guard let tv = sv.documentView as? DiffTextViewNS else { return }
+
+        // Keep coordinator in sync with latest values
+        context.coordinator.selectedLines = $selectedLines
+        context.coordinator.isUncommitted = isUncommitted
+
+        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let gutterSample = "0000 0000 + " as NSString
+        // textContainerInset.width(4) + lineFragmentPadding(8) + gutter chars
+        tv.gutterEndX = gutterSample.size(withAttributes: [.font: font]).width + 4 + 8
+
+        // Rebuild attributed string; preserve selection when only staging highlight changed.
+        let prevLen = tv.textStorage?.length ?? 0
+        let prevSel = tv.selectedRanges
+
+        let (attrStr, lineInfos) = buildContent(font: font)
+        tv.lineInfos = lineInfos
+        tv.textStorage?.setAttributedString(attrStr)
+
+        if tv.textStorage?.length == prevLen, !prevSel.isEmpty {
+            tv.setSelectedRanges(prevSel, affinity: .downstream, stillSelecting: false)
         }
     }
 
-    private func lineTextColor(_ kind: HunkLine.Kind) -> Color {
-        switch kind {
-        case .addition: return .green
-        case .deletion: return .red
-        case .context: return .primary
-        }
-    }
+    private func buildContent(font: NSFont) -> (NSAttributedString, [DiffTextViewNS.LineInfo]) {
+        let result = NSMutableAttributedString()
+        var lineInfos: [DiffTextViewNS.LineInfo] = []
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
-    private func lineBackground(_ kind: HunkLine.Kind, selected: Bool) -> Color {
-        if selected {
-            return Color.accentColor.opacity(0.18)
+        for (hunkIdx, hunk) in hunks.enumerated() {
+            // Hunk header (full-width bg via backgroundColor attribute is fine here)
+            let headerBg = NSColor(white: isDark ? 0.14 : 0.91, alpha: 1.0)
+            result.append(NSAttributedString(
+                string: "  块 \(hunkIdx + 1):  \(hunk.displayRange)\n",
+                attributes: [
+                    .font: font,
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .backgroundColor: headerBg,
+                ]
+            ))
+
+            let selected = selectedLines[hunkIdx] ?? []
+            for line in hunk.lines {
+                let fgColor: NSColor = switch line.kind {
+                case .addition: .systemGreen
+                case .deletion: .systemRed
+                case .context:  .labelColor
+                }
+                let bgColor: NSColor
+                if selected.contains(line.id) {
+                    bgColor = NSColor.controlAccentColor.withAlphaComponent(0.18)
+                } else {
+                    switch line.kind {
+                    case .addition: bgColor = NSColor.systemGreen.withAlphaComponent(0.06)
+                    case .deletion: bgColor = NSColor.systemRed.withAlphaComponent(0.06)
+                    case .context:  bgColor = .clear
+                    }
+                }
+                let prefix: Character = switch line.kind {
+                case .addition: "+"
+                case .deletion: "-"
+                case .context:  " "
+                }
+                let oldNum = line.oldLineNum.map { String(format: "%4d", $0) } ?? "    "
+                let newNum = line.newLineNum.map { String(format: "%4d", $0) } ?? "    "
+                let lineStr = "\(oldNum) \(newNum) \(prefix) \(line.content)\n"
+
+                let startLoc = result.length
+                result.append(NSAttributedString(
+                    string: lineStr,
+                    attributes: [.font: font, .foregroundColor: fgColor]
+                ))
+                lineInfos.append(.init(
+                    range: NSRange(location: startLoc, length: result.length - startLoc),
+                    hunkIdx: hunkIdx,
+                    lineId: line.id,
+                    kind: line.kind,
+                    bgColor: bgColor
+                ))
+            }
         }
-        switch kind {
-        case .addition: return .green.opacity(0.06)
-        case .deletion: return .red.opacity(0.06)
-        case .context: return .clear
-        }
+
+        return (result, lineInfos)
     }
 }

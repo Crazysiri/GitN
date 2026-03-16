@@ -11,26 +11,32 @@ struct TabBarView: View {
                         TabItemView(
                             tab: tab,
                             isSelected: tab.id == appModel.selectedTabID,
-                            onSelect: { appModel.selectedTabID = tab.id },
+                            onSelect: {
+                                appModel.selectedTabID = tab.id
+                                appModel.showNewTab = false
+                            },
                             onClose: { appModel.closeTab(tab.id) }
                         )
                     }
                 }
                 .padding(.horizontal, 4)
             }
+            .fixedSize(horizontal: true, vertical: false)
 
-            Spacer()
+            Divider()
+                .frame(height: 14)
+                .padding(.horizontal, 6)
 
-            Button(action: { appModel.openRepository() }) {
+            Button(action: { appModel.showNewTabView() }) {
                 Image(systemName: "plus")
-                    .font(.caption)
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .background(Color(.controlColor), in: RoundedRectangle(cornerRadius: 5))
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 12)
+            .padding(.trailing, 4)
         }
-        .frame(height: 36)
-        .background(Color(.controlBackgroundColor))
     }
 }
 

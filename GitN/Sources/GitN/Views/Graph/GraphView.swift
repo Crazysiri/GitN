@@ -14,6 +14,8 @@ struct GraphView: View {
     @State private var editedMessage = ""
     @State private var upstreamRemote = "origin"
     @State private var upstreamBranch = ""
+    @State private var pendingRemoteBranchDelete: (remote: String, branch: String)?
+    @State private var uncommittedScrolledAway = false
 
     private let rowHeight: CGFloat = 24
     private let columnWidth: CGFloat = 18
@@ -30,31 +32,60 @@ struct GraphView: View {
             if viewModel.commits.isEmpty && !viewModel.isLoading {
                 emptyState
             } else {
-                CommitTableView(
-                    commits: viewModel.commits,
-                    selectedCommitHash: viewModel.selectedCommit?.hash,
-                    currentBranch: viewModel.currentBranch,
-                    hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
-                    scrollToHash: viewModel.scrollToCommitHash,
-                    allCommitsLoaded: viewModel.allCommitsLoaded,
-                    rowHeight: rowHeight,
-                    columnWidth: columnWidth,
-                    avatarSize: avatarSize,
-                    graphAreaWidth: graphAreaWidth,
-                    refsColumnWidth: refsColumnWidth,
-                    onSelectCommit: { commit in
-                        Task { await viewModel.selectCommit(commit) }
-                    },
-                    onConsumeScrollToHash: {
-                        viewModel.scrollToCommitHash = nil
-                    },
-                    onContextAction: { commit, action in
-                        handleContextAction(commit: commit, action: action)
-                    },
-                    onLoadMore: {
-                        Task { await viewModel.loadMoreCommits() }
+                ZStack(alignment: .topTrailing) {
+                    CommitTableView(
+                        commits: viewModel.commits,
+                        selectedCommitHash: viewModel.selectedCommit?.hash,
+                        currentBranch: viewModel.currentBranch,
+                        hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
+                        scrollToHash: viewModel.scrollToCommitHash,
+                        allCommitsLoaded: viewModel.allCommitsLoaded,
+                        rowHeight: rowHeight,
+                        columnWidth: columnWidth,
+                        avatarSize: avatarSize,
+                        graphAreaWidth: graphAreaWidth,
+                        refsColumnWidth: refsColumnWidth,
+                        remoteNames: viewModel.remotes.map(\.name),
+                        onSelectCommit: { commit in
+                            Task { await viewModel.selectCommit(commit) }
+                        },
+                        onConsumeScrollToHash: {
+                            viewModel.scrollToCommitHash = nil
+                        },
+                        onContextAction: { commit, action in
+                            handleContextAction(commit: commit, action: action)
+                        },
+                        onLoadMore: {
+                            Task { await viewModel.loadMoreCommits() }
+                        },
+                        onUncommittedVisibilityChange: { visible in
+                            uncommittedScrolledAway = !visible
+                        }
+                    )
+
+                    if uncommittedScrolledAway, let uncommitted = viewModel.commits.first, uncommitted.isUncommitted {
+                        Button {
+                            viewModel.scrollToCommitHash = uncommitted.hash
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("Uncommitted")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.regularMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color(.separatorColor), lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 6)
+                        .padding(.trailing, 12)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .animation(.easeInOut(duration: 0.2), value: uncommittedScrolledAway)
                     }
-                )
+                }
             }
         }
         .background(Color(.textBackgroundColor))
@@ -62,6 +93,25 @@ struct GraphView: View {
         .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
         .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
         .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
+        .alert(
+            "Delete Remote Branch",
+            isPresented: Binding(
+                get: { pendingRemoteBranchDelete != nil },
+                set: { if !$0 { pendingRemoteBranchDelete = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) {
+                if let p = pendingRemoteBranchDelete {
+                    Task { await viewModel.performDeleteRemoteBranch(remote: p.remote, branch: p.branch) }
+                }
+                pendingRemoteBranchDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRemoteBranchDelete = nil }
+        } message: {
+            if let p = pendingRemoteBranchDelete {
+                Text("Are you sure you want to delete \(p.remote)/\(p.branch) from the remote? This cannot be undone.")
+            }
+        }
     }
 
     // MARK: - Context Action Handler
@@ -101,6 +151,8 @@ struct GraphView: View {
             Task { await viewModel.performRevert(hash) }
         case .deleteBranch(let branch):
             Task { await viewModel.performDeleteBranch(branch) }
+        case .deleteRemoteBranch(let remote, let branch):
+            pendingRemoteBranchDelete = (remote: remote, branch: branch)
         case .copySHA(let hash):
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(hash, forType: .string)
@@ -279,6 +331,7 @@ enum CommitContextAction {
     case editMessage
     case revert(String)
     case deleteBranch(String)
+    case deleteRemoteBranch(remote: String, branch: String)
     case copySHA(String)
     case compareWithWorkingDir
     case createTag
@@ -306,10 +359,12 @@ struct CommitTableView: NSViewRepresentable {
     let avatarSize: CGFloat
     let graphAreaWidth: CGFloat
     let refsColumnWidth: CGFloat
+    let remoteNames: [String]
     let onSelectCommit: (CommitInfo) -> Void
     let onConsumeScrollToHash: () -> Void
     let onContextAction: (CommitInfo, CommitContextAction) -> Void
     let onLoadMore: () -> Void
+    var onUncommittedVisibilityChange: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -353,8 +408,24 @@ struct CommitTableView: NSViewRepresentable {
             coordinator?.buildContextMenu(for: row)
         }
 
+        // Table-level ref hover (stable — not affected by reloadData or cell reuse)
+        tableView.refsColumnX = 8
+        tableView.refsColumnWidth = refsColumnWidth
+        tableView.onRefHover = { [weak coordinator] row in
+            coordinator?.handleRefHover(row: row)
+        }
+
         scrollView.documentView = tableView
         context.coordinator.tableView = tableView
+
+        // Track vertical scroll to detect uncommitted row visibility
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.scrollViewBoundsChanged(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
 
         return scrollView
     }
@@ -370,9 +441,11 @@ struct CommitTableView: NSViewRepresentable {
         coordinator.currentBranch = currentBranch
         coordinator.hasUnresolvedConflicts = hasUnresolvedConflicts
         coordinator.allCommitsLoaded = allCommitsLoaded
+        coordinator.remoteNames = remoteNames
         coordinator.onSelectCommit = onSelectCommit
         coordinator.onContextAction = onContextAction
         coordinator.onLoadMore = onLoadMore
+        coordinator.onUncommittedVisibilityChange = onUncommittedVisibilityChange
         coordinator.columnWidth = columnWidth
         coordinator.avatarSize = avatarSize
         coordinator.graphAreaWidth = graphAreaWidth
@@ -391,7 +464,8 @@ struct CommitTableView: NSViewRepresentable {
                 // Streaming append — keep existing graph state, just extend commits
                 coordinator.lazyGraph.updateCommits(commits)
             } else {
-                // Full change (reload, uncommitted entry added/removed, etc.)
+                // Full change (reload, repo switch, etc.) — dismiss any stale tooltip
+                RefTooltipPanel.shared.cancelAndHide()
                 coordinator.lazyGraph.reset(commits: commits)
             }
 
@@ -456,7 +530,7 @@ struct CommitTableView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
-        // No cleanup needed — GraphScrollView handles its own scroll logic
+        RefTooltipPanel.shared.cancelAndHide()
     }
 
     // MARK: - Coordinator
@@ -470,9 +544,12 @@ struct CommitTableView: NSViewRepresentable {
         var currentBranch: String = ""
         var hasUnresolvedConflicts: Bool = false
         var allCommitsLoaded: Bool = false
+        var remoteNames: [String] = []
         var onSelectCommit: ((CommitInfo) -> Void)?
         var onContextAction: ((CommitInfo, CommitContextAction) -> Void)?
         var onLoadMore: (() -> Void)?
+        var onUncommittedVisibilityChange: ((Bool) -> Void)?
+        private var uncommittedVisible: Bool = true
         var rowHeight: CGFloat = 24
         var columnWidth: CGFloat = 18
         var avatarSize: CGFloat = 18
@@ -492,9 +569,11 @@ struct CommitTableView: NSViewRepresentable {
             self.currentBranch = parent.currentBranch
             self.hasUnresolvedConflicts = parent.hasUnresolvedConflicts
             self.allCommitsLoaded = parent.allCommitsLoaded
+            self.remoteNames = parent.remoteNames
             self.onSelectCommit = parent.onSelectCommit
             self.onContextAction = parent.onContextAction
             self.onLoadMore = parent.onLoadMore
+            self.onUncommittedVisibilityChange = parent.onUncommittedVisibilityChange
             self.rowHeight = parent.rowHeight
             self.columnWidth = parent.columnWidth
             self.avatarSize = parent.avatarSize
@@ -504,6 +583,31 @@ struct CommitTableView: NSViewRepresentable {
                 self.selectedRowHashes = [hash]
             }
             lazyGraph.reset(commits: parent.commits)
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        @objc func scrollViewBoundsChanged(_ notification: Notification) {
+            guard let tableView else { return }
+            guard commits.first?.isUncommitted == true else {
+                if !uncommittedVisible {
+                    uncommittedVisible = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onUncommittedVisibilityChange?(true)
+                    }
+                }
+                return
+            }
+            let visibleRows = tableView.rows(in: tableView.visibleRect)
+            let isVisible = visibleRows.location != NSNotFound && visibleRows.contains(0)
+            if isVisible != uncommittedVisible {
+                uncommittedVisible = isVisible
+                DispatchQueue.main.async { [weak self] in
+                    self?.onUncommittedVisibilityChange?(isVisible)
+                }
+            }
         }
 
         // MARK: NSTableViewDataSource
@@ -622,16 +726,16 @@ struct CommitTableView: NSViewRepresentable {
             let isOtherBranchHead = otherBranchName != nil && !isCurrentBranchHead
 
             // Merge
-            if let otherBranchName, isOtherBranchHead {
+            if let otherBranchName, let branchRef, isOtherBranchHead {
                 menu.addItem(menuItem("Merge \(otherBranchName) into \(currentBranch)") {
-                    [weak self] in self?.onContextAction?(commit, .merge(otherBranchName))
+                    [weak self] in self?.onContextAction?(commit, .merge(branchRef))
                 })
             }
 
             // Rebase
-            if let otherBranchName, isOtherBranchHead {
+            if let otherBranchName, let branchRef, isOtherBranchHead {
                 menu.addItem(menuItem("Rebase \(currentBranch) onto \(otherBranchName)") {
-                    [weak self] in self?.onContextAction?(commit, .rebase(otherBranchName))
+                    [weak self] in self?.onContextAction?(commit, .rebase(branchRef))
                 })
             }
 
@@ -640,10 +744,10 @@ struct CommitTableView: NSViewRepresentable {
             }
 
             // Checkout
-            if isOtherBranchHead, let otherBranchName {
+            if isOtherBranchHead, let otherBranchName, let branchRef {
                 let checkoutMenu = NSMenu()
                 checkoutMenu.addItem(menuItem("Checkout \(otherBranchName)") {
-                    [weak self] in self?.onContextAction?(commit, .checkoutBranch(otherBranchName))
+                    [weak self] in self?.onContextAction?(commit, .checkoutBranch(branchRef))
                 })
                 checkoutMenu.addItem(menuItem("Checkout commit \(commit.shortHash)") {
                     [weak self] in self?.onContextAction?(commit, .checkoutCommit(commit.hash))
@@ -716,6 +820,22 @@ struct CommitTableView: NSViewRepresentable {
                     attributes: [.foregroundColor: NSColor.systemRed]
                 )
                 menu.addItem(deleteItem)
+
+                // Delete remote tracking branch (e.g. Delete origin/feature-x)
+                for remoteName in remoteNames {
+                    let remotePrefix = remoteName + "/"
+                    // Check if this commit has a remote tracking ref for this branch
+                    if refs.contains(where: { $0 == remotePrefix + otherBranchName }) {
+                        let remoteDeleteItem = menuItem("Delete \(remoteName)/\(otherBranchName)") {
+                            [weak self] in self?.onContextAction?(commit, .deleteRemoteBranch(remote: remoteName, branch: otherBranchName))
+                        }
+                        remoteDeleteItem.attributedTitle = NSAttributedString(
+                            string: "Delete \(remoteName)/\(otherBranchName)",
+                            attributes: [.foregroundColor: NSColor.systemRed]
+                        )
+                        menu.addItem(remoteDeleteItem)
+                    }
+                }
             }
 
             // Copy SHA
@@ -781,6 +901,33 @@ struct CommitTableView: NSViewRepresentable {
         func updateMaxColumns() {
             // Called from updateNSView to keep the scroll state in sync
         }
+
+        // MARK: Ref Hover (table-level, immune to cell reuse)
+
+        func handleRefHover(row: Int) {
+            guard row >= 0, row < commits.count else {
+                RefTooltipPanel.shared.cancelAndHide()
+                return
+            }
+            let commit = commits[row]
+            guard let firstRef = commit.refs.first else {
+                RefTooltipPanel.shared.cancelAndHide()
+                return
+            }
+            guard let tableView = tableView, let window = tableView.window else { return }
+
+            let fullName = RefBadgeHelper.menuDisplayName(firstRef)
+            let color = RefBadgeHelper.badgeNSColor(for: firstRef)
+
+            // Compute badge origin in screen coords
+            let cellFrame = tableView.frameOfCell(atColumn: 0, row: row)
+            let badgeHeight: CGFloat = 14
+            let badgeBottomY = cellFrame.minY + (cellFrame.height + badgeHeight) / 2
+            let ptInWindow = tableView.convert(NSPoint(x: 8, y: badgeBottomY), to: nil)
+            let origin = window.convertToScreen(NSRect(origin: ptInWindow, size: .zero)).origin
+
+            RefTooltipPanel.shared.scheduleShow(fullName: fullName, color: color, at: origin)
+        }
     }
 }
 
@@ -839,6 +986,59 @@ fileprivate final class GraphScrollView: NSScrollView {
 
 fileprivate final class CommitNSTableView: NSTableView {
     var contextMenuBuilder: ((Int) -> NSMenu?)?
+    /// Called with the row index under the mouse (≥0), or -1 when the mouse leaves the refs column.
+    var onRefHover: ((Int) -> Void)?
+    var refsColumnX: CGFloat = 8
+    var refsColumnWidth: CGFloat = 86
+
+    private var refsTrackingArea: NSTrackingArea?
+    private var isMouseInRefsColumn = false
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let old = refsTrackingArea { removeTrackingArea(old) }
+        let rect = NSRect(x: refsColumnX, y: bounds.minY, width: refsColumnWidth, height: max(bounds.height, 1))
+        let area = NSTrackingArea(rect: rect,
+                                  options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        refsTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard !isMouseInRefsColumn else { return }
+        guard isFrontmost(at: event.locationInWindow) else { return }
+        isMouseInRefsColumn = true
+        fireHover(event)
+        super.mouseEntered(with: event)
+    }
+    override func mouseMoved(with event: NSEvent) {
+        guard isMouseInRefsColumn else { return }
+        guard isFrontmost(at: event.locationInWindow) else {
+            // Covered by another view (e.g. inactive tab) — treat as exit
+            isMouseInRefsColumn = false
+            onRefHover?(-1)
+            return
+        }
+        fireHover(event)
+        super.mouseMoved(with: event)
+    }
+    override func mouseExited(with event: NSEvent) {
+        guard isMouseInRefsColumn else { return }  // ignore if we never genuinely entered
+        isMouseInRefsColumn = false
+        onRefHover?(-1)
+        super.mouseExited(with: event)
+    }
+    private func fireHover(_ event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        onRefHover?(row(at: pt))
+    }
+    /// Returns true only if this table is the frontmost view under the given window point.
+    /// Prevents background tabs from firing hover events when another tab is on top.
+    private func isFrontmost(at locationInWindow: NSPoint) -> Bool {
+        guard let hit = window?.contentView?.hitTest(locationInWindow) else { return false }
+        return hit === self || hit.isDescendant(of: self)
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
@@ -1000,7 +1200,17 @@ final class CommitRowCellView: NSView {
         let badgeY = (rect.height - badgeHeight) / 2
 
         if let firstRef = commit.refs.first {
-            let (badgeW, _) = drawRefBadge(ref: firstRef, at: NSPoint(x: x, y: badgeY), height: badgeHeight)
+            // When there are multiple refs, pre-reserve space for the "+N" pill
+            let maxBadgeW: CGFloat
+            if commit.refs.count > 1 {
+                let countStr = "+\(commit.refs.count - 1)"
+                let pillAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9, weight: .semibold)]
+                let pillW = countStr.size(withAttributes: pillAttrs).width + 8
+                maxBadgeW = rect.width - pillW - 3
+            } else {
+                maxBadgeW = rect.width
+            }
+            let (badgeW, _) = drawRefBadge(ref: firstRef, at: NSPoint(x: x, y: badgeY), height: badgeHeight, maxWidth: maxBadgeW)
             x += badgeW + 3
         }
 
@@ -1025,10 +1235,6 @@ final class CommitRowCellView: NSView {
 
             // Cache the pill rect for click detection (offset by the padding used in draw)
             overflowPillRect = pillRect.offsetBy(dx: 8, dy: 0) // account for leading padding
-
-            // Tooltip for all refs
-            let allRefs = commit.refs.map { RefBadgeHelper.displayName($0) }.joined(separator: ", ")
-            toolTip = allRefs
         } else {
             overflowPillRect = nil
         }
@@ -1068,9 +1274,9 @@ final class CommitRowCellView: NSView {
         menu.popUp(positioning: nil, at: NSPoint(x: 8, y: bounds.height), in: self)
     }
 
-    /// Draws a single ref badge and returns its size.
+    /// Draws a single ref badge and returns its actual rendered size.
     @discardableResult
-    private func drawRefBadge(ref: String, at origin: NSPoint, height: CGFloat) -> (CGFloat, CGFloat) {
+    private func drawRefBadge(ref: String, at origin: NSPoint, height: CGFloat, maxWidth: CGFloat? = nil) -> (CGFloat, CGFloat) {
         let name = RefBadgeHelper.displayName(ref)
         let color = RefBadgeHelper.badgeNSColor(for: ref)
 
@@ -1080,7 +1286,7 @@ final class CommitRowCellView: NSView {
         ]
         let textSize = name.size(withAttributes: attrs)
         let badgeWidth = textSize.width + 8
-        let badgeRect = NSRect(x: origin.x, y: origin.y, width: min(badgeWidth, refsColumnWidth - 8), height: height)
+        let badgeRect = NSRect(x: origin.x, y: origin.y, width: min(badgeWidth, maxWidth ?? (refsColumnWidth - 8)), height: height)
 
         // Background
         let path = NSBezierPath(roundedRect: badgeRect, xRadius: 3, yRadius: 3)
@@ -1099,7 +1305,7 @@ final class CommitRowCellView: NSView {
         )
         name.draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
 
-        return (badgeWidth, height)
+        return (badgeRect.width, height)
     }
 
     // MARK: - Graph Column
@@ -1270,6 +1476,94 @@ final class CommitRowCellView: NSView {
                                 options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
                                 attributes: msgAttrs)
         }
+    }
+}
+
+// MARK: - Custom Ref Badge Tooltip
+//
+// Uses NSPanel instead of NSView.toolTip to avoid the system's tooltip delay
+// on re-entry after the tooltip dismisses. The panel appears immediately on
+// mouseEntered and hides on mouseExited.
+
+private final class RefTooltipPanel: NSPanel {
+    static let shared = RefTooltipPanel()
+    private let badgeView = RefTooltipBadgeView()
+    private var pendingShow: DispatchWorkItem?
+
+    private init() {
+        super.init(contentRect: .zero,
+                   styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered, defer: false)
+        isFloatingPanel = true
+        level = .popUpMenu
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        ignoresMouseEvents = true
+        contentView = badgeView
+    }
+
+    /// Cancel any in-flight show and restart the 0.1s stationary timer.
+    /// The tooltip only appears after the mouse has been still for 0.1s.
+    func scheduleShow(fullName: String, color: NSColor, at origin: NSPoint) {
+        pendingShow?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.present(fullName: fullName, color: color, at: origin)
+        }
+        pendingShow = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+    }
+
+    func cancelAndHide() {
+        pendingShow?.cancel()
+        pendingShow = nil
+        if isVisible { orderOut(nil) }
+    }
+
+    private func present(fullName: String, color: NSColor, at origin: NSPoint) {
+        badgeView.configure(name: fullName, color: color)
+
+        let textSize = fullName.size(withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .medium)])
+        let width = textSize.width + 8
+        let height: CGFloat = 14
+
+        setContentSize(CGSize(width: width, height: height))
+        setFrameOrigin(origin)
+        if !isVisible { orderFront(nil) }
+    }
+}
+
+private final class RefTooltipBadgeView: NSView {
+    private var name = ""
+    private var color = NSColor.systemBlue
+    override var isFlipped: Bool { true }
+
+    func configure(name: String, color: NSColor) {
+        guard self.name != name || self.color != color else { return }
+        self.name = name
+        self.color = color
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+            .foregroundColor: color
+        ]
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25), xRadius: 3, yRadius: 3)
+        // Solid base so the badge is fully opaque regardless of what's behind the panel
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        color.withAlphaComponent(0.18).setFill()
+        path.fill()
+        color.withAlphaComponent(0.4).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+
+        let textSize = name.size(withAttributes: attrs)
+        let textRect = NSRect(x: 4, y: (bounds.height - textSize.height) / 2,
+                              width: textSize.width, height: textSize.height)
+        name.draw(in: textRect, withAttributes: attrs)
     }
 }
 

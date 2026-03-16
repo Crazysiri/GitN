@@ -110,6 +110,7 @@ final class CommitWalker: @unchecked Sendable {
         git_revwalk_sorting(w, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
         git_revwalk_push_glob(w, "refs/heads/*")
         git_revwalk_push_glob(w, "refs/remotes/*")
+        git_revwalk_push_glob(w, "refs/tags/*")
     }
 
     deinit {
@@ -236,6 +237,26 @@ actor GitService {
         var buf = [CChar](repeating: 0, count: 41)
         git_oid_tostr(&buf, 41, ptr)
         return String(cString: buf)
+    }
+
+    /// Get full commit hash from branch name
+    func branchCommitHash(_ branchName: String, isRemote: Bool = false) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+        
+        var branch: OpaquePointer?
+        let branchType: git_branch_t = isRemote ? GIT_BRANCH_REMOTE : GIT_BRANCH_LOCAL
+        guard git_branch_lookup(&branch, repo, branchName, branchType) == 0, let branch else {
+            throw GitError.operationFailed("Branch '\(branchName)' not found")
+        }
+        defer { git_reference_free(branch) }
+        
+        guard let oid = git_reference_target(branch) else {
+            throw GitError.operationFailed("Cannot get branch target")
+        }
+        
+        var hashStr = [CChar](repeating: 0, count: 41)
+        git_oid_tostr(&hashStr, 41, oid)
+        return String(cString: hashStr)
     }
 
     private nonisolated func oidToShortHash(_ ptr: UnsafePointer<git_oid>) -> String {
@@ -395,6 +416,36 @@ actor GitService {
             }
         }
         return result.reversed()
+    }
+
+    func remoteTags(remoteName: String = "origin") async throws -> Set<String> {
+        // Use ls-remote to get tags from remote
+        let output = try await runGitOutput(["ls-remote", "--tags", remoteName])
+        var remoteTagSet = Set<String>()
+        
+        let lines = output.components(separatedBy: "\n")
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            
+            // Format: <hash>    refs/tags/<tag-name>
+            // or:     <hash>    refs/tags/<tag-name>^{}  (peeled tag)
+            if trimmed.contains("refs/tags/") {
+                let parts = trimmed.components(separatedBy: "refs/tags/")
+                if parts.count > 1 {
+                    var tagName = parts[1]
+                    // Remove ^{} suffix for peeled tags
+                    if tagName.hasSuffix("^{}") {
+                        tagName = String(tagName.dropLast(3))
+                    }
+                    if !tagName.isEmpty {
+                        remoteTagSet.insert(tagName)
+                    }
+                }
+            }
+        }
+        
+        return remoteTagSet
     }
 
     // MARK: - Remotes
@@ -574,30 +625,64 @@ actor GitService {
             guard let namePtr = git_reference_name(ref) else { continue }
             let fullName = String(cString: namePtr)
 
-            var resolved: OpaquePointer?
-            let hash: String?
-            if git_reference_resolve(&resolved, ref) == 0, let resolved {
-                defer { git_reference_free(resolved) }
-                hash = git_reference_target(resolved).map { oidToHash($0) }
-            } else {
-                hash = git_reference_target(ref).map { oidToHash($0) }
-            }
-            guard let hash else { continue }
-
-            if fullName.hasPrefix("refs/heads/") {
-                let branchName = String(fullName.dropFirst("refs/heads/".count))
-                if branchName == headTarget, hash == headOidHash {
-                    map[hash, default: []].append("HEAD -> \(branchName)")
-                } else {
-                    map[hash, default: []].append(branchName)
-                }
-            } else if fullName.hasPrefix("refs/remotes/") {
-                let remoteBranch = String(fullName.dropFirst("refs/remotes/".count))
-                if remoteBranch.hasSuffix("/HEAD") { continue }
-                map[hash, default: []].append(remoteBranch)
-            } else if fullName.hasPrefix("refs/tags/") {
+            if fullName.hasPrefix("refs/tags/") {
                 let tag = String(fullName.dropFirst("refs/tags/".count))
-                map[hash, default: []].append("tag: \(tag)")
+                
+                // For tags, we need to peel to the commit
+                // Annotated tags point to tag objects, not commits directly
+                var commitHash: String?
+                var refToPeel: OpaquePointer?
+                
+                // Resolve reference if it's symbolic
+                if git_reference_type(ref) == GIT_REFERENCE_SYMBOLIC {
+                    if git_reference_resolve(&refToPeel, ref) == 0, let refToPeel {
+                        defer { git_reference_free(refToPeel) }
+                        var peeled: OpaquePointer?
+                        if git_reference_peel(&peeled, refToPeel, GIT_OBJECT_COMMIT) == 0, let peeled {
+                            defer { git_object_free(peeled) }
+                            if let oid = git_object_id(peeled) {
+                                commitHash = oidToHash(oid)
+                            }
+                        }
+                    }
+                } else {
+                    // Direct reference, peel directly
+                    var peeled: OpaquePointer?
+                    if git_reference_peel(&peeled, ref, GIT_OBJECT_COMMIT) == 0, let peeled {
+                        defer { git_object_free(peeled) }
+                        if let oid = git_object_id(peeled) {
+                            commitHash = oidToHash(oid)
+                        }
+                    }
+                }
+                
+                guard let commitHash else { continue }
+                
+                map[commitHash, default: []].append("tag: \(tag)")
+            } else {
+                // For branches and remotes, use the resolved hash
+                var resolved: OpaquePointer?
+                let hash: String?
+                if git_reference_resolve(&resolved, ref) == 0, let resolved {
+                    defer { git_reference_free(resolved) }
+                    hash = git_reference_target(resolved).map { oidToHash($0) }
+                } else {
+                    hash = git_reference_target(ref).map { oidToHash($0) }
+                }
+                guard let hash else { continue }
+
+                if fullName.hasPrefix("refs/heads/") {
+                    let branchName = String(fullName.dropFirst("refs/heads/".count))
+                    if branchName == headTarget, hash == headOidHash {
+                        map[hash, default: []].append("HEAD -> \(branchName)")
+                    } else {
+                        map[hash, default: []].append(branchName)
+                    }
+                } else if fullName.hasPrefix("refs/remotes/") {
+                    let remoteBranch = String(fullName.dropFirst("refs/remotes/".count))
+                    if remoteBranch.hasSuffix("/HEAD") { continue }
+                    map[hash, default: []].append(remoteBranch)
+                }
             }
         }
 
@@ -1053,6 +1138,23 @@ actor GitService {
         try await runGit(args)
     }
 
+    func fetchWithPrune(remoteName: String? = nil) async throws {
+        // Fetch with prune to remove remote branches and tags that no longer exist on remote
+        var args = ["fetch", "--prune", "--prune-tags"]
+        if let remoteName {
+            args.append(remoteName)
+        } else {
+            args.append("--all")
+        }
+        try await runGit(args)
+    }
+
+    /// Fast-forward update a local branch to its remote tracking branch without checking it out.
+    /// Uses `git fetch <remote> <branch>:<branch>` which only succeeds if it's a fast-forward.
+    func fetchBranchFastForward(remoteName: String, branchName: String) async throws {
+        try await runGit(["fetch", remoteName, "\(branchName):\(branchName)"])
+    }
+
     func pull(remoteName: String? = nil, branchName: String? = nil) async throws {
         var args = ["pull"]
         if let remoteName {
@@ -1060,6 +1162,32 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+    }
+
+    func pullFF(remoteName: String? = nil, branchName: String? = nil) async throws {
+        var args = ["pull", "--ff-only"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        try await runGit(args)
+    }
+
+    func pullRebase(remoteName: String? = nil, branchName: String? = nil) async throws {
+        var args = ["pull", "--rebase"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        try await runGit(args)
+    }
+
+    /// Force pull: reset local branch to remote tracking branch.
+    /// Useful when remote has been force-pushed (e.g. after rebase).
+    /// Equivalent to: git fetch && git reset --hard @{u}
+    func pullForce() async throws {
+        try await runGit(["fetch", "--all"])
+        try await runGit(["reset", "--hard", "@{u}"])
     }
 
     func push(remoteName: String? = nil, branchName: String? = nil, setUpstream: Bool = false) async throws {
@@ -1070,6 +1198,15 @@ actor GitService {
             if let branchName { args.append(branchName) }
         } else {
             args.append(contentsOf: ["-u", "origin", "HEAD"])
+        }
+        try await runGit(args)
+    }
+
+    func pushForce(remoteName: String? = nil, branchName: String? = nil) async throws {
+        var args = ["push", "--force-with-lease"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
         }
         try await runGit(args)
     }
@@ -1141,23 +1278,49 @@ actor GitService {
     func checkoutBranch(_ name: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
-        let refName = "refs/heads/\(name)"
-
-        // Look up the branch reference
+        // Try branch first
         var ref: OpaquePointer?
-        guard git_reference_lookup(&ref, repo, refName) == 0, let ref else {
-            throw GitError.operationFailed("Branch '\(name)' not found")
+        var refName = "refs/heads/\(name)"
+        var isTag = false
+        var isRemoteBranch = false
+        var localBranchName: String? = nil
+        
+        if git_reference_lookup(&ref, repo, refName) != 0 {
+            // Not a local branch, try tag
+            refName = "refs/tags/\(name)"
+            if git_reference_lookup(&ref, repo, refName) == 0 {
+                isTag = true
+            } else {
+                // Not a tag either, try remote branch (e.g., origin/feature/...)
+                refName = "refs/remotes/\(name)"
+                if git_reference_lookup(&ref, repo, refName) == 0 {
+                    isRemoteBranch = true
+                    // Extract local branch name from remote branch name
+                    // e.g., "origin/feature/xxx" -> "feature/xxx"
+                    if let slashIndex = name.firstIndex(of: "/") {
+                        localBranchName = String(name[name.index(after: slashIndex)...])
+                    } else {
+                        localBranchName = name
+                    }
+                } else {
+                    throw GitError.operationFailed("Branch or tag '\(name)' not found")
+                }
+            }
+        }
+        
+        guard let ref else {
+            throw GitError.operationFailed("Branch or tag '\(name)' not found")
         }
         defer { git_reference_free(ref) }
 
         guard let targetOid = git_reference_target(ref) else {
-            throw GitError.operationFailed("Cannot get branch target")
+            throw GitError.operationFailed("Cannot get target")
         }
 
         // Look up target object for checkout
         var target: OpaquePointer?
         guard git_object_lookup(&target, repo, targetOid, GIT_OBJECT_ANY) == 0, let target else {
-            throw GitError.operationFailed("Cannot find branch target object")
+            throw GitError.operationFailed("Cannot find target object")
         }
         defer { git_object_free(target) }
 
@@ -1171,10 +1334,55 @@ actor GitService {
             throw GitError.operationFailed(libgit2ErrorMsg("Checkout failed", code: rc))
         }
 
-        // Move HEAD to branch
-        let headRc = git_repository_set_head(repo, refName)
-        guard headRc == 0 else {
-            throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
+        if isTag {
+            // For tags, detach HEAD
+            let headRc = git_repository_set_head_detached(repo, targetOid)
+            guard headRc == 0 else {
+                throw GitError.operationFailed(libgit2ErrorMsg("Failed to detach HEAD", code: headRc))
+            }
+        } else if isRemoteBranch, let localName = localBranchName {
+            // For remote branches, create a local tracking branch
+            let localRefName = "refs/heads/\(localName)"
+            
+            // Check if local branch already exists
+            var localRef: OpaquePointer?
+            if git_reference_lookup(&localRef, repo, localRefName) == 0 {
+                // Local branch exists, just checkout it
+                let headRc = git_repository_set_head(repo, localRefName)
+                git_reference_free(localRef)
+                guard headRc == 0 else {
+                    throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
+                }
+            } else {
+                // Create new local branch tracking the remote branch
+                var newRef: OpaquePointer?
+                let createRc = git_reference_create(&newRef, repo, localRefName, targetOid, 0, "checkout: tracking remote branch")
+                guard createRc == 0, let newRef = newRef else {
+                    throw GitError.operationFailed(libgit2ErrorMsg("Failed to create local branch", code: createRc))
+                }
+                
+                // Set upstream tracking using git_branch_set_upstream
+                // The upstream name should be the remote branch name without "refs/remotes/" prefix
+                let upstreamRc = git_branch_set_upstream(newRef, name)
+                if upstreamRc != 0 {
+                    // If setting upstream fails, we still continue (non-fatal)
+                    // The branch will be created but without tracking
+                }
+                
+                git_reference_free(newRef)
+                
+                // Set HEAD to the new local branch
+                let headRc = git_repository_set_head(repo, localRefName)
+                guard headRc == 0 else {
+                    throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
+                }
+            }
+        } else {
+            // Move HEAD to local branch
+            let headRc = git_repository_set_head(repo, refName)
+            guard headRc == 0 else {
+                throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
+            }
         }
     }
 
@@ -1347,6 +1555,14 @@ actor GitService {
             guard rc == 0 else {
                 throw GitError.operationFailed(libgit2ErrorMsg("Tag creation failed", code: rc))
             }
+        }
+    }
+
+    func deleteTag(name: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        let rc = git_tag_delete(repo, name)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Tag deletion failed", code: rc))
         }
     }
 
@@ -1588,6 +1804,80 @@ actor GitService {
         let rc = git_stash_drop(repo, index)
         guard rc == 0 else {
             throw GitError.operationFailed("Stash drop failed (\(rc))")
+        }
+    }
+    
+    func stashDiffFiles(_ stashRef: String) async throws -> [DiffFile] {
+        // Use --stat to get file changes with line counts
+        let output = try await runGitOutput(["stash", "show", "--stat", "--format=", stashRef])
+        var result: [DiffFile] = []
+        
+        // Parse output like: " file.txt | 5 +++++"
+        // or: " file.txt | 10 +++++-----"
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, trimmed.contains("|") else { continue }
+            
+            let parts = trimmed.components(separatedBy: "|")
+            guard parts.count == 2 else { continue }
+            
+            let path = parts[0].trimmingCharacters(in: .whitespaces)
+            let statPart = parts[1].trimmingCharacters(in: .whitespaces)
+            
+            // Parse stat like "5 +++++" or "10 +++++-----"
+            let statComponents = statPart.components(separatedBy: " ")
+            guard statComponents.count >= 2 else { continue }
+            
+            // Count + and - in the stat string
+            var additions = 0
+            var deletions = 0
+            for char in statComponents[1] {
+                if char == "+" {
+                    additions += 1
+                } else if char == "-" {
+                    deletions += 1
+                }
+            }
+            
+            result.append(DiffFile(additions: additions, deletions: deletions, path: path))
+        }
+        return result
+    }
+    
+    func stashFileDiff(_ stashRef: String, path: String) async throws -> String {
+        // Use git diff to get the diff for a specific file in stash
+        // git diff stash@{0}^..stash@{0} -- <path> shows the diff for that file
+        // This is more reliable than git show for stash diffs
+        do {
+            let output = try await runGitOutput(["diff", "\(stashRef)^..\(stashRef)", "--", path])
+            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            // If diff is empty, try alternative method
+            if trimmed.isEmpty {
+                // Fallback: use git show -p to get patch format
+                let showOutput = try await runGitOutput(["show", "-p", stashRef, "--", path])
+                // Extract only the diff part (skip commit message and metadata)
+                let lines = showOutput.components(separatedBy: "\n")
+                var diffStartIndex = 0
+                for (index, line) in lines.enumerated() {
+                    if line.hasPrefix("diff --git") {
+                        diffStartIndex = index
+                        break
+                    }
+                }
+                if diffStartIndex > 0 {
+                    return lines.suffix(from: diffStartIndex).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                return showOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return trimmed
+        } catch {
+            // If file doesn't exist in stash or stash ref is invalid, return empty string
+            let errorMsg = error.localizedDescription.lowercased()
+            if errorMsg.contains("stash") || errorMsg.contains("not found") || errorMsg.contains("invalid") || 
+               errorMsg.contains("no such") || errorMsg.contains("unknown revision") {
+                return ""
+            }
+            throw error
         }
     }
 
@@ -2046,8 +2336,8 @@ actor GitService {
         return ConflictSides(
             oursLabel: oursLabel,
             theirsLabel: theirsLabel,
-            oursContent: oursLines.joined(separator: "\n"),
-            theirsContent: theirsLines.joined(separator: "\n"),
+            oursLines: oursLines,
+            theirsLines: theirsLines,
             markers: regions
         )
     }
@@ -2334,6 +2624,22 @@ actor GitService {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
+    /// Get the full commit message (including description) for a commit by hash
+    func fullCommitMessage(hash: String) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_commit_free(commit) }
+        return git_commit_message(commit).map(String.init(cString:))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
     // MARK: - Commit
 
     func commitAmend(message: String) async throws {
@@ -2396,5 +2702,43 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed("Commit failed (\(rc))")
         }
+    }
+
+    // MARK: - File Content
+
+    func fileContent(atCommit hash: String, path: String) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Cannot lookup commit")
+        }
+        defer { git_commit_free(commit) }
+
+        var tree: OpaquePointer?
+        guard git_commit_tree(&tree, commit) == 0, let tree else {
+            throw GitError.operationFailed("Cannot get commit tree")
+        }
+        defer { git_tree_free(tree) }
+
+        var entry: OpaquePointer?
+        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else {
+            throw GitError.operationFailed("File not found in commit")
+        }
+        defer { git_tree_entry_free(entry) }
+
+        var object: OpaquePointer?
+        guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else {
+            throw GitError.operationFailed("Cannot get blob object")
+        }
+        defer { git_object_free(object) }
+
+        guard let rawContent = git_blob_rawcontent(object) else { return "" }
+        let size = Int(git_blob_rawsize(object))
+        guard size > 0 else { return "" }
+        return String(bytes: Data(bytes: rawContent, count: size), encoding: .utf8) ?? ""
     }
 }

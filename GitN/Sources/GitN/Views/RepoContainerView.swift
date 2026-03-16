@@ -2,19 +2,22 @@ import SwiftUI
 
 struct RepoContainerView: View {
     let tab: RepoTab
+    let isActive: Bool
     @State private var viewModel: RepoViewModel
 
     @State private var sidebarWidth: CGFloat = 220
     @State private var detailWidth: CGFloat = 320
     @State private var terminalHeight: CGFloat = 200
+    @State private var terminalDragStartHeight: CGFloat? = nil
 
     @State private var showStashMessage = false
     @State private var stashMessage = ""
     @State private var showNewBranch = false
     @State private var newBranchName = ""
 
-    init(tab: RepoTab) {
+    init(tab: RepoTab, isActive: Bool) {
         self.tab = tab
+        self.isActive = isActive
         self._viewModel = State(initialValue: RepoViewModel(path: tab.path, name: tab.name))
     }
 
@@ -77,6 +80,16 @@ struct RepoContainerView: View {
         .task {
             await viewModel.loadAll()
             viewModel.startWatching()
+            viewModel.startPeriodicRefresh()
+        }
+        .onAppear {
+            // When tab becomes visible (including when switching tabs), perform a throttled fetch
+            Task {
+                await viewModel.fetchIfNeeded()
+            }
+        }
+        .onDisappear {
+            viewModel.stopPeriodicRefresh()
         }
         .sheet(isPresented: $showStashMessage) {
             stashSheet
@@ -127,7 +140,6 @@ struct RepoContainerView: View {
                     Text(toast.detail)
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.8))
-                        .lineLimit(2)
                 }
             }
 
@@ -188,7 +200,31 @@ struct RepoContainerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if viewModel.showTerminal {
-                Divider()
+                ZStack {
+                    Divider()
+                    Color.clear
+                        .frame(height: 8)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 1)
+                                .onChanged { value in
+                                    if terminalDragStartHeight == nil {
+                                        terminalDragStartHeight = terminalHeight
+                                    }
+                                    let newH = (terminalDragStartHeight ?? terminalHeight) - value.translation.height
+                                    terminalHeight = max(100, min(700, newH))
+                                }
+                                .onEnded { _ in
+                                    terminalDragStartHeight = nil
+                                }
+                        )
+                        .onHover { inside in
+                            if inside { NSCursor.resizeUpDown.push() }
+                            else { NSCursor.pop() }
+                        }
+                }
+                .frame(height: 8)
+
                 TerminalPanelView(
                     repoPath: viewModel.repoPath,
                     isVisible: Binding(
@@ -196,23 +232,7 @@ struct RepoContainerView: View {
                         set: { viewModel.showTerminal = $0 }
                     )
                 )
-                .frame(minHeight: 100, idealHeight: terminalHeight, maxHeight: 400)
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button(action: { viewModel.showTerminal.toggle() }) {
-                    Image(systemName: "terminal")
-                        .symbolVariant(viewModel.showTerminal ? .fill : .none)
-                }
-                .help("Toggle Terminal")
-            }
-
-            ToolbarItem(placement: .automatic) {
-                Button(action: { Task { await viewModel.loadAll() } }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("Refresh")
+                .frame(height: terminalHeight)
             }
         }
     }
@@ -221,15 +241,10 @@ struct RepoContainerView: View {
 
     private var repoToolbar: some View {
         HStack(spacing: 2) {
-            toolbarButton("Pull", icon: "arrow.down.to.line", disabled: viewModel.operationInProgress) {
-                Task { await viewModel.performPull() }
-            }
-            toolbarButton("Push", icon: "arrow.up.to.line", disabled: viewModel.operationInProgress) {
-                Task { await viewModel.performPush() }
-            }
-            toolbarButton("Fetch", icon: "arrow.triangle.2.circlepath", disabled: viewModel.operationInProgress) {
-                Task { await viewModel.performFetch() }
-            }
+            pullToolbarButton
+            pushToolbarButton
+            fetchToolbarButton
+
             toolbarButton("Branch", icon: "arrow.triangle.branch", disabled: viewModel.operationInProgress) {
                 showNewBranch = true
             }
@@ -251,19 +266,6 @@ struct RepoContainerView: View {
                     .padding(.trailing, 4)
             }
 
-            if let error = viewModel.operationError {
-                HStack(spacing: 3) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.yellow)
-                    Text(error)
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.orange)
-                        .lineLimit(1)
-                }
-                .padding(.trailing, 4)
-                .onTapGesture { viewModel.operationError = nil }
-            }
 
             if viewModel.isInConflict {
                 HStack(spacing: 3) {
@@ -276,10 +278,176 @@ struct RepoContainerView: View {
                 }
                 .padding(.trailing, 4)
             }
+
+            Divider().frame(height: 16).padding(.horizontal, 4)
+
+            Button(action: { viewModel.showTerminal.toggle() }) {
+                VStack(spacing: 1) {
+                    Image(systemName: viewModel.showTerminal ? "terminal.fill" : "terminal")
+                        .font(.system(size: 13))
+                    Text("Terminal")
+                        .font(.system(size: 9))
+                }
+                .frame(width: 52, height: 34)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Toggle Terminal")
+
+            toolbarButton("Refresh", icon: "arrow.clockwise", disabled: viewModel.isLoading) {
+                Task { await viewModel.refreshWithSync() }
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color(.controlBackgroundColor).opacity(0.5))
+    }
+
+    // MARK: - Pull Toolbar Button (main button + dropdown triangle)
+
+    @State private var showPullMenu = false
+
+    private var pullToolbarButton: some View {
+        HStack(spacing: 0) {
+            // Main Pull button – executes the currently selected default mode
+            Button {
+                Task { await viewModel.performPull() }
+            } label: {
+                VStack(spacing: 1) {
+                    Image(systemName: "arrow.down.to.line")
+                        .font(.system(size: 13))
+                    Text("Pull")
+                        .font(.system(size: 9))
+                }
+                .frame(width: 38, height: 34)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.operationInProgress)
+
+            // Dropdown triangle
+            Menu {
+                // Pull mode selection (checkmark only, doesn't execute)
+                Section("点击 Pull 按钮时执行") {
+                    ForEach(RepoViewModel.PullMode.allCases) { mode in
+                        Button {
+                            viewModel.defaultPullMode = mode
+                        } label: {
+                            HStack {
+                                Text(mode.label)
+                                if viewModel.defaultPullMode == mode {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                // Force Pull – shows confirmation, no checkmark
+                Button(role: .destructive) {
+                    viewModel.showForcePullConfirm = true
+                } label: {
+                    Label("Force Pull (reset to remote)", systemImage: "exclamationmark.triangle")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 4, weight: .semibold))
+                    .frame(width: 10, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 12, height: 34)
+            .disabled(viewModel.operationInProgress)
+        }
+        .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
+        .alert("Force Pull", isPresented: Binding(
+            get: { viewModel.showForcePullConfirm },
+            set: { viewModel.showForcePullConfirm = $0 }
+        )) {
+            Button("Force Pull", role: .destructive) {
+                Task { await viewModel.performForcePull() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将丢弃本地分支的所有提交，重置为远程分支状态 (git fetch + git reset --hard @{u})。\n\n此操作不可撤销，确定继续？")
+        }
+    }
+
+    // MARK: - Fetch Toolbar Button
+
+    private var fetchToolbarButton: some View {
+        Button {
+            Task { await viewModel.performFetch() }
+        } label: {
+            VStack(spacing: 1) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 13))
+                Text("Fetch")
+                    .font(.system(size: 9))
+            }
+            .frame(width: 38, height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.operationInProgress)
+        .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
+    }
+
+    // MARK: - Push Toolbar Button (main button + dropdown triangle)
+
+    private var pushToolbarButton: some View {
+        HStack(spacing: 0) {
+            // Main Push button – always does normal push
+            Button {
+                Task { await viewModel.performPush() }
+            } label: {
+                VStack(spacing: 1) {
+                    Image(systemName: "arrow.up.to.line")
+                        .font(.system(size: 13))
+                    Text("Push")
+                        .font(.system(size: 9))
+                }
+                .frame(width: 38, height: 34)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.operationInProgress)
+
+            // Dropdown triangle
+            Menu {
+                Button(role: .destructive) {
+                    viewModel.showForcePushConfirm = true
+                } label: {
+                    Label("Force Push (--force-with-lease)", systemImage: "exclamationmark.triangle")
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 4, weight: .semibold))
+                    .frame(width: 10, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 12, height: 34)
+            .disabled(viewModel.operationInProgress)
+        }
+        .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
+        .alert("Force Push", isPresented: Binding(
+            get: { viewModel.showForcePushConfirm },
+            set: { viewModel.showForcePushConfirm = $0 }
+        )) {
+            Button("Force Push", role: .destructive) {
+                Task { await viewModel.performForcePush() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("Force Push 会覆盖远程分支历史 (使用 --force-with-lease 安全模式)。\n\n确定继续？")
+        }
     }
 
     private func toolbarButton(_ label: String, icon: String, disabled: Bool, action: @escaping () -> Void) -> some View {

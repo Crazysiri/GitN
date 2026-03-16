@@ -9,6 +9,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
     ],
     targets: [
         // libgit2 compiled from source (submodule at Sources/Clibgit2/libgit2).
@@ -102,7 +103,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "GitN",
-            dependencies: ["Clibgit2", "SwiftTerm"],
+            dependencies: ["Clibgit2", "SwiftTerm", .product(name: "MarkdownUI", package: "swift-markdown-ui")],
             path: "Sources/GitN",
             linkerSettings: [
                 .linkedLibrary("z"),

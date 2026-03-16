@@ -27,13 +27,19 @@ final class RepoViewModel {
     private let commitPageSize = 2000
 
     var selectedCommit: CommitInfo?
+    var selectedStash: StashInfo?
     var diffFiles: [DiffFile] = []
     var fileDiffContent: String = ""
     var parsedDiff: ParsedDiff?
     var selectedDiffFile: DiffFile?
+    /// True when the selected file exceeds maxDiffFileSize.
+    var isFileTooLarge = false
+    var fileTooLargeSizeMB: String = ""
 
     var fileStatuses: [FileStatus] = []
     var selectedFilePaths: Set<String> = []
+    /// Anchor path for Shift+click range selection.
+    var lastSelectedFilePath: String?
     var commitSummary: String = ""
     var commitDescription: String = ""
 
@@ -44,7 +50,11 @@ final class RepoViewModel {
         return commitSummary + "\n\n" + commitDescription
     }
 
-    var showTerminal = true
+    var showTerminal: Bool = false {
+        didSet {
+            UserDefaults.standard.set(showTerminal, forKey: "GitN.showTerminal.\(repoPath)")
+        }
+    }
     var isLoading = false
     var collapsedSections: Set<String> = []
 
@@ -106,6 +116,27 @@ final class RepoViewModel {
         NSWorkspace.shared.open(url)
     }
 
+    @MainActor
+    func openMarkdownPreview(path: String, commitHash: String?) async {
+        var content = ""
+        if let hash = commitHash {
+            content = (try? await git.fileContent(atCommit: hash, path: path)) ?? ""
+        }
+        if content.isEmpty {
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            content = (try? String(contentsOfFile: fullPath, encoding: .utf8)) ?? ""
+        }
+
+        let fileName = (path as NSString).lastPathComponent
+        let hostingController = NSHostingController(rootView: MarkdownPreviewView(title: fileName, content: content))
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = fileName
+        window.setContentSize(NSSize(width: 800, height: 600))
+        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func getFileDiff(hash: String, path: String) async throws -> String {
         try await git.fileDiff(hash: hash, path: path)
     }
@@ -136,22 +167,57 @@ final class RepoViewModel {
     func stageFiles(_ paths: [String]) async {
         for path in paths { do { try await git.stageFile(path) } catch {} }
         do { fileStatuses = try await git.status() } catch {}
+        await selectFirstUnstagedOrKeep()
     }
 
     func unstageFiles(_ paths: [String]) async {
         for path in paths { do { try await git.unstageFile(path) } catch {} }
         do { fileStatuses = try await git.status() } catch {}
+        await selectFirstUnstagedOrKeep()
     }
 
-    func toggleFileSelection(_ path: String, isMulti: Bool) {
-        if isMulti {
+    /// Selects the first file in the unstaged area after a staging operation.
+    /// If no unstaged files remain, the current diff is preserved unchanged.
+    private func selectFirstUnstagedOrKeep() async {
+        guard selectedCommit?.isUncommitted == true || isInConflict else { return }
+        guard let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges) else { return }
+        let diffFile = diffFiles.first(where: { $0.path == firstStatus.path })
+            ?? DiffFile(additions: 0, deletions: 0, path: firstStatus.path)
+        selectedFilePaths = [firstStatus.path]
+        await selectDiffFile(diffFile, context: .unstaged)
+    }
+
+    /// - Parameters:
+    ///   - path: The file path that was clicked.
+    ///   - isMulti: `true` when ⌘ is held (toggle individual item).
+    ///   - isRange: `true` when ⇧ is held (select range from anchor).
+    ///   - orderedPaths: The full ordered list of visible paths in the
+    ///     section (staged / unstaged) so we can compute the range.
+    func toggleFileSelection(_ path: String, isMulti: Bool, isRange: Bool = false, orderedPaths: [String] = []) {
+        if isRange, let anchor = lastSelectedFilePath, !orderedPaths.isEmpty {
+            // Shift+click: select the range [anchor … path] inclusive.
+            if let anchorIdx = orderedPaths.firstIndex(of: anchor),
+               let targetIdx = orderedPaths.firstIndex(of: path) {
+                let lo = min(anchorIdx, targetIdx)
+                let hi = max(anchorIdx, targetIdx)
+                let range = orderedPaths[lo...hi]
+                selectedFilePaths = Set(range)
+            } else {
+                selectedFilePaths = [path]
+                lastSelectedFilePath = path
+            }
+            // Don't update the anchor on shift-click so further
+            // shift-clicks extend / shrink from the original anchor.
+        } else if isMulti {
             if selectedFilePaths.contains(path) {
                 selectedFilePaths.remove(path)
             } else {
                 selectedFilePaths.insert(path)
             }
+            lastSelectedFilePath = path
         } else {
             selectedFilePaths = [path]
+            lastSelectedFilePath = path
         }
     }
 
@@ -259,6 +325,9 @@ final class RepoViewModel {
     var toastMessage: ToastMessage?
 
     private var fileWatcher: RepositoryFileWatcher?
+    private var isRefreshing = false
+    private var refreshTimer: Timer?
+    private var lastFetchDate: Date?
 
     var remoteBranchGroups: [String: [BranchInfo]] {
         Dictionary(grouping: remoteBranches) { branch in
@@ -271,6 +340,8 @@ final class RepoViewModel {
         self.repoPath = path
         self.repoName = name
         self.git = GitService(repoPath: path)
+        // 恢复上次 terminal 的打开状态
+        self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
         loadCollapsedSections()
     }
 
@@ -292,6 +363,50 @@ final class RepoViewModel {
         fileWatcher = nil
     }
 
+    // MARK: - Periodic Refresh Timer
+
+    /// Start periodic refresh timer that fetches from remote every 30 seconds
+    /// Only refreshes the current tab (doesn't reload all data, just fetches)
+    func startPeriodicRefresh() {
+        stopPeriodicRefresh() // Ensure no duplicate timers
+        
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.performPeriodicFetch()
+            }
+        }
+    }
+
+    func stopPeriodicRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    /// Perform a lightweight fetch (only git fetch, no full reload)
+    /// This is called by the periodic timer and should be lightweight
+    private func performPeriodicFetch() async {
+        await fetchIfNeeded()
+    }
+
+    /// Perform a fetch only if at least 30 seconds have passed since the last fetch.
+    func fetchIfNeeded() async {
+        // Don't fetch if already loading or if an operation is in progress
+        guard !isLoading, !operationInProgress else { return }
+
+        // Throttle: skip if last fetch was less than 30s ago
+        if let last = lastFetchDate, Date().timeIntervalSince(last) < 30 {
+            return
+        }
+
+        do {
+            try await git.fetch()
+            lastFetchDate = Date()
+        } catch {
+            // Silently ignore fetch errors
+        }
+    }
+
     private func handleFileSystemChanges(_ changes: Set<RepositoryFileWatcher.ChangeKind>) async {
         guard !isLoading, !operationInProgress else { return }
 
@@ -307,6 +422,9 @@ final class RepoViewModel {
     /// Lightweight refresh: only file statuses + uncommitted graph entry.
     /// Does NOT reload the full commit list — only updates the uncommitted entry.
     private func refreshStatusAndGraph() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
         do {
             let sts = try await git.status()
             fileStatuses = sts
@@ -336,10 +454,95 @@ final class RepoViewModel {
                 }
             }
 
-            if let file = selectedDiffFile, selectedCommit?.isUncommitted == true {
-                await selectDiffFile(file, context: currentDiffContext)
+            // Only re-diff if the selected file still has changes in the current context
+            // (avoids blanking the diff when e.g. a file was just fully staged).
+            if let file = selectedDiffFile, selectedCommit?.isUncommitted == true,
+               let status = sts.first(where: { $0.path == file.path }) {
+                let contextStillValid: Bool
+                switch currentDiffContext {
+                case .staged:   contextStillValid = status.hasStagedChanges
+                case .unstaged: contextStillValid = status.hasUnstagedChanges
+                case .committed: contextStillValid = true
+                }
+                if contextStillValid {
+                    let fullPath = (repoPath as NSString).appendingPathComponent(file.path)
+                    let fileSize = (try? FileManager.default.attributesOfItem(atPath: fullPath))?[.size] as? Int ?? 0
+                    if fileSize <= Self.maxDiffFileSize {
+                        await selectDiffFile(file, context: currentDiffContext)
+                    }
+                }
             }
         } catch {}
+    }
+
+    func refreshWithSync() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            // First, fetch and prune remote branches and tags
+            try await git.fetchWithPrune()
+        } catch {
+            // If fetch fails, still continue with loadAll
+            // The error will be shown if needed
+        }
+
+        // Get remote tags and delete local tags that don't exist on remote
+        await deleteLocalTagsNotOnRemote()
+
+        // After fetch, load all data
+        await loadAll()
+    }
+
+    private func deleteLocalTagsNotOnRemote() async {
+        // Load remotes first
+        do {
+            remotes = try await git.remotes()
+        } catch {
+            return
+        }
+        
+        // If no remotes, don't delete anything
+        guard !remotes.isEmpty else { return }
+        
+        // Get all remote tags from all remotes
+        var remoteTags: Set<String> = []
+        for remote in remotes {
+            do {
+                let tags = try await git.remoteTags(remoteName: remote.name)
+                remoteTags.formUnion(tags)
+            } catch {
+                // Continue with other remotes
+            }
+        }
+        
+        // Get all local tags
+        do {
+            let localTags = try await git.tags()
+            
+            // Delete local tags that don't exist on remote
+            // Note: --prune-tags only removes tags that were fetched from remote.
+            // This ensures we also remove purely local tags that don't exist on remote.
+            var deletedCount = 0
+            for localTag in localTags {
+                if !remoteTags.contains(localTag) {
+                    do {
+                        try await git.deleteTag(name: localTag)
+                        deletedCount += 1
+                    } catch {
+                        // Continue with other tags if one fails
+                        print("Failed to delete tag \(localTag): \(error.localizedDescription)")
+                    }
+                }
+            }
+            
+            if deletedCount > 0 {
+                print("Deleted \(deletedCount) local tag(s) that don't exist on remote")
+            }
+        } catch {
+            // If we can't get local tags, skip deletion
+            print("Failed to get local tags: \(error.localizedDescription)")
+        }
     }
 
     func loadAll() async {
@@ -464,14 +667,29 @@ final class RepoViewModel {
     func selectCommit(_ commit: CommitInfo) async {
         if isCompareMode { exitCompareMode() }
         selectedCommit = commit
+        selectedStash = nil
         selectedDiffFile = nil
         fileDiffContent = ""
         parsedDiff = nil
+        selectedFilePaths = []
         do {
             if commit.isUncommitted {
                 diffFiles = try await git.uncommittedDiffFiles()
+                // Auto-select the first unstaged file, falling back to the first staged file
+                let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges)
+                    ?? fileStatuses.first(where: \.hasStagedChanges)
+                if let status = firstStatus {
+                    let context: DiffContext = status.hasUnstagedChanges ? .unstaged : .staged
+                    let diffFile = diffFiles.first(where: { $0.path == status.path })
+                        ?? DiffFile(additions: 0, deletions: 0, path: status.path)
+                    selectedFilePaths = [status.path]
+                    await selectDiffFile(diffFile, context: context)
+                }
             } else {
                 diffFiles = try await git.diffDetail(hash: commit.hash)
+                if let first = diffFiles.first {
+                    await selectDiffFile(first, context: .committed)
+                }
             }
         } catch {
             diffFiles = []
@@ -481,13 +699,45 @@ final class RepoViewModel {
     enum DiffContext { case staged, unstaged, committed }
     var currentDiffContext: DiffContext = .committed
 
-    func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed) async {
+    /// Max file size (in bytes) for which we compute a full diff.
+    /// Files larger than this get a placeholder to avoid OOM on huge files
+    /// (e.g. Xcode project.pbxproj).
+    private static let maxDiffFileSize: Int = 1_024_000  // ~1 MB
+
+    func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed, ignoreSize: Bool = false) async {
         let isUncommitted = selectedCommit?.isUncommitted == true || isInConflict
-        guard selectedCommit != nil || isInConflict else { return }
+        guard selectedCommit != nil || selectedStash != nil || isInConflict else { return }
         selectedDiffFile = file
         currentDiffContext = context
+        isFileTooLarge = false
+        fileTooLargeSizeMB = ""
         do {
-            if isUncommitted {
+            if let stash = selectedStash {
+                fileDiffContent = try await git.stashFileDiff(stash.index, path: file.path)
+                if fileDiffContent.isEmpty {
+                    fileDiffContent = "No changes in this file"
+                    parsedDiff = nil
+                } else {
+                    parsedDiff = DiffParserEngine.parse(fileDiffContent)
+                    if parsedDiff == nil || parsedDiff?.hunks.isEmpty == true {
+                        parsedDiff = nil
+                    }
+                }
+            } else if isUncommitted {
+                // Guard against huge files that would blow up memory
+                if !ignoreSize {
+                    let fullPath = (repoPath as NSString).appendingPathComponent(file.path)
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: fullPath),
+                       let size = attrs[.size] as? Int, size > Self.maxDiffFileSize {
+                        let sizeMB = String(format: "%.1f", Double(size) / 1_048_576.0)
+                        isFileTooLarge = true
+                        fileTooLargeSizeMB = sizeMB
+                        fileDiffContent = ""
+                        parsedDiff = nil
+                        return
+                    }
+                }
+
                 let status = fileStatuses.first(where: { $0.path == file.path })
                 let statusCode = status?.statusCode ?? "M "
 
@@ -503,13 +753,49 @@ final class RepoViewModel {
                 case .committed:
                     fileDiffContent = try await git.uncommittedFileDiff(path: file.path, statusCode: statusCode)
                 }
+                parsedDiff = DiffParserEngine.parse(fileDiffContent)
             } else if let commit = selectedCommit {
                 fileDiffContent = try await git.fileDiff(hash: commit.hash, path: file.path)
+                parsedDiff = DiffParserEngine.parse(fileDiffContent)
             }
-            parsedDiff = DiffParserEngine.parse(fileDiffContent)
         } catch {
             fileDiffContent = "Failed to load diff"
             parsedDiff = nil
+        }
+    }
+
+    func forceLoadFileDiff() async {
+        guard let file = selectedDiffFile else { return }
+        await selectDiffFile(file, context: currentDiffContext, ignoreSize: true)
+    }
+
+    /// Open the currently selected file in the system's external diff tool
+    /// (e.g. FileMerge via `opendiff`, or whatever `git difftool` is configured to use).
+    func openExternalDiffTool() {
+        guard let file = selectedDiffFile else { return }
+        let path = file.path
+
+        Task.detached { [repoPath, currentDiffContext, selectedCommit] in
+            let process = Process()
+            process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+
+            if selectedCommit?.isUncommitted == true {
+                switch currentDiffContext {
+                case .staged:
+                    process.arguments = ["difftool", "--cached", "--no-prompt", "--", path]
+                case .unstaged:
+                    process.arguments = ["difftool", "--no-prompt", "--", path]
+                case .committed:
+                    process.arguments = ["difftool", "--no-prompt", "--", path]
+                }
+            } else if let commit = selectedCommit {
+                process.arguments = ["difftool", "\(commit.hash)~1", commit.hash, "--no-prompt", "--", path]
+            } else {
+                return
+            }
+
+            try? process.run()
         }
     }
 
@@ -623,6 +909,7 @@ final class RepoViewModel {
             do { try await git.stageFile(file.path) } catch {}
         }
         do { fileStatuses = try await git.status() } catch {}
+        // No unstaged files remain — preserve the last displayed diff
     }
 
     func unstageAllFiles() async {
@@ -631,6 +918,7 @@ final class RepoViewModel {
             do { try await git.unstageFile(file.path) } catch {}
         }
         do { fileStatuses = try await git.status() } catch {}
+        await selectFirstUnstagedOrKeep()
     }
 
     // MARK: - Hunk / Line Staging & Discarding
@@ -766,14 +1054,100 @@ final class RepoViewModel {
     var operationInProgress = false
     var operationError: String?
 
+    /// The default pull mode persisted across sessions.
+    /// These are the selectable modes shown in the Pull dropdown menu.
+    enum PullMode: String, CaseIterable, Identifiable {
+        case pullFF         = "pullFF"          // --ff-only
+        case pull           = "pull"            // default (ff if possible)
+        case pullRebase     = "pullRebase"      // --rebase
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .pullFF:     return "Pull (fast-forward only)"
+            case .pull:       return "Pull (fast-forward if possible)"
+            case .pullRebase: return "Pull (rebase)"
+            }
+        }
+    }
+
+    var defaultPullMode: PullMode = PullMode(rawValue: UserDefaults.standard.string(forKey: "GitN.defaultPullMode") ?? "") ?? .pull {
+        didSet {
+            UserDefaults.standard.set(defaultPullMode.rawValue, forKey: "GitN.defaultPullMode")
+        }
+    }
+
+    /// Show force-pull confirmation dialog
+    var showForcePullConfirm = false
+    /// Show force-push confirmation dialog
+    var showForcePushConfirm = false
+
     func performFetch() async {
         await performRemoteOperation { try await $0.git.fetch() }
     }
 
+    /// Execute pull using the current default mode.
     func performPull() async {
-        await performRemoteOperation { try await $0.git.pull() }
+        await performPull(mode: defaultPullMode)
     }
 
+    func performPull(mode: PullMode) async {
+        operationInProgress = true
+        operationError = nil
+        do {
+            switch mode {
+            case .pull:
+                try await git.pull()
+            case .pullFF:
+                try await git.pullFF()
+            case .pullRebase:
+                try await git.pullRebase()
+            }
+            await loadAll()
+            showToast(title: "Pull Complete", detail: "\(currentBranch) updated", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performPull(mode: mode)
+                }
+                showHostKeyPrompt = true
+            } else {
+                showToast(title: "Pull Failed", detail: msg, style: .error)
+            }
+        }
+        operationInProgress = false
+    }
+
+    func performForcePull() async {
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.pullForce()
+            await loadAll()
+            showToast(title: "Pull Complete", detail: "\(currentBranch) updated (force)", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performForcePull()
+                }
+                showHostKeyPrompt = true
+            } else {
+                showToast(title: "Pull Failed", detail: msg, style: .error)
+            }
+        }
+        operationInProgress = false
+    }
+
+    /// Execute normal push.
     func performPush() async {
         let hasUpstream = localBranches.first(where: { $0.isCurrent })?.upstream != nil
         if !hasUpstream {
@@ -782,14 +1156,76 @@ final class RepoViewModel {
             showPushUpstreamPrompt = true
             return
         }
-        await performRemoteOperation { try await $0.git.push() }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.push()
+            await loadAll()
+            showToast(title: "Push Complete", detail: "\(currentBranch) pushed", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performPush()
+                }
+                showHostKeyPrompt = true
+            } else {
+                showToast(title: "Push Failed", detail: msg, style: .error)
+            }
+        }
+        operationInProgress = false
+    }
+
+    func performForcePush() async {
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.pushForce()
+            await loadAll()
+            showToast(title: "Push Complete", detail: "\(currentBranch) pushed (force)", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performForcePush()
+                }
+                showHostKeyPrompt = true
+            } else {
+                showToast(title: "Push Failed", detail: msg, style: .error)
+            }
+        }
+        operationInProgress = false
     }
 
     func performPushWithUpstream(remote: String, branch: String) async {
         showPushUpstreamPrompt = false
-        await performRemoteOperation {
-            try await $0.git.push(remoteName: remote, branchName: branch, setUpstream: true)
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.push(remoteName: remote, branchName: branch, setUpstream: true)
+            await loadAll()
+            showToast(title: "Push Complete", detail: "\(branch) pushed to \(remote)", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            if msg.contains("Host key verification failed") || msg.contains("host key") {
+                let host = extractHostFromError(msg)
+                hostKeyHost = host
+                pendingOperationAfterHostKey = { [weak self] in
+                    guard let self else { return }
+                    await self.performPushWithUpstream(remote: remote, branch: branch)
+                }
+                showHostKeyPrompt = true
+            } else {
+                showToast(title: "Push Failed", detail: msg, style: .error)
+            }
         }
+        operationInProgress = false
     }
 
     func cancelPushUpstreamPrompt() {
@@ -808,6 +1244,126 @@ final class RepoViewModel {
             await loadAll()
         } catch {
             await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .stashApply)
+        }
+        operationInProgress = false
+    }
+
+    /// Apply a specific stash (apply without deleting)
+    func performStashApplyAt(stash: StashInfo) async {
+        let idx = stashNumericIndex(stash)
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.stashApply(index: idx)
+            await loadAll()
+            showToast(title: "Stash Applied", detail: stash.message, style: .success)
+        } catch {
+            await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .stashApply)
+        }
+        operationInProgress = false
+    }
+
+    /// Pop a specific stash (apply and delete)
+    func performStashPopAt(stash: StashInfo) async {
+        let idx = stashNumericIndex(stash)
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.stashPop(index: idx)
+            await loadAll()
+            showToast(title: "Stash Popped", detail: stash.message, style: .success)
+        } catch {
+            await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .stashApply)
+        }
+        operationInProgress = false
+    }
+
+    /// Drop (delete) a specific stash
+    func performStashDrop(stash: StashInfo) async {
+        let idx = stashNumericIndex(stash)
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.stashDrop(index: idx)
+            await loadAll()
+            showToast(title: "Stash Deleted", detail: stash.message, style: .success)
+        } catch {
+            operationError = "Stash drop failed: \(error.localizedDescription)"
+        }
+        operationInProgress = false
+    }
+
+    /// Extract numeric index from stash ref string like "stash@{0}"
+    private func stashNumericIndex(_ stash: StashInfo) -> Int {
+        if let range = stash.index.range(of: #"\d+"#, options: .regularExpression) {
+            return Int(stash.index[range]) ?? 0
+        }
+        return 0
+    }
+
+    /// Pull a specific branch. If current, just pull. If not, try fast-forward fetch first,
+    /// then fall back to stash → checkout → pull → checkout back → pop stash.
+    func performPullBranch(_ branch: BranchInfo) async {
+        if branch.isCurrent {
+            await performPull()
+            return
+        }
+
+        // Determine remote name from upstream or default to "origin"
+        let remoteName: String
+        if let upstream = branch.upstream {
+            remoteName = String(upstream.split(separator: "/", maxSplits: 1).first ?? "origin")
+        } else {
+            remoteName = "origin"
+        }
+
+        operationInProgress = true
+        operationError = nil
+
+        // Try fast-forward fetch first (git fetch origin branchName:branchName)
+        do {
+            try await git.fetchBranchFastForward(remoteName: remoteName, branchName: branch.name)
+            await loadAll()
+            showToast(title: "Pull Complete", detail: "\(branch.name) updated (fast-forward)", style: .success)
+            operationInProgress = false
+            return
+        } catch {
+            // Fast-forward not possible, fall back to stash/checkout/pull flow
+        }
+
+        // Fall back: stash → checkout → pull → checkout back → pop stash
+        let originalBranch = currentBranch
+        let hasChanges = !fileStatuses.isEmpty
+
+        do {
+            // 1. Stash if there are uncommitted changes
+            if hasChanges {
+                try await git.stashSave(message: "Auto-stash before pulling \(branch.name)")
+            }
+
+            // 2. Checkout target branch
+            try await git.checkoutBranch(branch.name)
+
+            // 3. Pull
+            try await await git.pull()
+
+            // 4. Checkout back to original branch
+            try await git.checkoutBranch(originalBranch)
+
+            // 5. Pop stash if we stashed
+            if hasChanges {
+                try await git.stashPop()
+            }
+
+            await loadAll()
+            showToast(title: "Pull Complete", detail: "\(branch.name) updated", style: .success)
+        } catch {
+            // Try to recover: checkout back to original branch
+            try? await git.checkoutBranch(originalBranch)
+            if hasChanges {
+                try? await git.stashPop()
+            }
+            showToast(title: "Pull Failed", detail: "Pull \(branch.name) failed: \(error.localizedDescription)", style: .error)
         }
         operationInProgress = false
     }
@@ -934,6 +1490,10 @@ final class RepoViewModel {
         await performRemoteOperation { try await $0.git.createTag(name: name, at: hash) }
     }
 
+    func performDeleteTag(_ name: String) async {
+        await performRemoteOperation { try await $0.git.deleteTag(name: name) }
+    }
+
     func performSetUpstream(remote: String, branch: String) async {
         await performRemoteOperation { try await $0.git.setUpstream(remote: remote, branch: branch) }
     }
@@ -956,8 +1516,31 @@ final class RepoViewModel {
         }
     }
 
+    /// Get the full commit message (including description) for a commit by hash
+    func getFullCommitMessage(hash: String) async -> String {
+        do {
+            return try await git.fullCommitMessage(hash: hash)
+        } catch {
+            return ""
+        }
+    }
+
     func performCreateBranchAt(name: String, commitHash: String) async {
-        await performRemoteOperation { try await $0.git.createBranchAt(name: name, commitHash: commitHash) }
+        operationInProgress = true
+        operationError = nil
+        do {
+            try await git.createBranchAt(name: name, commitHash: commitHash)
+            await loadAll()
+            showToast(title: "Branch Created", detail: "Created branch '\(name)'", style: .success)
+        } catch {
+            let msg = error.localizedDescription
+            showToast(title: "Branch Creation Failed", detail: msg, style: .error)
+        }
+        operationInProgress = false
+    }
+    
+    func getBranchCommitHash(_ branchName: String, isRemote: Bool = false) async throws -> String {
+        return try await git.branchCommitHash(branchName, isRemote: isRemote)
     }
 
     // MARK: - Scroll to commit
@@ -1011,6 +1594,37 @@ final class RepoViewModel {
         }
     }
 
+    func scrollToCommitForTag(_ tagName: String) {
+        // 查找 refs 中包含该 tag 的 commit
+        if let commit = commits.first(where: { commit in
+            commit.refs.contains { ref in
+                ref.contains("tag:") && ref.contains(tagName)
+            }
+        }) {
+            scrollToCommitHash = commit.hash
+            Task { await selectCommit(commit) }
+        }
+    }
+    
+    func scrollToCommitForStash(_ stash: StashInfo) {
+        Task { await selectStash(stash) }
+    }
+    
+    func selectStash(_ stash: StashInfo) async {
+        if isCompareMode { exitCompareMode() }
+        selectedStash = stash
+        selectedCommit = nil
+        selectedDiffFile = nil
+        fileDiffContent = ""
+        parsedDiff = nil
+        do {
+            diffFiles = try await git.stashDiffFiles(stash.index)
+        } catch {
+            diffFiles = []
+            showToast(title: "Failed to load stash diff", detail: error.localizedDescription, style: .error)
+        }
+    }
+
     private func performRemoteOperation(_ op: @escaping (RepoViewModel) async throws -> Void) async {
         operationInProgress = true
         operationError = nil
@@ -1028,7 +1642,7 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                operationError = msg
+                showToast(title: "Operation Failed", detail: msg, style: .error)
             }
         }
         operationInProgress = false
@@ -1337,8 +1951,8 @@ final class RepoViewModel {
 
     private func buildInitialOutput() {
         guard let sides = conflictSides else { return }
-        let oursLines = sides.oursContent.components(separatedBy: "\n")
-        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+        let oursLines = sides.oursLines
+        let theirsLines = sides.theirsLines
 
         var output: [String] = []
         var oursIdx = 0
@@ -1402,8 +2016,8 @@ final class RepoViewModel {
 
     private func rebuildOutputFromChoices() {
         guard let sides = conflictSides else { return }
-        let oursLines = sides.oursContent.components(separatedBy: "\n")
-        let theirsLines = sides.theirsContent.components(separatedBy: "\n")
+        let oursLines = sides.oursLines
+        let theirsLines = sides.theirsLines
 
         var output: [String] = []
         var oursIdx = 0

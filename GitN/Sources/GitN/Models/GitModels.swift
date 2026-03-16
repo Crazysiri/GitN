@@ -186,8 +186,8 @@ struct ConflictFile: Identifiable, Equatable {
 struct ConflictSides: Equatable {
     let oursLabel: String
     let theirsLabel: String
-    let oursContent: String
-    let theirsContent: String
+    let oursLines: [String]
+    let theirsLines: [String]
     let markers: [ConflictRegion]
 }
 

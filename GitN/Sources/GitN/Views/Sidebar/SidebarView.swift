@@ -22,6 +22,8 @@ struct SidebarView: View {
 
     @State private var showCreateBranchFrom = false
     @State private var branchFromHash = ""
+    @State private var branchFromName = ""
+    @State private var branchFromIsRemote = false
     @State private var newBranchFromName = ""
 
     @State private var showSetUpstream = false
@@ -30,6 +32,9 @@ struct SidebarView: View {
 
     @State private var showMergeConfirm = false
     @State private var mergingMR: GitLabMR?
+
+    @State private var collapsedLocalFolders: Set<String> = []
+    @State private var collapsedRemoteFolders: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -116,6 +121,19 @@ struct SidebarView: View {
     private func localBranchContextMenu(_ branch: BranchInfo) -> some View {
         let cur = viewModel.currentBranch
 
+        // Pull
+        if branch.isCurrent {
+            Button("Pull \(branch.name)") {
+                Task { await viewModel.performPull() }
+            }
+        } else {
+            Button("Pull \(branch.name)") {
+                Task { await viewModel.performPullBranch(branch) }
+            }
+        }
+
+        Divider()
+
         if !branch.isCurrent {
             Button("Merge \(branch.name) into \(cur)") {
                 Task { await viewModel.performMerge(branch.name) }
@@ -139,6 +157,8 @@ struct SidebarView: View {
         }
 
         Button("Create branch here") {
+            branchFromName = branch.name
+            branchFromIsRemote = false
             branchFromHash = branch.shortHash
             newBranchFromName = ""
             showCreateBranchFrom = true
@@ -214,6 +234,8 @@ struct SidebarView: View {
         Divider()
 
         Button("Create branch here") {
+            branchFromName = fullName
+            branchFromIsRemote = true
             branchFromHash = branch.shortHash
             newBranchFromName = shortName
             showCreateBranchFrom = true
@@ -320,7 +342,16 @@ struct SidebarView: View {
                     let name = newBranchFromName.trimmingCharacters(in: .whitespaces)
                     showCreateBranchFrom = false
                     guard !name.isEmpty else { return }
-                    Task { await viewModel.performCreateBranchAt(name: name, commitHash: branchFromHash) }
+                    Task { 
+                        // Get full hash from branch name
+                        do {
+                            let fullHash = try await viewModel.getBranchCommitHash(branchFromName, isRemote: branchFromIsRemote)
+                            await viewModel.performCreateBranchAt(name: name, commitHash: fullHash)
+                        } catch {
+                            // Fallback: try using shortHash directly (might work if it's unique)
+                            await viewModel.performCreateBranchAt(name: name, commitHash: branchFromHash)
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(newBranchFromName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -452,22 +483,40 @@ struct SidebarView: View {
                 }
             }
 
-            ForEach(viewModel.localBranches) { branch in
-                SidebarBranchRow(
-                    name: branch.name,
-                    isCurrent: branch.isCurrent,
-                    icon: "arrow.triangle.branch",
-                    ahead: branch.ahead,
-                    behind: branch.behind
-                )
-                .onTapGesture(count: 2) {
-                    guard !branch.isCurrent else { return }
-                    Task { await viewModel.performCheckoutBranch(branch.name) }
-                }
-                .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
-                .contextMenu {
-                    localBranchContextMenu(branch)
-                        .font(.system(size: 11, weight: .medium))
+            let localTree = makeBranchTree(branches: viewModel.localBranches)
+            let localFlat = flattenBranchTree(localTree, depth: 0, collapsedFolders: collapsedLocalFolders)
+            ForEach(localFlat) { node in
+                if let branch = node.branchInfo {
+                    SidebarBranchRow(
+                        name: node.displayName,
+                        isCurrent: branch.isCurrent,
+                        icon: "arrow.triangle.branch",
+                        ahead: branch.ahead,
+                        behind: branch.behind,
+                        indentDepth: node.depth
+                    )
+                    .onTapGesture(count: 2) {
+                        guard !branch.isCurrent else { return }
+                        Task { await viewModel.performCheckoutBranch(branch.name) }
+                    }
+                    .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
+                    .contextMenu {
+                        localBranchContextMenu(branch)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                } else {
+                    BranchGroupRow(
+                        name: node.displayName,
+                        isCollapsed: collapsedLocalFolders.contains(node.fullPath),
+                        depth: node.depth
+                    )
+                    .onTapGesture {
+                        if collapsedLocalFolders.contains(node.fullPath) {
+                            collapsedLocalFolders.remove(node.fullPath)
+                        } else {
+                            collapsedLocalFolders.insert(node.fullPath)
+                        }
+                    }
                 }
             }
         }
@@ -487,23 +536,42 @@ struct SidebarView: View {
             ForEach(viewModel.remotes) { remote in
                 DisclosureGroup {
                     let branches = viewModel.remoteBranchGroups[remote.name] ?? []
-                    ForEach(branches) { branch in
-                        let shortName = branch.name
-                            .replacingOccurrences(of: "\(remote.name)/", with: "")
-                        SidebarBranchRow(
-                            name: shortName,
-                            isCurrent: false,
-                            icon: "arrow.triangle.branch"
-                        )
+                    let remoteTree = makeBranchTree(branches: branches, prefix: remote.name)
+                    let remoteFlat = flattenBranchTree(remoteTree, depth: 0, collapsedFolders: collapsedRemoteFolders)
+                    ForEach(remoteFlat) { node in
+                        if let branch = node.branchInfo {
+                            SidebarBranchRow(
+                                name: node.displayName,
+                                isCurrent: false,
+                                icon: "arrow.triangle.branch",
+                                indentDepth: node.depth
+                            )
                             .padding(.leading, 8)
                             .onTapGesture(count: 2) {
                                 Task { await viewModel.performCheckoutBranch(branch.name) }
                             }
-                            .onTapGesture { }
+                            .onTapGesture {
+                                viewModel.scrollToCommitForBranch(branch)
+                            }
                             .contextMenu {
                                 remoteBranchContextMenu(branch, remoteName: remote.name)
                                     .font(.system(size: 11, weight: .medium))
                             }
+                        } else {
+                            BranchGroupRow(
+                                name: node.displayName,
+                                isCollapsed: collapsedRemoteFolders.contains(node.fullPath),
+                                depth: node.depth
+                            )
+                            .padding(.leading, 8)
+                            .onTapGesture {
+                                if collapsedRemoteFolders.contains(node.fullPath) {
+                                    collapsedRemoteFolders.remove(node.fullPath)
+                                } else {
+                                    collapsedRemoteFolders.insert(node.fullPath)
+                                }
+                            }
+                        }
                     }
                 } label: {
                     Label(remote.name, systemImage: "externaldrive.connected.to.line.below")
@@ -545,15 +613,13 @@ struct SidebarView: View {
             onToggle: { viewModel.toggleSection("tags") }
         ) {
             ForEach(viewModel.tags, id: \.self) { tag in
-                Label(tag, systemImage: "tag")
-                    .font(.caption)
-                    .padding(.leading, 28)
-                    .padding(.trailing, 12)
-                    .padding(.vertical, 2)
+                SidebarTagRow(name: tag)
                     .onTapGesture(count: 2) {
                         Task { await viewModel.performCheckoutBranch(tag) }
                     }
-                    .onTapGesture { }
+                    .onTapGesture {
+                        viewModel.scrollToCommitForTag(tag)
+                    }
             }
         }
     }
@@ -569,17 +635,25 @@ struct SidebarView: View {
             onToggle: { viewModel.toggleSection("stashes") }
         ) {
             ForEach(viewModel.stashes) { stash in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(stash.message)
-                        .font(.caption)
-                        .lineLimit(1)
-                    Text(stash.index)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 28)
-                .padding(.trailing, 12)
-                .padding(.vertical, 2)
+                SidebarStashRow(stash: stash)
+                    .onTapGesture {
+                        viewModel.scrollToCommitForStash(stash)
+                    }
+                    .contextMenu {
+                        Group {
+                            Button("Apply (keep stash)") {
+                                Task { await viewModel.performStashApplyAt(stash: stash) }
+                            }
+                            Button("Pop (apply & delete)") {
+                                Task { await viewModel.performStashPopAt(stash: stash) }
+                            }
+                            Divider()
+                            Button("Delete", role: .destructive) {
+                                Task { await viewModel.performStashDrop(stash: stash) }
+                            }
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                    }
             }
         }
     }
@@ -821,6 +895,7 @@ struct SidebarBranchRow: View {
     var badge: String? = nil
     var badgeColor: Color = .secondary
     var iconColor: Color? = nil
+    var indentDepth: Int = 0
 
     @State private var isHovering = false
 
@@ -856,7 +931,7 @@ struct SidebarBranchRow: View {
                     .foregroundStyle(.green)
             }
         }
-        .padding(.leading, 28)
+        .padding(.leading, CGFloat(28 + indentDepth * 12))
         .padding(.trailing, 12)
         .padding(.vertical, 3)
         .background(
@@ -1033,5 +1108,169 @@ struct SidebarMRRow: View {
         case .closed: return .red
         case .merged: return .purple
         }
+    }
+}
+
+// MARK: - Tag Row
+
+struct SidebarTagRow: View {
+    let name: String
+    
+    @State private var isHovering = false
+    
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "tag")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            
+            Text(name)
+                .font(.caption)
+                .lineLimit(1)
+            
+            Spacer()
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Branch Tree
+
+indirect enum BranchTreeNode: Identifiable {
+    case folder(name: String, fullPath: String, children: [BranchTreeNode])
+    case leaf(BranchInfo, displayName: String)
+
+    var id: String {
+        switch self {
+        case .folder(_, let p, _): return "F:\(p)"
+        case .leaf(let b, _): return "L:\(b.id)"
+        }
+    }
+}
+
+struct FlatBranchNode: Identifiable {
+    let id: String
+    let displayName: String
+    let fullPath: String
+    let depth: Int
+    let branchInfo: BranchInfo?
+}
+
+func makeBranchTree(branches: [BranchInfo], prefix: String = "") -> [BranchTreeNode] {
+    var folders: [String: [BranchInfo]] = [:]
+    var leaves: [BranchInfo] = []
+
+    for branch in branches {
+        let remaining: String
+        if prefix.isEmpty {
+            remaining = branch.name
+        } else {
+            let prefixWithSlash = prefix + "/"
+            guard branch.name.hasPrefix(prefixWithSlash) else { continue }
+            remaining = String(branch.name.dropFirst(prefixWithSlash.count))
+        }
+        if let slash = remaining.firstIndex(of: "/") {
+            let seg = String(remaining[..<slash])
+            folders[seg, default: []].append(branch)
+        } else {
+            leaves.append(branch)
+        }
+    }
+
+    var nodes: [BranchTreeNode] = []
+    for b in leaves.sorted(by: { $0.name < $1.name }) {
+        let displayName = prefix.isEmpty ? b.name : String(b.name.dropFirst(prefix.count + 1))
+        nodes.append(.leaf(b, displayName: displayName))
+    }
+    for seg in folders.keys.sorted() {
+        let fullPath = prefix.isEmpty ? seg : "\(prefix)/\(seg)"
+        let children = makeBranchTree(branches: folders[seg]!, prefix: fullPath)
+        nodes.append(.folder(name: seg, fullPath: fullPath, children: children))
+    }
+    return nodes
+}
+
+func flattenBranchTree(_ nodes: [BranchTreeNode], depth: Int, collapsedFolders: Set<String>) -> [FlatBranchNode] {
+    var result: [FlatBranchNode] = []
+    for node in nodes {
+        switch node {
+        case .folder(let name, let path, let children):
+            result.append(FlatBranchNode(id: "F:\(path)", displayName: name, fullPath: path, depth: depth, branchInfo: nil))
+            if !collapsedFolders.contains(path) {
+                result += flattenBranchTree(children, depth: depth + 1, collapsedFolders: collapsedFolders)
+            }
+        case .leaf(let branch, let displayName):
+            result.append(FlatBranchNode(id: "L:\(branch.id)", displayName: displayName, fullPath: branch.name, depth: depth, branchInfo: branch))
+        }
+    }
+    return result
+}
+
+struct BranchGroupRow: View {
+    let name: String
+    let isCollapsed: Bool
+    let depth: Int
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 9)
+            Image(systemName: "folder")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.leading, CGFloat(28 + depth * 12))
+        .padding(.trailing, 12)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.12) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Stash Row
+
+struct SidebarStashRow: View {
+    let stash: StashInfo
+    
+    @State private var isHovering = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(stash.message)
+                .font(.caption)
+                .lineLimit(1)
+            Text(stash.index)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.leading, 28)
+        .padding(.trailing, 12)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .onHover { isHovering = $0 }
     }
 }
