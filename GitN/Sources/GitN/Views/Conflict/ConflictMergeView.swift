@@ -221,6 +221,14 @@ struct ConflictMergeView: View {
         let newIdx = currentConflictIndex + delta
         guard newIdx >= 0, newIdx < totalConflicts else { return }
         currentConflictIndex = newIdx
+        scrollToConflict(at: newIdx)
+    }
+
+    private func scrollToConflict(at index: Int) {
+        guard let markers = sides?.markers, index < markers.count else { return }
+        let firstLine = markers[index].oursRange.lowerBound
+        let y = CGFloat(firstLine) * SideCodeContentView.lineHeight - SideCodeContentView.lineHeight * 2
+        scrollOffset = CGPoint(x: scrollOffset.x, y: max(0, y))
     }
 
     private func scrollToFirstConflict() {

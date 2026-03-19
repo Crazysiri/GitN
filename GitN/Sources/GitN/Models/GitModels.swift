@@ -78,6 +78,18 @@ struct DiffFile: Identifiable, Equatable {
     let additions: Int
     let deletions: Int
     let path: String
+    /// Non-nil when the file was renamed; contains the original path.
+    let oldPath: String?
+
+    var isRenamed: Bool { oldPath != nil }
+    var isPureRename: Bool { isRenamed && additions == 0 && deletions == 0 }
+
+    init(additions: Int, deletions: Int, path: String, oldPath: String? = nil) {
+        self.additions = additions
+        self.deletions = deletions
+        self.path = path
+        self.oldPath = oldPath
+    }
 }
 
 struct FileStatus: Identifiable, Equatable {

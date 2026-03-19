@@ -11,6 +11,7 @@ final class RepoViewModel {
     var remoteBranches: [BranchInfo] = []
     var remotes: [RemoteInfo] = []
     var tags: [String] = []
+    var knownRemoteTags: Set<String> = []
     var stashes: [StashInfo] = []
     var submodules: [SubmoduleInfo] = []
     var currentBranch: String = ""
@@ -117,7 +118,7 @@ final class RepoViewModel {
     }
 
     @MainActor
-    func openMarkdownPreview(path: String, commitHash: String?) async {
+    func openFilePreview(path: String, commitHash: String?) async {
         var content = ""
         if let hash = commitHash {
             content = (try? await git.fileContent(atCommit: hash, path: path)) ?? ""
@@ -128,7 +129,11 @@ final class RepoViewModel {
         }
 
         let fileName = (path as NSString).lastPathComponent
-        let hostingController = NSHostingController(rootView: MarkdownPreviewView(title: fileName, content: content))
+        let view: AnyView = path.isMarkdownFile
+            ? AnyView(MarkdownPreviewView(title: fileName, content: content))
+            : AnyView(SourcePreviewView(title: fileName, content: content, language: path.sourceLanguage))
+
+        let hostingController = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hostingController)
         window.title = fileName
         window.setContentSize(NSSize(width: 800, height: 600))
@@ -323,6 +328,7 @@ final class RepoViewModel {
 
     // MARK: - Toast
     var toastMessage: ToastMessage?
+    private var toastAutoDismissTask: Task<Void, Never>?
 
     private var fileWatcher: RepositoryFileWatcher?
     private var isRefreshing = false
@@ -494,6 +500,19 @@ final class RepoViewModel {
         await loadAll()
     }
 
+    /// Fetch remote tags from all configured remotes and update knownRemoteTags.
+    /// Best-effort: silently ignores network errors.
+    private func refreshKnownRemoteTags() async {
+        guard !remotes.isEmpty else { return }
+        var fetched: Set<String> = []
+        for remote in remotes {
+            if let tags = try? await git.remoteTags(remoteName: remote.name) {
+                fetched.formUnion(tags)
+            }
+        }
+        knownRemoteTags = fetched
+    }
+
     private func deleteLocalTagsNotOnRemote() async {
         // Load remotes first
         do {
@@ -501,25 +520,17 @@ final class RepoViewModel {
         } catch {
             return
         }
-        
+
         // If no remotes, don't delete anything
         guard !remotes.isEmpty else { return }
-        
-        // Get all remote tags from all remotes
-        var remoteTags: Set<String> = []
-        for remote in remotes {
-            do {
-                let tags = try await git.remoteTags(remoteName: remote.name)
-                remoteTags.formUnion(tags)
-            } catch {
-                // Continue with other remotes
-            }
-        }
-        
+
+        await refreshKnownRemoteTags()
+        let remoteTags = knownRemoteTags
+
         // Get all local tags
         do {
             let localTags = try await git.tags()
-            
+
             // Delete local tags that don't exist on remote
             // Note: --prune-tags only removes tags that were fetched from remote.
             // This ensures we also remove purely local tags that don't exist on remote.
@@ -535,7 +546,7 @@ final class RepoViewModel {
                     }
                 }
             }
-            
+
             if deletedCount > 0 {
                 print("Deleted \(deletedCount) local tag(s) that don't exist on remote")
             }
@@ -577,6 +588,9 @@ final class RepoViewModel {
             headCommitHash = hc
             isDetachedHead = dh
             currentBranchHashes = await branchHashes
+
+            // Refresh remote tags in background (best-effort, doesn't block UI load)
+            Task { await refreshKnownRemoteTags() }
 
             // Phase 2: Load commits with pagination (graph is computed lazily by the view layer)
             var loadedCommits: [CommitInfo] = []
@@ -1494,6 +1508,26 @@ final class RepoViewModel {
         await performRemoteOperation { try await $0.git.deleteTag(name: name) }
     }
 
+    func performPushTag(name: String, remote: String = "origin") async {
+        await performRemoteOperation { try await $0.git.pushTag(name: name, remote: remote) }
+    }
+
+    func performDeleteRemoteTag(name: String, remote: String = "origin") async {
+        await performRemoteOperation { try await $0.git.deleteRemoteTag(name: name, remote: remote) }
+    }
+
+    func getTagCommitHash(_ name: String) async throws -> String {
+        return try await git.tagCommitHash(name: name)
+    }
+
+    func getTagMessage(_ name: String) async -> String? {
+        return try? await git.tagMessage(name: name)
+    }
+
+    func performAnnotateTag(name: String, message: String) async {
+        await performRemoteOperation { try await $0.git.annotateTag(name: name, message: message) }
+    }
+
     func performSetUpstream(remote: String, branch: String) async {
         await performRemoteOperation { try await $0.git.setUpstream(remote: remote, branch: branch) }
     }
@@ -2081,10 +2115,22 @@ final class RepoViewModel {
     // MARK: - Toast
 
     func showToast(title: String, detail: String = "", style: ToastMessage.ToastStyle = .error) {
-        toastMessage = ToastMessage(title: title, detail: detail, style: style)
+        toastAutoDismissTask?.cancel()
+        let message = ToastMessage(title: title, detail: detail, style: style)
+        toastMessage = message
+        let dismissID = message.id
+        toastAutoDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            guard self.toastMessage?.id == dismissID else { return }
+            self.toastMessage = nil
+            self.toastAutoDismissTask = nil
+        }
     }
 
     func dismissToast() {
+        toastAutoDismissTask?.cancel()
+        toastAutoDismissTask = nil
         toastMessage = nil
     }
 

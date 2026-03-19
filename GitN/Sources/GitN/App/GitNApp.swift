@@ -12,9 +12,17 @@ struct GitNApp: App {
                 .environment(appModel)
                 .environment(themeManager)
         }
-        .windowToolbarStyle(.unified(showsTitle: false))
+        .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .appInfo) {
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+                Button("Version \(version)") {}
+                    .disabled(true)
+            }
+
+            CommandGroup(replacing: .systemServices) {}
+
+            CommandGroup(replacing: .newItem) {
                 Button("Open Repository...") {
                     appModel.openRepository()
                 }

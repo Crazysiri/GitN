@@ -10,6 +10,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
+        .package(url: "https://github.com/raspu/Highlightr.git", from: "2.1.2"),
     ],
     targets: [
         // libgit2 compiled from source (submodule at Sources/Clibgit2/libgit2).
@@ -103,8 +104,9 @@ let package = Package(
         ),
         .executableTarget(
             name: "GitN",
-            dependencies: ["Clibgit2", "SwiftTerm", .product(name: "MarkdownUI", package: "swift-markdown-ui")],
+            dependencies: ["Clibgit2", "SwiftTerm", .product(name: "MarkdownUI", package: "swift-markdown-ui"), .product(name: "Highlightr", package: "Highlightr")],
             path: "Sources/GitN",
+            resources: [.copy("FEATURES.md")],
             linkerSettings: [
                 .linkedLibrary("z"),
                 .linkedLibrary("iconv"),

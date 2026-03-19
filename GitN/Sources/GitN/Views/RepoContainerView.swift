@@ -5,15 +5,16 @@ struct RepoContainerView: View {
     let isActive: Bool
     @State private var viewModel: RepoViewModel
 
-    @State private var sidebarWidth: CGFloat = 220
-    @State private var detailWidth: CGFloat = 320
-    @State private var terminalHeight: CGFloat = 200
+    @State private var sidebarWidth: CGFloat = 200
+    @State private var detailWidth: CGFloat = 400
+    @State private var terminalHeight: CGFloat = 300
     @State private var terminalDragStartHeight: CGFloat? = nil
 
     @State private var showStashMessage = false
     @State private var stashMessage = ""
     @State private var showNewBranch = false
     @State private var newBranchName = ""
+    @State private var showIgnoreEditor = false
 
     init(tab: RepoTab, isActive: Bool) {
         self.tab = tab
@@ -33,7 +34,7 @@ struct RepoContainerView: View {
                     centerPanel
 
                     DetailPanelView(viewModel: viewModel)
-                        .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 500)
+                        .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 800)
                 }
             }
 
@@ -48,15 +49,9 @@ struct RepoContainerView: View {
                         Spacer()
                     }
                 }
+                .id(toast.id)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .animation(.easeInOut(duration: 0.3), value: viewModel.toastMessage)
-                .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                        if viewModel.toastMessage?.id == toast.id {
-                            viewModel.dismissToast()
-                        }
-                    }
-                }
             }
 
             // Global MR merging overlay — blocks all interaction
@@ -257,6 +252,8 @@ struct RepoContainerView: View {
             toolbarButton("Pop", icon: "tray.and.arrow.up", disabled: viewModel.operationInProgress || viewModel.stashes.isEmpty) {
                 Task { await viewModel.performStashPop() }
             }
+
+            moreMenu
 
             Spacer()
 
@@ -464,6 +461,33 @@ struct RepoContainerView: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .foregroundStyle(disabled ? .tertiary : .secondary)
+    }
+
+    // MARK: - More Menu
+
+    private var moreMenu: some View {
+        HStack(spacing: 0) {
+            Divider().frame(height: 16).padding(.horizontal, 4)
+
+            Menu {
+                Button {
+                    showIgnoreEditor = true
+                } label: {
+                    Label("编辑 .gitignore", systemImage: "doc.text")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            .sheet(isPresented: $showIgnoreEditor) {
+                GitIgnoreEditorView(repoPath: viewModel.repoPath, isPresented: $showIgnoreEditor)
+            }
+        }
     }
 
     // MARK: - Host Key Banner

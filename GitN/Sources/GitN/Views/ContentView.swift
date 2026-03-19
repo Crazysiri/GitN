@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var appModel
     /// 已经加载过的 tab ID 集合（懒加载：点击才加载，加载后不销毁）
     @State private var loadedTabIDs: Set<UUID> = []
+    @State private var showFeatures = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,9 +25,25 @@ struct ContentView: View {
         }
         .frame(minWidth: 1100, minHeight: 700)
         .background(Color(.windowBackgroundColor))
+        .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 TabBarView()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showFeatures = true
+                } label: {
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .help("Features")
+            }
+        }
+        .sheet(isPresented: $showFeatures) {
+            if let url = Bundle.module.url(forResource: "FEATURES", withExtension: "md"),
+               let content = try? String(contentsOf: url, encoding: .utf8) {
+                FeaturesView(content: content, isPresented: $showFeatures)
             }
         }
         .onAppear {

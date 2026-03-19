@@ -36,6 +36,14 @@ struct SidebarView: View {
     @State private var collapsedLocalFolders: Set<String> = []
     @State private var collapsedRemoteFolders: Set<String> = []
 
+    @State private var showAnnotateTag = false
+    @State private var annotatingTagName = ""
+    @State private var annotateTagMessage = ""
+
+    @State private var showCreateBranchFromTag = false
+    @State private var branchFromTagName = ""
+    @State private var newBranchFromTagName = ""
+
     var body: some View {
         VStack(spacing: 0) {
             repoHeader
@@ -61,6 +69,8 @@ struct SidebarView: View {
         .sheet(isPresented: $showCreateTagAtBranch) { createTagAtBranchSheet }
         .sheet(isPresented: $showCreateBranchFrom) { createBranchFromSheet }
         .sheet(isPresented: $showSetUpstream) { setUpstreamSheet }
+        .sheet(isPresented: $showAnnotateTag) { annotateTagSheet }
+        .sheet(isPresented: $showCreateBranchFromTag) { createBranchFromTagSheet }
         .alert("Merge MR", isPresented: $showMergeConfirm) {
             Button("Merge", role: .destructive) {
                 guard let mr = mergingMR else { return }
@@ -185,8 +195,16 @@ struct SidebarView: View {
             showRenameBranch = true
         }
         if !branch.isCurrent {
-            Button("Delete \(branch.name)", role: .destructive) {
+            Button("Delete \(branch.name) locally", role: .destructive) {
                 Task { await viewModel.performDeleteBranch(branch.name) }
+            }
+            if let upstream = branch.upstream {
+                let remoteParts = upstream.split(separator: "/", maxSplits: 1)
+                let remote = remoteParts.first.map(String.init) ?? "origin"
+                let remoteBranch = remoteParts.dropFirst().first.map(String.init) ?? branch.name
+                Button("Delete \(branch.name) on \(remote)", role: .destructive) {
+                    Task { await viewModel.performDeleteRemoteBranch(remote: remote, branch: remoteBranch) }
+                }
             }
         }
 
@@ -602,6 +620,150 @@ struct SidebarView: View {
         }
     }
 
+    // MARK: - Tag Context Menu
+
+    @ViewBuilder
+    private func tagContextMenu(_ tag: String) -> some View {
+        let cur = viewModel.currentBranch
+
+        Button("Push \(tag) to origin") {
+            Task { await viewModel.performPushTag(name: tag, remote: "origin") }
+        }
+
+        Divider()
+
+        Button("Rebase \(cur) onto \(tag)") {
+            Task { await viewModel.performRebase(onto: tag) }
+        }
+        Button("Checkout \(tag)") {
+            Task { await viewModel.performCheckoutBranch(tag) }
+        }
+
+        Divider()
+
+        Button("Create branch here") {
+            branchFromTagName = tag
+            newBranchFromTagName = ""
+            showCreateBranchFromTag = true
+        }
+        Menu("Reset \(cur) to this") {
+            Button("Soft") {
+                Task {
+                    if let hash = try? await viewModel.getTagCommitHash(tag) {
+                        await viewModel.performReset(hash, mode: .soft)
+                    }
+                }
+            }
+            Button("Mixed") {
+                Task {
+                    if let hash = try? await viewModel.getTagCommitHash(tag) {
+                        await viewModel.performReset(hash, mode: .mixed)
+                    }
+                }
+            }
+            Button("Hard") {
+                Task {
+                    if let hash = try? await viewModel.getTagCommitHash(tag) {
+                        await viewModel.performReset(hash, mode: .hard)
+                    }
+                }
+            }
+        }
+        Button("Revert \(tag)") {
+            Task {
+                if let hash = try? await viewModel.getTagCommitHash(tag) {
+                    await viewModel.performRevert(hash)
+                }
+            }
+        }
+
+        Divider()
+
+        Button("Delete \(tag) locally", role: .destructive) {
+            Task { await viewModel.performDeleteTag(tag) }
+        }
+        if viewModel.knownRemoteTags.contains(tag) {
+            Button("Delete \(tag) remotely", role: .destructive) {
+                Task { await viewModel.performDeleteRemoteTag(name: tag, remote: "origin") }
+            }
+        }
+
+        Divider()
+
+        Button("Copy tag name") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(tag, forType: .string)
+        }
+
+        Divider()
+
+        Button("Annotate \(tag)...") {
+            annotatingTagName = tag
+            annotateTagMessage = ""
+            showAnnotateTag = true
+            Task {
+                if let existing = await viewModel.getTagMessage(tag) {
+                    annotateTagMessage = existing
+                }
+            }
+        }
+    }
+
+    // MARK: - Tag Sheets
+
+    private var annotateTagSheet: some View {
+        VStack(spacing: 12) {
+            Text("Annotate Tag \"\(annotatingTagName)\"")
+                .font(.headline)
+            TextField("Annotation message", text: $annotateTagMessage, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+                .lineLimit(4, reservesSpace: true)
+            HStack {
+                Button("Cancel") { showAnnotateTag = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Annotate") {
+                    let name = annotatingTagName
+                    let msg = annotateTagMessage.trimmingCharacters(in: .whitespaces)
+                    showAnnotateTag = false
+                    guard !msg.isEmpty else { return }
+                    Task { await viewModel.performAnnotateTag(name: name, message: msg) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(annotateTagMessage.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private var createBranchFromTagSheet: some View {
+        VStack(spacing: 12) {
+            Text("Create Branch from \"\(branchFromTagName)\"")
+                .font(.headline)
+            TextField("Branch name", text: $newBranchFromTagName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack {
+                Button("Cancel") { showCreateBranchFromTag = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    let name = newBranchFromTagName.trimmingCharacters(in: .whitespaces)
+                    let tagName = branchFromTagName
+                    showCreateBranchFromTag = false
+                    guard !name.isEmpty else { return }
+                    Task {
+                        if let hash = try? await viewModel.getTagCommitHash(tagName) {
+                            await viewModel.performCreateBranchAt(name: name, commitHash: hash)
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(newBranchFromTagName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
     // MARK: - Tags
 
     private var tagsSection: some View {
@@ -619,6 +781,10 @@ struct SidebarView: View {
                     }
                     .onTapGesture {
                         viewModel.scrollToCommitForTag(tag)
+                    }
+                    .contextMenu {
+                        tagContextMenu(tag)
+                            .font(.system(size: 11, weight: .medium))
                     }
             }
         }

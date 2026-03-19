@@ -13,6 +13,12 @@ struct DetailPanelView: View {
     @State private var discardConfirmPaths: [String] = []
     @State private var showDiscardConfirm = false
 
+    // MARK: - Rubber-band selection (unstaged area)
+    @State private var isRubberBanding = false
+    @State private var rubberBandOrigin: CGPoint = .zero
+    @State private var rubberBandCurrent: CGPoint = .zero
+    @State private var unstagedRowFrames: [String: CGRect] = [:]
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.isInConflict, let cType = viewModel.conflictType {
@@ -301,12 +307,10 @@ struct DetailPanelView: View {
 
                 Spacer()
 
-                if let parentHash = commit.parentHashes.first {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text("parent: \(String(parentHash.prefix(6)))")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
+                if !commit.parentHashes.isEmpty {
+                    Text("parent: \(commit.parentHashes.map { String($0.prefix(7)) }.joined(separator: ", "))")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -504,10 +508,10 @@ struct DetailPanelView: View {
             viewModel.openInEditor(path: file.path)
         }
 
-        if file.path.isMarkdownFile {
-            Button("Preview Markdown") {
+        if file.path.isPreviewableFile {
+            Button("Preview") {
                 let hash = viewModel.selectedCommit.flatMap { $0.isUncommitted ? nil : $0.hash }
-                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: hash) }
+                Task { await viewModel.openFilePreview(path: file.path, commitHash: hash) }
             }
         }
     }
@@ -583,6 +587,7 @@ struct DetailPanelView: View {
                 Divider().padding(.vertical, 2)
 
                 // Unstaged section — entire area is a drop target
+                // Supports rubber-band (marquee) multi-selection via long-press + drag
                 VStack(spacing: 0) {
                     stagingSectionHeader(
                         title: "未暂存",
@@ -613,7 +618,16 @@ struct DetailPanelView: View {
                             isStaged: false,
                             onToggle: { Task { await viewModel.stageFile(file.path) } }
                         )
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: UnstagedRowFrameKey.self,
+                                    value: [file.path: geo.frame(in: .named("unstagedArea"))]
+                                )
+                            }
+                        )
                         .onTapGesture {
+                            guard !isRubberBanding else { return }
                             let flags = NSEvent.modifierFlags
                             viewModel.toggleFileSelection(
                                 file.path,
@@ -635,6 +649,47 @@ struct DetailPanelView: View {
                             .frame(maxWidth: .infinity, minHeight: 28)
                     }
                 }
+                .coordinateSpace(name: "unstagedArea")
+                .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
+                    unstagedRowFrames = frames
+                }
+                .overlay(alignment: .topLeading) {
+                    if isRubberBanding {
+                        rubberBandOverlay
+                    }
+                }
+                // highPriorityGesture: 父视图手势优先于子行的 .draggable()。
+                // 长按 0.25s 成功后才进入拖动阶段；若在 0.25s 内移动则长按失败，
+                // 手势降级，子行的 .draggable() 正常触发（单文件拖拽不受影响）。
+                .highPriorityGesture(
+                    LongPressGesture(minimumDuration: 0.25)
+                        .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("unstagedArea")))
+                        .onChanged { value in
+                            switch value {
+                            case .first(true):
+                                // DragGesture(minimumDistance:0) 때문에 이 분기는
+                                // 실제로 거의 호출되지 않는다 — 초기화는 아래에서 처리.
+                                viewModel.selectedFilePaths = []
+                                viewModel.selectedDiffFile = nil
+                            case .second(true, let drag?):
+                                if !isRubberBanding {
+                                    // 러버밴드 시작: 이전 선택을 모두 초기화한다.
+                                    // (.first(true) 가 skip 되는 경우를 커버)
+                                    isRubberBanding = true
+                                    rubberBandOrigin = drag.startLocation
+                                    viewModel.selectedFilePaths = []
+                                    viewModel.selectedDiffFile = nil
+                                }
+                                rubberBandCurrent = drag.location
+                                updateRubberBandSelection()
+                            default:
+                                break
+                            }
+                        }
+                        .onEnded { _ in
+                            isRubberBanding = false
+                        }
+                )
                 .onDrop(of: [.text], isTargeted: nil) { providers in
                     handleDrop(providers: providers, toStaged: false)
                 }
@@ -793,9 +848,9 @@ struct DetailPanelView: View {
             viewModel.openInEditor(path: file.path)
         }
 
-        if file.path.isMarkdownFile {
-            Button("Preview Markdown") {
-                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: nil) }
+        if file.path.isPreviewableFile {
+            Button("Preview") {
+                Task { await viewModel.openFilePreview(path: file.path, commitHash: nil) }
             }
         }
 
@@ -857,9 +912,9 @@ struct DetailPanelView: View {
             viewModel.openInEditor(path: file.path)
         }
 
-        if file.path.isMarkdownFile {
-            Button("Preview Markdown") {
-                Task { await viewModel.openMarkdownPreview(path: file.path, commitHash: nil) }
+        if file.path.isPreviewableFile {
+            Button("Preview") {
+                Task { await viewModel.openFilePreview(path: file.path, commitHash: nil) }
             }
         }
 
@@ -1035,12 +1090,70 @@ struct DetailPanelView: View {
         return true
     }
 
+    // MARK: - Rubber-band selection helpers
+
+    /// Overlay rectangle drawn while rubber-band selection is active.
+    @ViewBuilder
+    private var rubberBandOverlay: some View {
+        let x = min(rubberBandOrigin.x, rubberBandCurrent.x)
+        let y = min(rubberBandOrigin.y, rubberBandCurrent.y)
+        let w = max(1, abs(rubberBandCurrent.x - rubberBandOrigin.x))
+        let h = max(1, abs(rubberBandCurrent.y - rubberBandOrigin.y))
+        Rectangle()
+            .stroke(Color.accentColor.opacity(0.75), lineWidth: 1)
+            .background(Color.accentColor.opacity(0.08))
+            .frame(width: w, height: h)
+            .offset(x: x, y: y)
+            .allowsHitTesting(false)
+    }
+
+    /// Recalculates which unstaged rows intersect the current rubber-band rect
+    /// and updates `viewModel.selectedFilePaths` accordingly.
+    private func updateRubberBandSelection() {
+        let selRect = CGRect(
+            x: min(rubberBandOrigin.x, rubberBandCurrent.x),
+            y: min(rubberBandOrigin.y, rubberBandCurrent.y),
+            width: abs(rubberBandCurrent.x - rubberBandOrigin.x),
+            height: abs(rubberBandCurrent.y - rubberBandOrigin.y)
+        )
+        var newSelection: Set<String> = []
+        for file in unstagedFiles {
+            if let frame = unstagedRowFrames[file.path], selRect.intersects(frame) {
+                newSelection.insert(file.path)
+            }
+        }
+        viewModel.selectedFilePaths = newSelection
+    }
+
     // MARK: - Diff Content
 
     private var diffContentView: some View {
         Group {
             if viewModel.isFileTooLarge {
                 fileTooLargeView
+            } else if viewModel.selectedDiffFile?.isPureRename == true,
+                      let oldPath = viewModel.selectedDiffFile?.oldPath,
+                      let newPath = viewModel.selectedDiffFile?.path {
+                VStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text("File renamed — no content changes")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(oldPath)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                        Text(newPath)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let diff = viewModel.parsedDiff, !diff.hunks.isEmpty {
                 let isUncommitted = viewModel.selectedCommit?.isUncommitted == true
                 DiffHunkView(
@@ -1555,6 +1668,15 @@ struct DetailPanelView: View {
     }
 }
 
+// MARK: - Preference Key for rubber-band row frames
+
+private struct UnstagedRowFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 // MARK: - Sub-components
 
 struct DiffFileRow: View {
@@ -1563,13 +1685,52 @@ struct DiffFileRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "doc")
+            Image(systemName: file.isRenamed ? "arrow.triangle.2.circlepath" : "doc")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(file.isRenamed ? Color.accentColor.opacity(0.8) : .secondary)
 
-            Text(file.path)
-                .font(.system(size: 10))
-                .lineLimit(1)
+            if file.isRenamed, let oldPath = file.oldPath {
+                let oldName = (oldPath as NSString).lastPathComponent
+                let newName = (file.path as NSString).lastPathComponent
+                let oldDir = (oldPath as NSString).deletingLastPathComponent
+                let newDir = (file.path as NSString).deletingLastPathComponent
+                VStack(alignment: .leading, spacing: 1) {
+                    if oldDir == newDir {
+                        // Same directory — just show filenames inline
+                        HStack(spacing: 3) {
+                            Text(oldName)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .strikethrough(true, color: .secondary)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                            Text(newName)
+                                .font(.system(size: 10))
+                        }
+                        .lineLimit(1)
+                        if !newDir.isEmpty {
+                            Text(newDir)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                    } else {
+                        // Different directories — show full paths
+                        Text(file.path)
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                        Text("← \(oldPath)")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+            } else {
+                Text(file.path)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+            }
 
             Spacer()
 
@@ -1583,6 +1744,11 @@ struct DiffFileRow: View {
                     Text("-\(file.deletions)")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.red)
+                }
+                if file.isPureRename {
+                    Text("renamed")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -1764,6 +1930,7 @@ struct DiffHunkView: View {
 
             SelectableDiffView(
                 hunks: diff.hunks,
+                filePath: viewModel.selectedDiffFile?.path,
                 isUncommitted: isUncommitted,
                 selectedLines: $selectedLines
             )
@@ -1878,12 +2045,47 @@ private final class DiffTextViewNS: NSTextView {
             break
         }
     }
+
+    /// Copy selected text without gutter (line numbers + ±) to clipboard.
+    override func copy(_ sender: Any?) {
+        let ranges = selectedRanges.compactMap { $0 as? NSValue }.map { $0.rangeValue }
+        guard !ranges.isEmpty, let storage = textStorage else {
+            super.copy(sender)
+            return
+        }
+        let combined = ranges
+            .map { storage.attributedSubstring(from: $0).string }
+            .joined(separator: "\n")
+        let clean = Self.stripDiffGutter(combined)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(clean, forType: .string)
+    }
+
+    /// Strip the 12-char gutter prefix ("NNNN NNNN X ") from each diff line.
+    /// Non-diff lines (hunk headers, file path) are returned unchanged.
+    private static func stripDiffGutter(_ text: String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            // Gutter layout: [4 digit/space] [space] [4 digit/space] [space] [+/-/space] [space]
+            guard line.count >= 12 else { return line }
+            let chars = Array(line)
+            let isNumOrSpace: (Character) -> Bool = { $0.isNumber || $0 == " " }
+            guard (0..<4).allSatisfy({ isNumOrSpace(chars[$0]) }),
+                  chars[4] == " ",
+                  (5..<9).allSatisfy({ isNumOrSpace(chars[$0]) }),
+                  chars[9] == " ",
+                  chars[10] == "+" || chars[10] == "-" || chars[10] == " ",
+                  chars[11] == " "
+            else { return line }
+            return String(line.dropFirst(12))
+        }.joined(separator: "\n")
+    }
 }
 
 // MARK: - NSViewRepresentable wrapper
 
 private struct SelectableDiffView: NSViewRepresentable {
     let hunks: [ParsedHunk]
+    var filePath: String? = nil
     let isUncommitted: Bool
     @Binding var selectedLines: [Int: Set<Int>]
 
@@ -1955,12 +2157,33 @@ private struct SelectableDiffView: NSViewRepresentable {
         if tv.textStorage?.length == prevLen, !prevSel.isEmpty {
             tv.setSelectedRanges(prevSel, affinity: .downstream, stillSelecting: false)
         }
+
+        // Force synchronous layout after updating the attributed string.
+        // Same root cause as SourcePreviewView: NSLayoutManager is lazy, so when
+        // the text container width is updated later (widthTracksTextView fires
+        // once SwiftUI assigns the real frame), textContainerChangedGeometry has
+        // no previous glyph positions to diff against and produces an empty dirty
+        // set — causing parts of the view to stay invisible until rubber-band
+        // selected.  numberOfGlyphs triggers a full layout pass now, giving the
+        // geometry-change path a valid baseline.
+        _ = tv.layoutManager?.numberOfGlyphs
     }
 
     private func buildContent(font: NSFont) -> (NSAttributedString, [DiffTextViewNS.LineInfo]) {
         let result = NSMutableAttributedString()
         var lineInfos: [DiffTextViewNS.LineInfo] = []
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+
+        if let path = filePath {
+            let pathBg = NSColor(white: isDark ? 0.10 : 0.94, alpha: 1.0)
+            let pathFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: pathFont,
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .backgroundColor: pathBg,
+            ]
+            result.append(NSAttributedString(string: "  \(path)\n\n", attributes: attrs))
+        }
 
         for (hunkIdx, hunk) in hunks.enumerated() {
             // Hunk header (full-width bg via backgroundColor attribute is fine here)

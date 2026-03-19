@@ -726,7 +726,13 @@ actor GitService {
         defer { if let parentTree { git_tree_free(parentTree) } }
 
         var diff: OpaquePointer?
-        guard git_diff_tree_to_tree(&diff, repo, parentTree, tree, nil) == 0 else { return nil }
+        guard git_diff_tree_to_tree(&diff, repo, parentTree, tree, nil) == 0, let diff else { return nil }
+
+        var findOpts = git_diff_find_options()
+        git_diff_find_options_init(&findOpts, UInt32(GIT_DIFF_FIND_OPTIONS_VERSION))
+        findOpts.flags = GIT_DIFF_FIND_RENAMES.rawValue
+        git_diff_find_similar(diff, &findOpts)
+
         return diff
     }
 
@@ -810,8 +816,15 @@ actor GitService {
             }
 
             guard let delta = git_patch_get_delta(patch) else { continue }
-            let path = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
-            result.append(DiffFile(additions: adds, deletions: dels, path: path))
+            let newPath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
+            let oldPath: String?
+            if delta.pointee.status == GIT_DELTA_RENAMED {
+                let op = delta.pointee.old_file.path.map(String.init(cString:)) ?? ""
+                oldPath = op != newPath ? op : nil
+            } else {
+                oldPath = nil
+            }
+            result.append(DiffFile(additions: adds, deletions: dels, path: newPath, oldPath: oldPath))
         }
         return result
     }
@@ -841,6 +854,10 @@ actor GitService {
         var stagedDiff: OpaquePointer?
         if git_diff_tree_to_index(&stagedDiff, repo, headTree, index, nil) == 0, let stagedDiff {
             defer { git_diff_free(stagedDiff) }
+            var findOpts = git_diff_find_options()
+            git_diff_find_options_init(&findOpts, UInt32(GIT_DIFF_FIND_OPTIONS_VERSION))
+            findOpts.flags = GIT_DIFF_FIND_RENAMES.rawValue
+            git_diff_find_similar(stagedDiff, &findOpts)
             result.append(contentsOf: diffFilesFromDiff(stagedDiff))
         }
 
@@ -879,8 +896,15 @@ actor GitService {
                 }
             }
             guard let delta = git_patch_get_delta(patch) else { continue }
-            let path = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
-            result.append(DiffFile(additions: adds, deletions: dels, path: path))
+            let newPath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
+            let oldPath: String?
+            if delta.pointee.status == GIT_DELTA_RENAMED {
+                let op = delta.pointee.old_file.path.map(String.init(cString:)) ?? ""
+                oldPath = op != newPath ? op : nil
+            } else {
+                oldPath = nil
+            }
+            result.append(DiffFile(additions: adds, deletions: dels, path: newPath, oldPath: oldPath))
         }
         return result
     }
@@ -1564,6 +1588,66 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Tag deletion failed", code: rc))
         }
+    }
+
+    /// Returns the annotation message for an annotated tag, or nil for lightweight tags.
+    func tagMessage(name: String) throws -> String? {
+        guard let repo else { throw GitError.repoNotOpen }
+        var ref: OpaquePointer?
+        let refName = "refs/tags/\(name)"
+        guard git_reference_lookup(&ref, repo, refName) == 0, let ref else {
+            throw GitError.operationFailed("Tag '\(name)' not found")
+        }
+        defer { git_reference_free(ref) }
+
+        guard let targetOid = git_reference_target(ref) else { return nil }
+        var tagObj: OpaquePointer?
+        // Only annotated tags are GIT_OBJECT_TAG; lightweight tags point directly to commits
+        guard git_object_lookup(&tagObj, repo, targetOid, GIT_OBJECT_TAG) == 0, let tagObj else {
+            return nil
+        }
+        defer { git_object_free(tagObj) }
+
+        guard let msgPtr = git_tag_message(tagObj) else { return nil }
+        let msg = String(cString: msgPtr).trimmingCharacters(in: .newlines)
+        return msg.isEmpty ? nil : msg
+    }
+
+    func tagCommitHash(name: String) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+        var ref: OpaquePointer?
+        let refName = "refs/tags/\(name)"
+        guard git_reference_lookup(&ref, repo, refName) == 0, let ref else {
+            throw GitError.operationFailed("Tag '\(name)' not found")
+        }
+        defer { git_reference_free(ref) }
+
+        var peeled: OpaquePointer?
+        guard git_reference_peel(&peeled, ref, GIT_OBJECT_COMMIT) == 0, let peeled else {
+            throw GitError.operationFailed("Cannot peel tag '\(name)' to commit")
+        }
+        defer { git_object_free(peeled) }
+
+        guard let oidPtr = git_object_id(peeled) else {
+            throw GitError.operationFailed("Cannot get OID for tag '\(name)'")
+        }
+        var sha = [CChar](repeating: 0, count: 41)
+        var oid = oidPtr.pointee
+        git_oid_fmt(&sha, &oid)
+        sha[40] = 0
+        return String(cString: sha)
+    }
+
+    func pushTag(name: String, remote: String) async throws {
+        try await runGit(["push", remote, "refs/tags/\(name)"])
+    }
+
+    func deleteRemoteTag(name: String, remote: String) async throws {
+        try await runGit(["push", remote, "--delete", "refs/tags/\(name)"])
+    }
+
+    func annotateTag(name: String, message: String) async throws {
+        try await runGit(["tag", "-a", "-f", "-m", message, name])
     }
 
     func setUpstream(remote: String, branch: String) throws {

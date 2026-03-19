@@ -1,4 +1,5 @@
 import SwiftUI
+import MarkdownUI
 
 struct TabBarView: View {
     @Environment(AppModel.self) private var appModel
@@ -39,6 +40,82 @@ struct TabBarView: View {
         }
     }
 }
+
+// MARK: - Features sheet
+
+struct FeaturesView: View {
+    let content: String
+    @Binding var isPresented: Bool
+    @AppStorage("GitN.markdownPreviewScheme") private var scheme: PreviewScheme = .light
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Toolbar
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                Text("FEATURES.md")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+                Menu {
+                    ForEach(PreviewScheme.allCases, id: \.rawValue) { s in
+                        Button {
+                            scheme = s
+                        } label: {
+                            HStack {
+                                Image(systemName: scheme == s ? "checkmark.circle.fill" : "circle")
+                                Text(s.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(scheme.swatch)
+                            .frame(width: 10, height: 10)
+                            .overlay(Circle().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 0.5))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .medium))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .help("Preview color scheme")
+
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(.windowBackgroundColor))
+
+            Divider()
+
+            ScrollView {
+                Markdown(content)
+                    .markdownTheme(.gitHub)
+                    .textSelection(.enabled)
+                    .padding(24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(scheme.background)
+            .preferredColorScheme(scheme.colorScheme)
+        }
+        .frame(minWidth: 680, minHeight: 500)
+    }
+}
+
+// MARK: -
 
 struct TabItemView: View {
     let tab: RepoTab

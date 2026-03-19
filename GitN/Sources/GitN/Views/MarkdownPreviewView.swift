@@ -102,38 +102,42 @@ struct MarkdownEditorView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
 
+        let textView = LineNumberTextView(frame: .zero)
         textView.delegate = context.coordinator
         textView.isRichText = false
+        textView.isEditable = true
+        textView.isSelectable = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.backgroundColor = EditorColors.background
+        textView.drawsBackground = true
         textView.selectedTextAttributes = [.backgroundColor: EditorColors.selection]
         textView.insertionPointColor = EditorColors.cursor
-        textView.textContainerInset = NSSize(width: 20, height: 20)
         textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
 
+        scrollView.documentView = textView
         scrollView.backgroundColor = EditorColors.background
         scrollView.drawsBackground = true
-
-        textView.string = text
-        if let storage = textView.textStorage { MDHighlighter.highlight(storage) }
 
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? NSTextView,
-              !context.coordinator.isUpdating,
-              textView.string != text else { return }
+        guard let textView = nsView.documentView as? LineNumberTextView,
+              !context.coordinator.isUpdating else { return }
+        guard textView.string != text else { return }
         textView.string = text
         if let storage = textView.textStorage { MDHighlighter.highlight(storage) }
+        _ = textView.layoutManager?.numberOfGlyphs
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
