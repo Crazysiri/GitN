@@ -60,6 +60,29 @@ final class AppModel {
         _addTab(path: path, name: name)
     }
 
+    func cloneRepository(urlString: String, destinationPath: String, name: String) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["clone", urlString, destinationPath]
+
+            let pipe = Pipe()
+            process.standardError = pipe
+
+            try process.run()
+            process.waitUntilExit()
+
+            if process.terminationStatus != 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let errMsg = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Clone failed"
+                throw GitError.operationFailed(errMsg)
+            }
+        }.value
+
+        _addTab(path: destinationPath, name: name)
+    }
+
     private func _addTab(path: String, name: String) {
         // 检查是否已存在
         if let existing = tabs.first(where: { $0.path == path }) {
@@ -101,6 +124,11 @@ final class AppModel {
     }
 
     // MARK: - Recent Repos Management
+
+    func removeFromRecent(path: String) {
+        recentRepos.removeAll { $0.path == path }
+        persistRecentRepos()
+    }
 
     private func addToRecent(path: String, name: String) {
         let repo = SavedRepo(path: path, name: name)

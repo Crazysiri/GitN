@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NewTabView: View {
     @Environment(AppModel.self) private var appModel
+    @State private var showClone = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -12,7 +13,7 @@ struct NewTabView: View {
                     .padding(.top, 40)
                     .padding(.leading, 40)
 
-                // Open, Clone, Create 按钮（只保留 Open）
+                // Open, Clone 按钮
                 HStack(spacing: 16) {
                     Button(action: {
                         appModel.openRepository()
@@ -25,8 +26,21 @@ struct NewTabView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
+
+                    Button(action: { showClone = true }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.down.to.line")
+                            Text("Clone")
+                        }
+                        .frame(width: 120, height: 36)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                 }
                 .padding(.leading, 40)
+                .sheet(isPresented: $showClone) {
+                    CloneSheetView(isPresented: $showClone)
+                }
 
                 // Recent 标题
                 Text("Recent")
@@ -43,28 +57,12 @@ struct NewTabView: View {
                         .padding(.leading, 40)
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
                             ForEach(appModel.recentRepos, id: \.path) { repo in
-                                Button(action: {
-                                    appModel.openRepository(path: repo.path, name: repo.name)
-                                }) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(repo.name)
-                                            .foregroundStyle(.blue)
-                                            .font(.system(size: 14, weight: .medium))
-                                        Text(repo.path)
-                                            .foregroundStyle(.secondary)
-                                            .font(.system(size: 12))
-                                    }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                }
-                                .buttonStyle(.plain)
-                                .padding(.horizontal, 40)
+                                RecentRepoRow(repo: repo)
                             }
                         }
-                        .padding(.top, 8)
+                        .padding(.top, 4)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -99,5 +97,242 @@ struct NewTabView: View {
         } message: { pending in
             Text("\"\(pending.name)\" is not a Git repository. Would you like to initialize it with `git init`?")
         }
+    }
+}
+
+// MARK: - Recent Repo Row
+
+private struct RecentRepoRow: View {
+    @Environment(AppModel.self) private var appModel
+    let repo: SavedRepo
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: {
+                appModel.openRepository(path: repo.path, name: repo.name)
+            }) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(repo.name)
+                        .foregroundStyle(.blue)
+                        .font(.system(size: 14, weight: .medium))
+                    Text(repo.path)
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                appModel.removeFromRecent(path: repo.path)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1 : 0)
+            .padding(.trailing, 48)
+        }
+        .background(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.12) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 40)
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Clone Sheet
+
+struct CloneSheetView: View {
+    @Environment(AppModel.self) private var appModel
+    @Binding var isPresented: Bool
+
+    @State private var urlString = ""
+    @State private var destinationDir = ""
+    @State private var folderName = ""
+    @State private var isCloning = false
+    @State private var errorMessage: String?
+
+    private var destinationPath: String {
+        guard !destinationDir.isEmpty, !folderName.isEmpty else { return "" }
+        return (destinationDir as NSString).appendingPathComponent(folderName)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title bar
+            HStack {
+                Image(systemName: "arrow.down.to.line.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                Text("Clone Repository")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color(.windowBackgroundColor))
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 16) {
+                // URL field
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Repository URL")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    TextField("https://github.com/user/repo.git", text: $urlString)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: urlString) { _, newURL in
+                            let name = repoName(from: newURL)
+                            if !name.isEmpty {
+                                folderName = name
+                            }
+                        }
+                }
+
+                // Destination directory
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Clone into")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text(destinationDir.isEmpty ? "Choose a directory…" : destinationDir)
+                            .font(.system(size: 13))
+                            .foregroundStyle(destinationDir.isEmpty ? .tertiary : .primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color(.textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.3), lineWidth: 0.5))
+
+                        Button("Choose…") {
+                            chooseDirectory()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                // Folder name
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Folder name")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    TextField("repo-name", text: $folderName)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // Full path preview
+                if !destinationPath.isEmpty {
+                    Text(destinationPath)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+
+                // Error
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(20)
+
+            Divider()
+
+            // Buttons
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.escape)
+                .disabled(isCloning)
+
+                Button {
+                    startClone()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isCloning {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(isCloning ? "Cloning…" : "Clone")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canClone || isCloning)
+                .keyboardShortcut(.return)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(Color(.windowBackgroundColor))
+        }
+        .frame(width: 480)
+    }
+
+    private var canClone: Bool {
+        !urlString.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !destinationDir.isEmpty &&
+        !folderName.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a directory to clone into"
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            destinationDir = url.path
+        }
+    }
+
+    private func startClone() {
+        errorMessage = nil
+        isCloning = true
+        let url = urlString.trimmingCharacters(in: .whitespaces)
+        let dest = destinationPath
+        let name = folderName.trimmingCharacters(in: .whitespaces)
+
+        Task {
+            do {
+                try await appModel.cloneRepository(urlString: url, destinationPath: dest, name: name)
+                isPresented = false
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isCloning = false
+        }
+    }
+
+    private func repoName(from urlString: String) -> String {
+        var s = urlString.trimmingCharacters(in: .whitespaces)
+        if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
+        if let i = s.lastIndex(of: "/") {
+            s = String(s[s.index(after: i)...])
+        } else if let i = s.lastIndex(of: ":") {
+            s = String(s[s.index(after: i)...])
+        }
+        return s
     }
 }

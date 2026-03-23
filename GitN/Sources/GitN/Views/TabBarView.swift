@@ -1,8 +1,11 @@
 import SwiftUI
+import AppKit
 import MarkdownUI
 
 struct TabBarView: View {
     @Environment(AppModel.self) private var appModel
+    @State private var windowWidth: CGFloat = 1100
+    @State private var hostingWindow: NSWindow? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -22,7 +25,7 @@ struct TabBarView: View {
                 }
                 .padding(.horizontal, 4)
             }
-            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: windowWidth * 0.65)
 
             Divider()
                 .frame(height: 14)
@@ -38,6 +41,34 @@ struct TabBarView: View {
             .buttonStyle(.plain)
             .padding(.trailing, 4)
         }
+        .background(
+            HostingWindowAccessor { window in
+                guard hostingWindow == nil, let window else { return }
+                hostingWindow = window
+                windowWidth = window.frame.width
+            }
+        )
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
+            guard let window = notification.object as? NSWindow,
+                  window === hostingWindow else { return }
+            windowWidth = window.frame.width
+            print("[TabBarView] didResize windowWidth=\(windowWidth)")
+        }
+    }
+}
+
+/// 通过 NSViewRepresentable 拿到当前 SwiftUI 视图的宿主 NSWindow
+private struct HostingWindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { onWindow(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onWindow(nsView.window) }
     }
 }
 
