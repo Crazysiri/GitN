@@ -15,6 +15,10 @@ echo "=========================================="
 echo "  Building ${APP_NAME}.app ..."
 echo "=========================================="
 
+echo ""
+echo "[0/3] Ensuring libgit2 source..."
+"${SCRIPT_DIR}/Scripts/ensure_libgit2.sh"
+
 # ──────────────────────────────────────────────
 # Step 1: Generate app icon
 # ──────────────────────────────────────────────

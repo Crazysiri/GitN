@@ -4,10 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-LIBGIT2_SRC="libgit2"
+LIBGIT2_SRC="Sources/Clibgit2/libgit2"
 DIST_DIR="libgit2-dist"
 XCFRAMEWORK="Clibgit2.xcframework"
 STATIC_LIB="${DIST_DIR}/lib/libgit2.a"
+
+"${SCRIPT_DIR}/Scripts/ensure_libgit2.sh"
 
 # ──────────────────────────────────────────────
 # Check: skip if already up to date

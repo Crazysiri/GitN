@@ -2,6 +2,12 @@ import SwiftUI
 import Combine
 import Clibgit2
 
+private func withLibgit2<T>(_ body: () -> T) -> T {
+    git_libgit2_init()
+    defer { git_libgit2_shutdown() }
+    return body()
+}
+
 @Observable
 final class AppModel {
     var tabs: [RepoTab] = []
@@ -40,24 +46,26 @@ final class AppModel {
     }
 
     func openRepository(path: String, name: String) {
-        // 检查是否是 git 仓库
-        var repo: OpaquePointer?
-        let isGitRepo = git_repository_open_ext(&repo, path, GIT_REPOSITORY_OPEN_NO_SEARCH.rawValue, nil) == 0
-        if let repo { git_repository_free(repo) }
-
-        if !isGitRepo {
-            pendingGitInit = (path: path, name: name)
+        guard let resolved = resolveRepositorySelection(path: path, fallbackName: name) else {
+            pendingGitInit = (path: normalizedPath(path), name: name)
             return
         }
 
-        _addTab(path: path, name: name)
+        _addTab(path: resolved.path, name: resolved.name)
     }
 
     func initAndOpenRepository(path: String, name: String) {
-        var repo: OpaquePointer?
-        guard git_repository_init(&repo, path, 0) == 0 else { return }
-        if let repo { git_repository_free(repo) }
-        _addTab(path: path, name: name)
+        let normalized = normalizedPath(path)
+        let didInit = withLibgit2 {
+            var repo: OpaquePointer?
+            defer {
+                if let repo { git_repository_free(repo) }
+            }
+            return git_repository_init(&repo, normalized, 0) == 0
+        }
+
+        guard didInit else { return }
+        _addTab(path: normalized, name: name)
     }
 
     func cloneRepository(urlString: String, destinationPath: String, name: String) async throws {
@@ -194,5 +202,41 @@ final class AppModel {
             tabs.append(tab)
         }
         selectedTabID = tabs.first?.id
+    }
+
+    private func resolveRepositorySelection(path: String, fallbackName: String) -> (path: String, name: String)? {
+        let normalized = normalizedPath(path)
+
+        return withLibgit2 {
+            var repo: OpaquePointer?
+            defer {
+                if let repo { git_repository_free(repo) }
+            }
+
+            guard git_repository_open_ext(&repo, normalized, 0, nil) == 0, let repo else {
+                return nil
+            }
+
+            let repoPath = resolvedRepositoryPath(from: repo, fallback: normalized)
+            let repoName = URL(fileURLWithPath: repoPath).lastPathComponent
+            return (repoPath, repoName.isEmpty ? fallbackName : repoName)
+        }
+    }
+
+    private func resolvedRepositoryPath(from repo: OpaquePointer, fallback: String) -> String {
+        if git_repository_is_bare(repo) == 0, let workdir = git_repository_workdir(repo) {
+            return normalizedPath(String(cString: workdir))
+        }
+
+        if let gitDir = git_repository_path(repo) {
+            let url = URL(fileURLWithPath: String(cString: gitDir)).deletingLastPathComponent()
+            return normalizedPath(url.path)
+        }
+
+        return fallback
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
     }
 }

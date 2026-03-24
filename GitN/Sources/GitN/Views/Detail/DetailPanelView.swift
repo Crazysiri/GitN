@@ -19,6 +19,10 @@ struct DetailPanelView: View {
     @State private var rubberBandCurrent: CGPoint = .zero
     @State private var unstagedRowFrames: [String: CGRect] = [:]
 
+    private var useCompatibleUnstagedGestureHandling: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion <= 14
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.isInConflict, let cType = viewModel.conflictType {
@@ -588,7 +592,7 @@ struct DetailPanelView: View {
 
                 // Unstaged section — entire area is a drop target
                 // Supports rubber-band (marquee) multi-selection via long-press + drag
-                VStack(spacing: 0) {
+                applyUnstagedSelectionGesture(to: VStack(spacing: 0) {
                     stagingSectionHeader(
                         title: "未暂存",
                         count: unstagedFiles.count,
@@ -658,37 +662,6 @@ struct DetailPanelView: View {
                         rubberBandOverlay
                     }
                 }
-                // highPriorityGesture: 父视图手势优先于子行的 .draggable()。
-                // 长按 0.25s 成功后才进入拖动阶段；若在 0.25s 内移动则长按失败，
-                // 手势降级，子行的 .draggable() 正常触发（单文件拖拽不受影响）。
-                .highPriorityGesture(
-                    LongPressGesture(minimumDuration: 0.25)
-                        .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("unstagedArea")))
-                        .onChanged { value in
-                            switch value {
-                            case .first(true):
-                                // DragGesture(minimumDistance:0) 때문에 이 분기는
-                                // 실제로 거의 호출되지 않는다 — 초기화는 아래에서 처리.
-                                viewModel.selectedFilePaths = []
-                                viewModel.selectedDiffFile = nil
-                            case .second(true, let drag?):
-                                if !isRubberBanding {
-                                    // 러버밴드 시작: 이전 선택을 모두 초기화한다.
-                                    // (.first(true) 가 skip 되는 경우를 커버)
-                                    isRubberBanding = true
-                                    rubberBandOrigin = drag.startLocation
-                                    viewModel.selectedFilePaths = []
-                                    viewModel.selectedDiffFile = nil
-                                }
-                                rubberBandCurrent = drag.location
-                                updateRubberBandSelection()
-                            default:
-                                break
-                            }
-                        }
-                        .onEnded { _ in
-                            isRubberBanding = false
-                        }
                 )
                 .onDrop(of: [.text], isTargeted: nil) { providers in
                     handleDrop(providers: providers, toStaged: false)
@@ -696,6 +669,42 @@ struct DetailPanelView: View {
             }
         }
         .frame(maxHeight: 240)
+    }
+
+    @ViewBuilder
+    private func applyUnstagedSelectionGesture<Content: View>(to content: Content) -> some View {
+        if useCompatibleUnstagedGestureHandling {
+            // macOS 14.x may let the parent high-priority gesture swallow row taps.
+            content.simultaneousGesture(unstagedRubberBandGesture)
+        } else {
+            content.highPriorityGesture(unstagedRubberBandGesture)
+        }
+    }
+
+    private var unstagedRubberBandGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.25)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("unstagedArea")))
+            .onChanged { value in
+                switch value {
+                case .first(true):
+                    viewModel.selectedFilePaths = []
+                    viewModel.selectedDiffFile = nil
+                case .second(true, let drag?):
+                    if !isRubberBanding {
+                        isRubberBanding = true
+                        rubberBandOrigin = drag.startLocation
+                        viewModel.selectedFilePaths = []
+                        viewModel.selectedDiffFile = nil
+                    }
+                    rubberBandCurrent = drag.location
+                    updateRubberBandSelection()
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in
+                isRubberBanding = false
+            }
     }
 
     // MARK: - Conflict Staging File List (Staged / Unstaged during conflict resolution)

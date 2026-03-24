@@ -3,3 +3,4 @@ refs/
 *.app
 UserInterfaceState.xcuserstate
 .swiftpm/
+*.xcframework

@@ -13,8 +13,8 @@ let package = Package(
         .package(url: "https://github.com/raspu/Highlightr.git", from: "2.1.2"),
     ],
     targets: [
-        // libgit2 compiled from source (submodule at Sources/Clibgit2/libgit2).
-        // No cmake or pre-build steps needed — Xcode and `swift build` both work directly.
+        // libgit2 compiled from source located at Sources/Clibgit2/libgit2.
+        // Prepare it with Scripts/ensure_libgit2.sh on a fresh checkout.
         .target(
             name: "Clibgit2",
             path: "Sources/Clibgit2",
