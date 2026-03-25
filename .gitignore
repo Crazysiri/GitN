@@ -4,3 +4,4 @@ refs/
 UserInterfaceState.xcuserstate
 .swiftpm/
 *.xcframework
+**/*.zip
