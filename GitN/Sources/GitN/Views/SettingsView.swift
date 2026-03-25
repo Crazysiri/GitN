@@ -2,14 +2,19 @@ import SwiftUI
 
 struct SettingsView: View {
     @State private var aiPrompt: String = AICommitService.userPrompt
-    @State private var apiKey: String = AICommitService.apiKey
+    @State private var selectedTool: AICommitTool = AICommitService.selectedTool
+    @State private var cursorAPIKey: String = AICommitService.cursorAPIKey
     @State private var promptHasChanges = false
+    @State private var toolHasChanges = false
     @State private var keyHasChanges = false
+    @State private var toolStatus: AICommitToolStatus?
 
     @State private var gitlabURL: String = GitLabService.gitlabURL
     @State private var gitlabToken: String = GitLabService.gitlabToken
     @State private var gitlabURLHasChanges = false
     @State private var gitlabTokenHasChanges = false
+    @State private var githubToken: String = GitHubService.githubToken
+    @State private var githubTokenHasChanges = false
 
     var body: some View {
         TabView {
@@ -18,9 +23,9 @@ struct SettingsView: View {
                     Label("AI", systemImage: "sparkles")
                 }
 
-            gitlabSettingsTab
+            gitSettingsTab
                 .tabItem {
-                    Label("GitLab", systemImage: "network")
+                    Label("Git", systemImage: "network")
                 }
 
             aboutTab
@@ -36,65 +41,149 @@ struct SettingsView: View {
     private var aiSettingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // --- Status ---
-                agentStatusSection
-
-                // --- API Key ---
-                apiKeySection
+                toolSelectionSection
 
                 Divider()
 
-                // --- Prompt ---
+                // --- Status ---
+                agentStatusSection
+
+                if selectedTool.requiresAPIKey {
+                    apiKeySection
+                    Divider()
+                }
+
                 promptSection
             }
             .padding(20)
         }
+        .task(id: selectedTool) {
+            await refreshToolStatus()
+        }
+    }
+
+    private var toolSelectionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("AI Tool")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Choose which CLI GitN should use when generating commit messages.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Picker("AI Tool", selection: $selectedTool) {
+                    ForEach(AICommitTool.allCases) { tool in
+                        Text(tool.displayName).tag(tool)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 180)
+                .onChange(of: selectedTool) {
+                    toolHasChanges = selectedTool != AICommitService.selectedTool
+                }
+
+                Button("Save") {
+                    AICommitService.selectedTool = selectedTool
+                    toolHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!toolHasChanges)
+            }
+        }
     }
 
     private var agentStatusSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("cursor-agent")
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(selectedTool.displayName)
                 .font(.system(size: 13, weight: .semibold))
 
-            HStack(spacing: 6) {
-                if AICommitService.isAgentInstalled {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 12))
-                    Text("cursor-agent installed")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                        .font(.system(size: 12))
-                    Text("cursor-agent not found")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+            if let toolStatus {
+                HStack(spacing: 6) {
+                    if toolStatus == .available {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.system(size: 12))
+                        Text("\(selectedTool.displayName) available")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else if toolStatus == .loginRequired {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.system(size: 12))
+                        Text("\(selectedTool.displayName) login required")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                            .font(.system(size: 12))
+                        Text("\(selectedTool.displayName) not found")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            if !AICommitService.isAgentInstalled {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Install cursor-agent:")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("1. Install Cursor IDE from cursor.com")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text("2. Run:  cursor-agent install-shell-integration")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Text("3. Or:   cursor-agent login")
-                        .font(.system(size: 10, design: .monospaced))
+                if toolStatus != .available {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(statusInstructionTitle(for: toolStatus))
+                            .font(.system(size: 11, weight: .medium))
+                        ForEach(statusInstructions(for: toolStatus), id: \.self) { instruction in
+                            Text(instruction)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(.controlBackgroundColor))
+                    )
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .opacity(0)
+                    Text("Checking \(selectedTool.displayName) status...")
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color(.controlBackgroundColor))
-                )
             }
+        }
+    }
+
+    @MainActor
+    private func refreshToolStatus() async {
+        toolStatus = nil
+        toolStatus = await AICommitService.toolStatusAsync(selectedTool)
+    }
+
+    private func statusInstructionTitle(for status: AICommitToolStatus) -> String {
+        switch (selectedTool, status) {
+        case (.codex, .loginRequired):
+            return "Login to codex in Terminal:"
+        case (.codex, .unavailable):
+            return "Set up codex:"
+        default:
+            return "Install \(selectedTool.displayName):"
+        }
+    }
+
+    private func statusInstructions(for status: AICommitToolStatus) -> [String] {
+        switch (selectedTool, status) {
+        case (.codex, .loginRequired):
+            return [
+                "1. Open Terminal",
+                "2. Run:  codex",
+                "3. Complete the login flow, then return to GitN",
+            ]
+        default:
+            return selectedTool.installInstructions
         }
     }
 
@@ -108,25 +197,25 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("CURSOR_API_KEY", text: $apiKey)
+                SecureField("CURSOR_API_KEY", text: $cursorAPIKey)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
-                    .onChange(of: apiKey) { _ in
+                    .onChange(of: cursorAPIKey) {
                         keyHasChanges = true
                     }
 
                 Button("Save") {
-                    AICommitService.apiKey = apiKey
+                    AICommitService.cursorAPIKey = cursorAPIKey
                     keyHasChanges = false
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(!keyHasChanges)
 
-                if !AICommitService.apiKey.isEmpty {
+                if !AICommitService.cursorAPIKey.isEmpty {
                     Button(role: .destructive) {
-                        apiKey = ""
-                        AICommitService.apiKey = ""
+                        cursorAPIKey = ""
+                        AICommitService.cursorAPIKey = ""
                         keyHasChanges = false
                     } label: {
                         Image(systemName: "trash")
@@ -145,7 +234,7 @@ struct SettingsView: View {
             Text("AI Commit Prompt")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("Customize the prompt sent to cursor-agent when generating commit messages.")
+            Text("Customize the prompt sent to the selected AI tool when generating commit messages.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -159,7 +248,7 @@ struct SettingsView: View {
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(Color(.separatorColor), lineWidth: 1)
                 )
-                .onChange(of: aiPrompt) { _ in
+                .onChange(of: aiPrompt) {
                     promptHasChanges = true
                 }
 
@@ -184,25 +273,40 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - GitLab Settings
+    // MARK: - Git Settings
 
-    private var gitlabSettingsTab: some View {
+    private var gitSettingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                gitProviderIntroSection
+                Divider()
                 gitlabURLSection
                 Divider()
                 gitlabTokenSection
+                Divider()
+                githubTokenSection
             }
             .padding(20)
         }
     }
 
-    private var gitlabURLSection: some View {
+    private var gitProviderIntroSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("GitLab URL")
+            Text("Code Hosting")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text("Your self-hosted GitLab instance URL (e.g. https://gitlab.example.com)")
+            Text("GitN will detect whether the current repository remote belongs to GitLab or GitHub and show merge or pull requests accordingly.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var gitlabURLSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("GitLab")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Your GitLab instance URL. Leave this as your self-hosted base URL, for example https://gitlab.example.com.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -293,6 +397,70 @@ struct SettingsView: View {
                         .foregroundStyle(.yellow)
                         .font(.system(size: 12))
                     Text("GitLab not configured — set both URL and token to enable MR features")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var githubTokenSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("GitHub")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Only github.com token auth is supported here. Web OAuth button sign-in is not supported.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Link("Create a GitHub personal access token", destination: URL(string: "https://github.com/settings/tokens")!)
+                .font(.system(size: 11))
+
+            HStack(spacing: 8) {
+                SecureField("github_pat_xxxxxxxxxxxxxxxxxxxx", text: $githubToken)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onChange(of: githubToken) {
+                        githubTokenHasChanges = true
+                    }
+
+                Button("Save") {
+                    GitHubService.githubToken = githubToken
+                    githubTokenHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!githubTokenHasChanges)
+
+                if !GitHubService.githubToken.isEmpty {
+                    Button(role: .destructive) {
+                        githubToken = ""
+                        GitHubService.githubToken = ""
+                        githubTokenHasChanges = false
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Clear GitHub token")
+                }
+            }
+
+            HStack(spacing: 6) {
+                if GitHubService.isConfigured {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 12))
+                    Text("GitHub configured")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.system(size: 12))
+                    Text("GitHub not configured — set a token to enable PR features")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }

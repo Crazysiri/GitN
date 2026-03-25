@@ -38,6 +38,7 @@ final class RepoViewModel {
     var fileTooLargeSizeMB: String = ""
 
     var fileStatuses: [FileStatus] = []
+    var isStageOperationInProgress = false
     var selectedFilePaths: Set<String> = []
     /// Anchor path for Shift+click range selection.
     var lastSelectedFilePath: String?
@@ -170,14 +171,26 @@ final class RepoViewModel {
     }
 
     func stageFiles(_ paths: [String]) async {
-        for path in paths { do { try await git.stageFile(path) } catch {} }
-        do { fileStatuses = try await git.status() } catch {}
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
+        do {
+            try await git.stageFiles(paths)
+            fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
+        } catch {}
         await selectFirstUnstagedOrKeep()
     }
 
     func unstageFiles(_ paths: [String]) async {
-        for path in paths { do { try await git.unstageFile(path) } catch {} }
-        do { fileStatuses = try await git.status() } catch {}
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
+        do {
+            try await git.unstageFiles(paths)
+            fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
+        } catch {}
         await selectFirstUnstagedOrKeep()
     }
 
@@ -269,14 +282,13 @@ final class RepoViewModel {
         fileHistoryParsedDiff = nil
     }
 
-    // MARK: - GitLab MR
-    var mergeRequests: [GitLabMR] = []
-    var mrStateFilter: MRStateFilter = .opened
+    // MARK: - Hosted Code Review
+    var mergeRequests: [CodeReviewItem] = []
+    var mrStateFilter: CodeReviewFilter = .opened
     var isMRLoading = false
     var mrError: String?
     var isMRMerging = false
     var mrMergingStatus: String = ""
-    private var gitlabService: GitLabService?
 
     // MARK: - Conflict State (Rebase / Merge / Stash)
     var conflictType: ConflictType?
@@ -340,6 +352,30 @@ final class RepoViewModel {
             let parts = branch.name.split(separator: "/", maxSplits: 1)
             return parts.first.map(String.init) ?? branch.name
         }
+    }
+
+    private var preferredCodeHostingRemote: RemoteInfo? {
+        if let origin = remotes.first(where: { $0.name == "origin" && CodeHostingProvider(remoteURL: $0.url) != .unknown }) {
+            return origin
+        }
+        return remotes.first(where: { CodeHostingProvider(remoteURL: $0.url) != .unknown })
+    }
+
+    var codeHostingProvider: CodeHostingProvider {
+        guard let remote = preferredCodeHostingRemote else { return .unknown }
+        return CodeHostingProvider(remoteURL: remote.url)
+    }
+
+    var mergeRequestsSectionTitle: String {
+        codeHostingProvider.sectionTitle
+    }
+
+    var mergeRequestsEmptyStateText: String {
+        "No \(codeHostingProvider.emptyStateDisplayName)"
+    }
+
+    var mergeActionTitle: String? {
+        codeHostingProvider.mergeActionTitle
     }
 
     init(path: String, name: String) {
@@ -688,7 +724,7 @@ final class RepoViewModel {
         selectedFilePaths = []
         do {
             if commit.isUncommitted {
-                diffFiles = try await git.uncommittedDiffFiles()
+                refreshUncommittedDiffFiles()
                 // Auto-select the first unstaged file, falling back to the first staged file
                 let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges)
                     ?? fileStatuses.first(where: \.hasStagedChanges)
@@ -707,6 +743,12 @@ final class RepoViewModel {
             }
         } catch {
             diffFiles = []
+        }
+    }
+
+    private func refreshUncommittedDiffFiles() {
+        diffFiles = fileStatuses.map { status in
+            DiffFile(additions: 0, deletions: 0, path: status.path)
         }
     }
 
@@ -816,7 +858,7 @@ final class RepoViewModel {
     var isAmend = false
     var isGeneratingAICommit = false
 
-    /// Generate commit message from staged diff using cursor-agent
+    /// Generate commit message from staged diff using the selected AI CLI tool
     func generateAICommitMessage() async {
         isGeneratingAICommit = true
         defer { isGeneratingAICommit = false }
@@ -831,12 +873,15 @@ final class RepoViewModel {
             commitDescription = description
         } catch let error as AICommitError {
             switch error {
-            case .notFound:
-                showToast(title: "cursor-agent Not Found", detail: "Install Cursor IDE or configure cursor-agent. See Settings → AI Commit.", style: .error)
+            case .notFound(let tool):
+                showToast(title: "\(tool.displayName) Not Found", detail: error.localizedDescription, style: .error)
             case .apiKeyMissing:
-                showToast(title: "API Key Required", detail: "Set CURSOR_API_KEY in Settings → AI Commit.", style: .error)
+                showToast(title: "AI Setup Required", detail: error.localizedDescription, style: .error)
                 openSettings()
-            default:
+            case .authorizationRequired(let tool):
+                showToast(title: "\(tool.displayName) Login Required", detail: error.localizedDescription, style: .error)
+                openSettings()
+            case .agentFailed, .emptyResponse:
                 showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
             }
         } catch {
@@ -858,12 +903,15 @@ final class RepoViewModel {
             return result
         } catch let error as AICommitError {
             switch error {
-            case .notFound:
-                showToast(title: "cursor-agent Not Found", detail: "Install Cursor IDE or configure cursor-agent. See Settings → AI Commit.", style: .error)
+            case .notFound(let tool):
+                showToast(title: "\(tool.displayName) Not Found", detail: error.localizedDescription, style: .error)
             case .apiKeyMissing:
-                showToast(title: "API Key Required", detail: "Set CURSOR_API_KEY in Settings → AI Commit.", style: .error)
+                showToast(title: "AI Setup Required", detail: error.localizedDescription, style: .error)
                 openSettings()
-            default:
+            case .authorizationRequired(let tool):
+                showToast(title: "\(tool.displayName) Login Required", detail: error.localizedDescription, style: .error)
+                openSettings()
+            case .agentFailed, .emptyResponse:
                 showToast(title: "AI Generate Failed", detail: error.localizedDescription, style: .error)
             }
             return nil
@@ -904,34 +952,50 @@ final class RepoViewModel {
     }
 
     func stageFile(_ path: String) async {
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
         do {
             try await git.stageFile(path)
             fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
         } catch {}
     }
 
     func unstageFile(_ path: String) async {
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
         do {
             try await git.unstageFile(path)
             fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
         } catch {}
     }
 
     func stageAllFiles() async {
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
         let unstaged = fileStatuses.filter(\.hasUnstagedChanges)
-        for file in unstaged {
-            do { try await git.stageFile(file.path) } catch {}
-        }
-        do { fileStatuses = try await git.status() } catch {}
+        do {
+            try await git.stageFiles(unstaged.map(\.path))
+            fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
+        } catch {}
         // No unstaged files remain — preserve the last displayed diff
     }
 
     func unstageAllFiles() async {
+        guard !isStageOperationInProgress else { return }
+        isStageOperationInProgress = true
+        defer { isStageOperationInProgress = false }
         let staged = fileStatuses.filter(\.hasStagedChanges)
-        for file in staged {
-            do { try await git.unstageFile(file.path) } catch {}
-        }
-        do { fileStatuses = try await git.status() } catch {}
+        do {
+            try await git.unstageFiles(staged.map(\.path))
+            fileStatuses = try await git.status()
+            refreshUncommittedDiffFiles()
+        } catch {}
         await selectFirstUnstagedOrKeep()
     }
 
@@ -1359,7 +1423,7 @@ final class RepoViewModel {
             try await git.checkoutBranch(branch.name)
 
             // 3. Pull
-            try await await git.pull()
+            try await git.pull()
 
             // 4. Checkout back to original branch
             try await git.checkoutBranch(originalBranch)
@@ -2156,27 +2220,41 @@ final class RepoViewModel {
         collapsedSections.contains(section)
     }
 
-    // MARK: - GitLab MR Operations
+    // MARK: - Hosted Code Review Operations
 
     private func getGitLabService() -> GitLabService {
-        if let svc = gitlabService { return svc }
-        let svc = GitLabService(repoPath: repoPath)
-        gitlabService = svc
-        return svc
+        GitLabService(repoPath: repoPath, remoteName: preferredCodeHostingRemote?.name ?? "origin")
+    }
+
+    private func getGitHubService() -> GitHubService {
+        GitHubService(repoPath: repoPath, remoteName: preferredCodeHostingRemote?.name ?? "origin")
     }
 
     func loadMergeRequests() async {
-        guard await GitLabService.isConfigured else {
-            mergeRequests = []
-            mrError = nil
-            return
-        }
-
         isMRLoading = true
         mrError = nil
         do {
-            let mrs = try await getGitLabService().listMergeRequests(state: mrStateFilter)
-            mergeRequests = mrs
+            switch codeHostingProvider {
+            case .gitlab:
+                guard GitLabService.isConfigured else {
+                    mergeRequests = []
+                    mrError = GitLabError.notConfigured.localizedDescription
+                    isMRLoading = false
+                    return
+                }
+                mergeRequests = try await getGitLabService().listMergeRequests(state: mrStateFilter)
+            case .github:
+                guard GitHubService.isConfigured else {
+                    mergeRequests = []
+                    mrError = GitHubError.notConfigured.localizedDescription
+                    isMRLoading = false
+                    return
+                }
+                mergeRequests = try await getGitHubService().listPullRequests(state: mrStateFilter)
+            case .unknown:
+                mergeRequests = []
+                mrError = "The selected remote host is not supported yet."
+            }
         } catch {
             mrError = error.localizedDescription
             mergeRequests = []
@@ -2184,32 +2262,43 @@ final class RepoViewModel {
         isMRLoading = false
     }
 
-    func setMRFilter(_ filter: MRStateFilter) async {
+    func setMRFilter(_ filter: CodeReviewFilter) async {
         mrStateFilter = filter
         await loadMergeRequests()
     }
 
-    func performMRMerge(mr: GitLabMR) async {
+    func canPerformMerge(for review: CodeReviewItem) -> Bool {
+        review.state == .opened && mergeActionTitle != nil
+    }
+
+    func performMRMerge(mr: CodeReviewItem) async {
         isMRMerging = true
-        mrMergingStatus = "Rebase & Merge !\(mr.iid) \(mr.title) …"
+        mrMergingStatus = "\(mergeActionTitle ?? "Merge") \(mr.numberDisplay) \(mr.title) ..."
         do {
-            try await getGitLabService().performRebaseAndMerge(
-                mrIID: mr.iid,
-                sourceBranch: mr.sourceBranch,
-                targetBranch: mr.targetBranch
-            )
-            showToast(title: "MR Merged", detail: "!\(mr.iid) \(mr.title)", style: .success)
+            switch mr.provider {
+            case .gitlab:
+                try await getGitLabService().performRebaseAndMerge(
+                    mrIID: mr.number,
+                    sourceBranch: mr.sourceBranch,
+                    targetBranch: mr.targetBranch
+                )
+            case .github:
+                try await getGitHubService().performRebaseAndMerge(prNumber: mr.number)
+            case .unknown:
+                throw NSError(domain: "GitN", code: 1, userInfo: [NSLocalizedDescriptionKey: "The selected remote host is not supported yet."])
+            }
+            showToast(title: "\(codeHostingProvider.singularDisplayName) Merged", detail: "\(mr.numberDisplay) \(mr.title)", style: .success)
             await loadMergeRequests()
             await loadAll()
         } catch {
-            showToast(title: "MR Merge Failed", detail: error.localizedDescription, style: .error)
+            showToast(title: "\(codeHostingProvider.singularDisplayName) Merge Failed", detail: error.localizedDescription, style: .error)
         }
         isMRMerging = false
         mrMergingStatus = ""
     }
 
-    func openMRInBrowser(_ mr: GitLabMR) {
-        if let url = URL(string: mr.webUrl) {
+    func openMRInBrowser(_ mr: CodeReviewItem) {
+        if let url = URL(string: mr.webURL) {
             NSWorkspace.shared.open(url)
         }
     }

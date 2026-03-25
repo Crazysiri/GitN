@@ -19,8 +19,8 @@ struct DetailPanelView: View {
     @State private var rubberBandCurrent: CGPoint = .zero
     @State private var unstagedRowFrames: [String: CGRect] = [:]
 
-    private var useCompatibleUnstagedGestureHandling: Bool {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion <= 14
+    private var supportsUnstagedRubberBandSelection: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15
     }
 
     var body: some View {
@@ -535,17 +535,22 @@ struct DetailPanelView: View {
     }
 
     private var stagingFileList: some View {
-        ScrollView {
-            VStack(spacing: 0) {
+        let stagedList = stagedFiles
+        let unstagedList = unstagedFiles
+        let stagedPaths = stagedList.map(\.path)
+        let unstagedPaths = unstagedList.map(\.path)
+
+        return ScrollView {
+            LazyVStack(spacing: 0) {
                 // Staged section — entire area is a drop target (works even when empty)
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     stagingSectionHeader(
                         title: "已暂存",
-                        count: stagedFiles.count,
-                        allSelected: !stagedFiles.isEmpty,
+                        count: stagedList.count,
+                        allSelected: !stagedList.isEmpty,
                         onToggle: {
                             Task {
-                                if stagedFiles.isEmpty {
+                                if stagedList.isEmpty {
                                     await viewModel.stageAllFiles()
                                 } else {
                                     await viewModel.unstageAllFiles()
@@ -554,7 +559,7 @@ struct DetailPanelView: View {
                         }
                     )
 
-                    ForEach(stagedFiles) { file in
+                    ForEach(stagedList) { file in
                         StagingFileRow(
                             file: file,
                             isSelected: viewModel.selectedFilePaths.contains(file.path)
@@ -562,13 +567,14 @@ struct DetailPanelView: View {
                             isStaged: true,
                             onToggle: { Task { await viewModel.unstageFile(file.path) } }
                         )
+                        .equatable()
                         .onTapGesture {
                             let flags = NSEvent.modifierFlags
                             viewModel.toggleFileSelection(
                                 file.path,
                                 isMulti: flags.contains(.command),
                                 isRange: flags.contains(.shift),
-                                orderedPaths: stagedFiles.map(\.path)
+                                orderedPaths: stagedPaths
                             )
                             Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
                         }
@@ -577,7 +583,7 @@ struct DetailPanelView: View {
                     }
 
                     // Empty drop hint when no staged files
-                    if stagedFiles.isEmpty {
+                    if stagedList.isEmpty {
                         Text("Drag files here to stage")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
@@ -592,10 +598,10 @@ struct DetailPanelView: View {
 
                 // Unstaged section — entire area is a drop target
                 // Supports rubber-band (marquee) multi-selection via long-press + drag
-                applyUnstagedSelectionGesture(to: VStack(spacing: 0) {
+                applyUnstagedSelectionGesture(to: LazyVStack(spacing: 0) {
                     stagingSectionHeader(
                         title: "未暂存",
-                        count: unstagedFiles.count,
+                        count: unstagedList.count,
                         allSelected: false,
                         onToggle: {
                             Task { await viewModel.stageAllFiles() }
@@ -604,17 +610,17 @@ struct DetailPanelView: View {
                             // If files are multi-selected, discard only selected unstaged files;
                             // otherwise discard all unstaged files.
                             let selected = viewModel.selectedFilePaths
-                            let unstagedPaths = Set(unstagedFiles.map(\.path))
-                            let targets = selected.filter { unstagedPaths.contains($0) }
+                            let unstagedPathSet = Set(unstagedList.map(\.path))
+                            let targets = selected.filter { unstagedPathSet.contains($0) }
                             if targets.count > 1 {
                                 confirmDiscard(Array(targets))
                             } else {
-                                confirmDiscard(unstagedFiles.map(\.path))
+                                confirmDiscard(unstagedList.map(\.path))
                             }
                         }
                     )
 
-                    ForEach(unstagedFiles) { file in
+                    ForEach(unstagedList) { file in
                         StagingFileRow(
                             file: file,
                             isSelected: viewModel.selectedFilePaths.contains(file.path)
@@ -622,14 +628,11 @@ struct DetailPanelView: View {
                             isStaged: false,
                             onToggle: { Task { await viewModel.stageFile(file.path) } }
                         )
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: UnstagedRowFrameKey.self,
-                                    value: [file.path: geo.frame(in: .named("unstagedArea"))]
-                                )
-                            }
-                        )
+                        .equatable()
+                        .modifier(UnstagedRowFrameReporter(
+                            isEnabled: supportsUnstagedRubberBandSelection,
+                            filePath: file.path
+                        ))
                         .onTapGesture {
                             guard !isRubberBanding else { return }
                             let flags = NSEvent.modifierFlags
@@ -637,7 +640,7 @@ struct DetailPanelView: View {
                                 file.path,
                                 isMulti: flags.contains(.command),
                                 isRange: flags.contains(.shift),
-                                orderedPaths: unstagedFiles.map(\.path)
+                                orderedPaths: unstagedPaths
                             )
                             Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
                         }
@@ -646,7 +649,7 @@ struct DetailPanelView: View {
                     }
 
                     // Empty drop hint when no unstaged files
-                    if unstagedFiles.isEmpty {
+                    if unstagedList.isEmpty {
                         Text("Drag files here to unstage")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
@@ -655,10 +658,11 @@ struct DetailPanelView: View {
                 }
                 .coordinateSpace(name: "unstagedArea")
                 .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
+                    guard supportsUnstagedRubberBandSelection else { return }
                     unstagedRowFrames = frames
                 }
                 .overlay(alignment: .topLeading) {
-                    if isRubberBanding {
+                    if supportsUnstagedRubberBandSelection && isRubberBanding {
                         rubberBandOverlay
                     }
                 }
@@ -669,15 +673,37 @@ struct DetailPanelView: View {
             }
         }
         .frame(maxHeight: 240)
+        .allowsHitTesting(!viewModel.isStageOperationInProgress)
+        .overlay(alignment: .topTrailing) {
+            if viewModel.isStageOperationInProgress {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Processing...")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(Color(.windowBackgroundColor).opacity(0.72))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
+                )
+                .padding(8)
+            }
+        }
     }
 
     @ViewBuilder
     private func applyUnstagedSelectionGesture<Content: View>(to content: Content) -> some View {
-        if useCompatibleUnstagedGestureHandling {
-            // macOS 14.x may let the parent high-priority gesture swallow row taps.
-            content.simultaneousGesture(unstagedRubberBandGesture)
-        } else {
+        if supportsUnstagedRubberBandSelection {
             content.highPriorityGesture(unstagedRubberBandGesture)
+        } else {
+            content
         }
     }
 
@@ -1686,6 +1712,27 @@ private struct UnstagedRowFrameKey: PreferenceKey {
     }
 }
 
+private struct UnstagedRowFrameReporter: ViewModifier {
+    let isEnabled: Bool
+    let filePath: String
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: UnstagedRowFrameKey.self,
+                        value: [filePath: geo.frame(in: .named("unstagedArea"))]
+                    )
+                }
+            )
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Sub-components
 
 struct DiffFileRow: View {
@@ -1767,11 +1814,17 @@ struct DiffFileRow: View {
     }
 }
 
-struct StagingFileRow: View {
+struct StagingFileRow: View, Equatable {
     let file: FileStatus
     let isSelected: Bool
     let isStaged: Bool
     let onToggle: () -> Void
+
+    static func == (lhs: StagingFileRow, rhs: StagingFileRow) -> Bool {
+        lhs.file == rhs.file &&
+        lhs.isSelected == rhs.isSelected &&
+        lhs.isStaged == rhs.isStaged
+    }
 
     var body: some View {
         HStack(spacing: 6) {

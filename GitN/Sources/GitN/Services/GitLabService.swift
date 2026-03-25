@@ -45,9 +45,11 @@ actor GitLabService {
     // MARK: - Instance
     
     private let repoPath: String
+    private let remoteName: String
     
-    init(repoPath: String) {
+    init(repoPath: String, remoteName: String = "origin") {
         self.repoPath = repoPath
+        self.remoteName = remoteName
     }
     
     // MARK: - Get Base URL & Token
@@ -68,7 +70,7 @@ actor GitLabService {
     func extractProjectPath() async -> String? {
         let output: String
         do {
-            output = try await runGitOutput(["config", "--get", "remote.origin.url"])
+            output = try await runGitOutput(["config", "--get", "remote.\(remoteName).url"])
         } catch {
             return nil
         }
@@ -143,7 +145,7 @@ actor GitLabService {
     
     // MARK: - List Merge Requests
     
-    func listMergeRequests(state: MRStateFilter = .opened, page: Int = 1, perPage: Int = 50) async throws -> [GitLabMR] {
+    func listMergeRequests(state: CodeReviewFilter = .opened, page: Int = 1, perPage: Int = 50) async throws -> [CodeReviewItem] {
         guard let config = await getConfig() else {
             throw GitLabError.notConfigured
         }
@@ -151,14 +153,14 @@ actor GitLabService {
         let projectID = try await resolveProjectID()
         
         var urlStr = "\(config.baseURL)/api/v4/projects/\(projectID)/merge_requests"
-        urlStr += "?state=\(state.apiState)&page=\(page)&per_page=\(perPage)&order_by=updated_at&sort=desc"
-        if let scope = state.apiScope {
+        urlStr += "?state=\(state.gitLabState)&page=\(page)&per_page=\(perPage)&order_by=updated_at&sort=desc"
+        if let scope = state.gitLabScope {
             urlStr += "&scope=\(scope)"
         }
         
         let data = try await apiRequest(url: urlStr, method: "GET", token: config.token)
         
-        return try Self.decodeMRList(data)
+        return try Self.decodeMRList(data).map(\.codeReviewItem)
     }
     
     private static func decodeMRList(_ data: Data) throws -> [GitLabMR] {
@@ -240,7 +242,7 @@ actor GitLabService {
         
         do {
             // Step 2: Fetch latest
-            try await runGit(["fetch", "origin"])
+            try await runGit(["fetch", remoteName])
             
             // Step 3: Checkout source branch
             // Check if we're already on the source branch
@@ -252,16 +254,16 @@ actor GitLabService {
                     try await runGit(["checkout", sourceBranch])
                 } else {
                     // Create local tracking branch from origin
-                    try await runGit(["checkout", "-b", sourceBranch, "origin/\(sourceBranch)"])
+                    try await runGit(["checkout", "-b", sourceBranch, "\(remoteName)/\(sourceBranch)"])
                 }
             }
             
             // Step 4: Reset source branch to match remote (in case local is stale)
-            try await runGit(["reset", "--hard", "origin/\(sourceBranch)"])
+            try await runGit(["reset", "--hard", "\(remoteName)/\(sourceBranch)"])
             
             // Step 5: Rebase onto target
             do {
-                try await runGit(["rebase", "origin/\(targetBranch)"])
+                try await runGit(["rebase", "\(remoteName)/\(targetBranch)"])
             } catch {
                 // Rebase failed, abort and restore
                 try? await runGit(["rebase", "--abort"])
@@ -270,7 +272,7 @@ actor GitLabService {
             }
             
             // Step 6: Force push the rebased source branch
-            try await runGit(["push", "origin", sourceBranch, "--force-with-lease"])
+            try await runGit(["push", remoteName, sourceBranch, "--force-with-lease"])
             
             // Step 7: Wait for GitLab to process the push, then call API to merge (with retry)
             try await Task.sleep(nanoseconds: 2_000_000_000) // 2s
@@ -436,7 +438,7 @@ enum GitLabError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConfigured:
-            return "GitLab not configured. Set URL and token in Settings → GitLab."
+            return "GitLab not configured. Set URL and token in Settings -> Git."
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
         case .cannotDetermineProject:
@@ -458,40 +460,6 @@ enum GitLabError: LocalizedError {
 }
 
 // MARK: - MR State Filter
-
-enum MRStateFilter: String, CaseIterable, Identifiable {
-    case opened
-    case mine
-    
-    var id: String { rawValue }
-    
-    var displayName: String {
-        switch self {
-        case .opened: return "Open"
-        case .mine: return "My MRs"
-        }
-    }
-    
-    var icon: String {
-        switch self {
-        case .opened: return "arrow.triangle.pull"
-        case .mine: return "person.circle"
-        }
-    }
-    
-    /// GitLab API state parameter value
-    var apiState: String {
-        return "opened"
-    }
-    
-    /// GitLab API scope parameter value (nil means no scope filter)
-    var apiScope: String? {
-        switch self {
-        case .opened: return nil
-        case .mine: return "created_by_me"
-        }
-    }
-}
 
 // MARK: - GitLab MR Model
 
@@ -521,9 +489,39 @@ struct GitLabMR: Identifiable, Equatable {
     }
     
     var isDraft: Bool { draft ?? false }
-    
+
+    var codeReviewItem: CodeReviewItem {
+        CodeReviewItem(
+            provider: .gitlab,
+            nativeID: id,
+            number: iid,
+            title: title,
+            description: description,
+            state: CodeReviewState(stateEnum),
+            sourceBranch: sourceBranch,
+            targetBranch: targetBranch,
+            webURL: webUrl,
+            author: author.map {
+                CodeReviewAuthor(displayName: $0.name, username: $0.username, avatarURL: $0.avatarUrl)
+            },
+            isDraft: isDraft,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
     enum MRState {
         case opened, closed, merged
+    }
+}
+
+extension CodeReviewState {
+    init(_ state: GitLabMR.MRState) {
+        switch state {
+        case .opened: self = .opened
+        case .closed: self = .closed
+        case .merged: self = .merged
+        }
     }
 }
 

@@ -22,12 +22,21 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 | 提交 | 创建提交、编辑提交信息 |
 | Conflict 解决 | 三面板可视化冲突解决 |
 | Squash Commits | 多选 commit 合并压缩 |
-| AI 提交信息 | 调用 cursor-agent 自动生成 |
+| AI 提交信息 | 调用可配置 AI CLI 自动生成 |
 | 文件历史 | 单文件提交历史与 diff |
 | Compare 模式 | 提交快照与工作目录对比 |
 | 内嵌终端 | 仓库目录下的 shell 终端 |
-| GitLab MR | 查看、过滤、Rebase & Merge MR |
+| GitLab / GitHub 代码评审 | 自动识别远程仓库，查看 MR / PR 并执行 Rebase & Merge |
 | 语法高亮 | Diff 视图支持 20+ 语言语法高亮 |
+
+---
+
+## 最近新增功能
+
+- **GitHub Pull Request 支持**：Sidebar 会根据远程地址自动识别 GitLab / GitHub，并切换为对应的 MR / PR 列表；支持 `Open` / `Mine` 过滤、浏览器打开、复制标题/链接，以及 `Rebase & Merge`。
+- **AI 提交工具可切换**：Settings 中可在 `cursor-agent` 与 `codex` 之间切换，界面会显示安装/登录状态，并根据所选工具给出不同的错误提示和引导。
+- **新仓库初始化更完整**：新建仓库后，如果仓库里还没有本地分支，GitN 会自动创建 `README.md`、写入初始提交并设置 `HEAD`，避免出现空仓库无法继续操作的问题。
+- **暂存区交互优化**：支持批量 stage / unstage、拖拽移动多选文件、未暂存区框选，多文件操作期间会显示处理中状态，减少重复刷新和误触。
 
 ---
 
@@ -137,32 +146,32 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 
 ---
 
-### 6. Rebase & Merge MR（GitLab）
+### 6. Rebase & Merge MR / PR（GitLab / GitHub）
 
-**前提：** 在 Settings 中配置 GitLab URL 和 Personal Access Token。
+**前提：**
 
-**查看 MR：**
+- GitLab：在 Settings 中配置 GitLab URL 和 Personal Access Token
+- GitHub：在 Settings 中配置 GitHub Personal Access Token
 
-1. 展开 Sidebar → **MERGE REQUESTS** 区域（首次展开时自动加载）
-2. 顶部过滤栏可切换：`Opened` / `Merged` / `Closed`
-3. 每条 MR 显示：状态图标、编号、标题、作者、源分支 → 目标分支、是否有冲突
+**查看代码评审项：**
+
+1. 展开 Sidebar 中的 **MERGE REQUESTS** 或 **PULL REQUESTS** 区域（首次展开时自动加载）
+2. 顶部过滤栏可切换：`Open` / `Mine`
+3. 每条记录显示：状态图标、编号、标题、作者、源分支 → 目标分支
 
 **Rebase & Merge 操作：**
 
-1. 右键某条 `Opened` 状态的 MR → **Rebase & Merge**
+1. 右键某条 `Opened` 状态的 MR / PR → **Rebase & Merge**
 2. 弹出确认框，说明完整流程：
-   - 当前工作区变更会被**自动 stash**
-   - Checkout 源分支
-   - Rebase 到目标分支
-   - 调用 GitLab API 执行 Merge
-   - 恢复 stash
+   - GitLab：当前工作区变更会被**自动 stash**，然后 checkout 源分支、rebase 到目标分支、调用 GitLab API 执行 merge，最后恢复 stash
+   - GitHub：直接调用 GitHub API 以 `rebase` 方式完成合并
 3. 操作期间显示全屏遮罩和进度文字，防止误操作
 4. 完成后 toast 通知结果
 
 **其他操作（右键菜单）：**
 
-- **Open in Browser**：在浏览器打开 MR 页面
-- **Copy MR Title / Source Branch / MR URL**
+- **Open in Browser**：在浏览器打开 MR / PR 页面
+- **Copy Title / Source Branch / URL**
 
 ---
 
@@ -183,7 +192,11 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 
 ### 8. AI 自动生成提交信息
 
-**前提：** 已安装 `cursor-agent` CLI，并在 **Settings → AI Commit** 中配置 API Key（或设置环境变量 `CURSOR_API_KEY`）。
+**前提：**
+
+- 在 **Settings → AI** 中选择要使用的 CLI 工具
+- `cursor-agent`：需要安装工具，并配置 API Key（或设置环境变量 `CURSOR_API_KEY`）
+- `codex`：需要安装工具，并先在终端完成登录
 
 **新提交时使用：**
 
@@ -196,7 +209,7 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 1. 点击提交信息区进入编辑模式
 2. 点击右上角紫色 **✦ AI** 按钮，基于该提交的 diff 重新生成
 
-AI 使用 Conventional Commits 格式（`type(scope): description`），支持自定义 Prompt（在 Settings 中修改）。
+AI 使用 Conventional Commits 格式（`type(scope): description`），支持自定义 Prompt，并可在 Settings 中切换底层 AI 工具。
 
 ---
 
