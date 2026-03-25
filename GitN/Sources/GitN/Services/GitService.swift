@@ -1120,6 +1120,32 @@ actor GitService {
         git_index_write(index)
     }
 
+    func stageFiles(_ paths: [String]) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        guard !paths.isEmpty else { return }
+
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot get index")
+        }
+        defer { git_index_free(index) }
+
+        for path in Set(paths) {
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            let fileExists = FileManager.default.fileExists(atPath: fullPath)
+
+            if fileExists {
+                git_index_add_bypath(index, path)
+            } else {
+                git_index_remove_bypath(index, path)
+            }
+        }
+
+        guard git_index_write(index) == 0 else {
+            throw GitError.operationFailed("Index write failed")
+        }
+    }
+
     func unstageFile(_ path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
@@ -1147,6 +1173,49 @@ actor GitService {
             defer { git_index_free(index) }
             git_index_remove_bypath(index, path)
             git_index_write(index)
+        }
+    }
+
+    func unstageFiles(_ paths: [String]) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+        let uniquePaths = Array(Set(paths))
+        guard !uniquePaths.isEmpty else { return }
+
+        var headRef: OpaquePointer?
+        let hasHead = git_repository_head(&headRef, repo) == 0
+
+        if hasHead, let headRef {
+            defer { git_reference_free(headRef) }
+            var target: OpaquePointer?
+            guard git_reference_peel(&target, headRef, GIT_OBJECT_COMMIT) == 0, let target else { return }
+            defer { git_object_free(target) }
+
+            let pathPointers = uniquePaths.map { path in
+                strdup(path)
+            }
+            defer { pathPointers.forEach { free($0) } }
+            var mutablePathPointers = pathPointers
+            let rc = mutablePathPointers.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                var pathSpec = git_strarray(strings: buffer.baseAddress, count: uniquePaths.count)
+                return git_reset_default(repo, target, &pathSpec)
+            }
+            guard rc == 0 else {
+                throw GitError.operationFailed("Unstage failed (\(rc))")
+            }
+        } else {
+            var index: OpaquePointer?
+            guard git_repository_index(&index, repo) == 0, let index else {
+                throw GitError.operationFailed("Cannot get index")
+            }
+            defer { git_index_free(index) }
+
+            for path in uniquePaths {
+                git_index_remove_bypath(index, path)
+            }
+
+            guard git_index_write(index) == 0 else {
+                throw GitError.operationFailed("Index write failed")
+            }
         }
     }
 

@@ -61,7 +61,10 @@ final class AppModel {
             defer {
                 if let repo { git_repository_free(repo) }
             }
-            return git_repository_init(&repo, normalized, 0) == 0
+            guard git_repository_init(&repo, normalized, 0) == 0, let repo else {
+                return false
+            }
+            return bootstrapInitialRepositoryState(repo: repo, workingDirectory: normalized)
         }
 
         guard didInit else { return }
@@ -238,5 +241,79 @@ final class AppModel {
 
     private func normalizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func bootstrapInitialRepositoryState(repo: OpaquePointer, workingDirectory: String) -> Bool {
+        guard repositoryHasNoLocalBranches(repo) else { return true }
+        guard git_repository_set_head(repo, "refs/heads/master") == 0 else { return false }
+
+        let readmePath = (workingDirectory as NSString).appendingPathComponent("README.md")
+        if !FileManager.default.fileExists(atPath: readmePath) {
+            let content = "# \(URL(fileURLWithPath: workingDirectory).lastPathComponent)\n"
+            do {
+                try content.write(toFile: readmePath, atomically: true, encoding: .utf8)
+            } catch {
+                return false
+            }
+        }
+
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return false }
+        defer { git_index_free(index) }
+
+        guard git_index_add_bypath(index, "README.md") == 0 else { return false }
+        guard git_index_write(index) == 0 else { return false }
+
+        var treeOid = git_oid()
+        guard git_index_write_tree(&treeOid, index) == 0 else { return false }
+
+        var tree: OpaquePointer?
+        guard git_tree_lookup(&tree, repo, &treeOid) == 0, let tree else { return false }
+        defer { git_tree_free(tree) }
+
+        guard let sig = createInitialCommitSignature(repo: repo) else { return false }
+        defer { git_signature_free(sig) }
+
+        var commitOid = git_oid()
+        return git_commit_create(
+            &commitOid,
+            repo,
+            "HEAD",
+            sig,
+            sig,
+            nil,
+            "Initial commit",
+            tree,
+            0,
+            nil
+        ) == 0
+    }
+
+    private func repositoryHasNoLocalBranches(_ repo: OpaquePointer) -> Bool {
+        var iterator: OpaquePointer?
+        guard git_branch_iterator_new(&iterator, repo, GIT_BRANCH_LOCAL) == 0, let iterator else {
+            return true
+        }
+        defer { git_branch_iterator_free(iterator) }
+
+        var reference: OpaquePointer?
+        var branchType = git_branch_t(rawValue: 0)
+        let rc = git_branch_next(&reference, &branchType, iterator)
+        if let reference { git_reference_free(reference) }
+        return rc != 0
+    }
+
+    private func createInitialCommitSignature(repo: OpaquePointer) -> UnsafeMutablePointer<git_signature>? {
+        var sig: UnsafeMutablePointer<git_signature>?
+        if git_signature_default(&sig, repo) == 0 {
+            return sig
+        }
+
+        let name = NSFullUserName().isEmpty ? "GitN User" : NSFullUserName()
+        let email = "\(NSUserName())@\(ProcessInfo.processInfo.hostName)"
+        if git_signature_now(&sig, name, email) == 0 {
+            return sig
+        }
+        return nil
     }
 }

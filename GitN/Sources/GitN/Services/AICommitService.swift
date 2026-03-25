@@ -1,6 +1,67 @@
 import Foundation
 
-/// Calls the local `cursor-agent` CLI to generate commit messages from staged diffs.
+enum AICommitTool: String, CaseIterable, Identifiable {
+    case cursorAgent = "cursor-agent"
+    case codex = "codex"
+
+    var id: String { rawValue }
+
+    var displayName: String { rawValue }
+
+    var requiresAPIKey: Bool {
+        switch self {
+        case .cursorAgent:
+            return true
+        case .codex:
+            return false
+        }
+    }
+
+    var executableCandidates: [String] {
+        let home = NSHomeDirectory()
+        switch self {
+        case .cursorAgent:
+            return [
+                "\(home)/.local/bin/cursor-agent",
+                "\(home)/.cursor/bin/cursor-agent",
+                "/usr/local/bin/cursor-agent",
+                "/opt/homebrew/bin/cursor-agent",
+                "\(home)/Library/Application Support/Cursor/bin/cursor-agent",
+            ]
+        case .codex:
+            return [
+                "\(home)/.local/bin/codex",
+                "\(home)/.npm-global/bin/codex",
+                "/usr/local/bin/codex",
+                "/opt/homebrew/bin/codex",
+            ]
+        }
+    }
+
+    var installInstructions: [String] {
+        switch self {
+        case .cursorAgent:
+            return [
+                "1. Install Cursor IDE from cursor.com",
+                "2. Run:  cursor-agent install-shell-integration",
+                "3. Or:   cursor-agent login",
+            ]
+        case .codex:
+            return [
+                "1. Ensure `codex` is available in your terminal PATH",
+                "2. Run `codex login` or complete the terminal authorization flow",
+                "3. GitN will call: codex exec \"<prompt>\"",
+            ]
+        }
+    }
+}
+
+enum AICommitToolStatus: Equatable {
+    case available
+    case loginRequired
+    case unavailable
+}
+
 enum AICommitService {
 
     private static let defaultPrompt = """
@@ -23,7 +84,17 @@ enum AICommitService {
         }
     }
 
-    static var apiKey: String {
+    static var selectedTool: AICommitTool {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "GitN.aiCommitTool") ?? ""
+            return AICommitTool(rawValue: raw) ?? .cursorAgent
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "GitN.aiCommitTool")
+        }
+    }
+
+    static var cursorAPIKey: String {
         get {
             UserDefaults.standard.string(forKey: "GitN.cursorAPIKey") ?? ""
         }
@@ -32,32 +103,48 @@ enum AICommitService {
         }
     }
 
-    /// Check if cursor-agent is installed
-    static var isAgentInstalled: Bool {
-        findAgentPath() != nil
+    static var selectedToolInstalled: Bool {
+        findExecutablePath(for: selectedTool) != nil
     }
 
-    /// Generate a commit message from the given diff text using `cursor-agent`.
-    /// Returns (title, description) parsed from the AI response.
+    static func isToolInstalled(_ tool: AICommitTool) -> Bool {
+        findExecutablePath(for: tool) != nil
+    }
+
+    static func toolStatus(_ tool: AICommitTool) -> AICommitToolStatus {
+        guard findExecutablePath(for: tool) != nil else {
+            return .unavailable
+        }
+        switch tool {
+        case .cursorAgent:
+            return .available
+        case .codex:
+            return isCodexLoggedIn() ? .available : .loginRequired
+        }
+    }
+
+    static func toolStatusAsync(_ tool: AICommitTool) async -> AICommitToolStatus {
+        guard findExecutablePath(for: tool) != nil else {
+            return .unavailable
+        }
+        switch tool {
+        case .cursorAgent:
+            return .available
+        case .codex:
+            return await isCodexLoggedInAsync() ? .available : .loginRequired
+        }
+    }
+
     static func generateCommitMessage(diff: String) async throws -> (title: String, description: String) {
         let prompt = userPrompt + "\n\n```diff\n" + diff.prefix(8000) + "\n```"
-
-        let output = try await runCursorAgent(prompt: prompt)
+        let output = try await runTool(selectedTool, prompt: prompt)
         return parseCommitMessage(output)
     }
 
     // MARK: - Private
 
-    private static func findAgentPath() -> String? {
-        let home = NSHomeDirectory()
-        let possiblePaths = [
-            "\(home)/.local/bin/cursor-agent",
-            "\(home)/.cursor/bin/cursor-agent",
-            "/usr/local/bin/cursor-agent",
-            "/opt/homebrew/bin/cursor-agent",
-            "\(home)/Library/Application Support/Cursor/bin/cursor-agent",
-        ]
-        for p in possiblePaths {
+    private static func findExecutablePath(for tool: AICommitTool) -> String? {
+        for p in tool.executableCandidates {
             if FileManager.default.isExecutableFile(atPath: p) {
                 return p
             }
@@ -65,19 +152,123 @@ enum AICommitService {
         return nil
     }
 
+    private static func runTool(_ tool: AICommitTool, prompt: String) async throws -> String {
+        switch tool {
+        case .cursorAgent:
+            return try await runCursorAgent(prompt: prompt)
+        case .codex:
+            guard await isCodexLoggedInAsync() else {
+                throw AICommitError.authorizationRequired(.codex)
+            }
+            return try await runCodex(prompt: prompt)
+        }
+    }
+
+    private static func makeBaseEnvironment() -> [String: String] {
+        let home = NSHomeDirectory()
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = [
+            "\(home)/.local/bin",
+            "\(home)/.cursor/bin",
+            "\(home)/.npm-global/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
+        return env
+    }
+
+    private static func isCodexLoggedIn() -> Bool {
+        let proc = Process()
+        if let found = findExecutablePath(for: .codex) {
+            proc.executableURL = URL(fileURLWithPath: found)
+            proc.arguments = ["login", "status"]
+        } else {
+            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            proc.arguments = ["-lc", "codex login status"]
+        }
+
+        proc.environment = makeBaseEnvironment()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        proc.standardInput = FileHandle.nullDevice
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return false }
+            let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return codexStatusLooksAuthenticated(output: output, errorOutput: errOutput)
+        } catch {
+            return false
+        }
+    }
+
+    private static func isCodexLoggedInAsync() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let proc = Process()
+            if let found = findExecutablePath(for: .codex) {
+                proc.executableURL = URL(fileURLWithPath: found)
+                proc.arguments = ["login", "status"]
+            } else {
+                proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                proc.arguments = ["-lc", "codex login status"]
+            }
+
+            proc.environment = makeBaseEnvironment()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            proc.standardInput = FileHandle.nullDevice
+
+            proc.terminationHandler = { process in
+                let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let isAuthenticated = process.terminationStatus == 0 &&
+                    codexStatusLooksAuthenticated(output: output, errorOutput: errOutput)
+                continuation.resume(returning: isAuthenticated)
+            }
+
+            do {
+                try proc.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
+        }
+    }
+
+    private static func codexStatusLooksAuthenticated(output: String, errorOutput: String) -> Bool {
+        let combined = [output, errorOutput]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .lowercased()
+
+        return combined.contains("logged in") ||
+            combined.contains("authenticated") ||
+            combined.contains("using chatgpt")
+    }
+
     private static func runCursorAgent(prompt: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let proc = Process()
-            let home = NSHomeDirectory()
 
             // Resolve the effective API key: user setting > environment variable
             let effectiveAPIKey = {
-                let stored = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                let stored = cursorAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !stored.isEmpty { return stored }
                 return ProcessInfo.processInfo.environment["CURSOR_API_KEY"] ?? ""
             }()
 
-            if let found = findAgentPath() {
+            if let found = findExecutablePath(for: .cursorAgent) {
                 proc.executableURL = URL(fileURLWithPath: found)
                 var args = ["--print", "--trust", "--model", "composer-1"]
                 if !effectiveAPIKey.isEmpty {
@@ -92,16 +283,7 @@ enum AICommitService {
                 proc.arguments = ["-lc", "cursor-agent \(apiArg)--print --trust --model composer-1 \"$1\"", "--", prompt]
             }
 
-            // Ensure user-level bin dirs are in PATH for child process
-            var env = ProcessInfo.processInfo.environment
-            let extraPaths = [
-                "\(home)/.local/bin",
-                "\(home)/.cursor/bin",
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-            ]
-            let currentPath = env["PATH"] ?? "/usr/bin:/bin"
-            env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
+            var env = makeBaseEnvironment()
             if !effectiveAPIKey.isEmpty {
                 env["CURSOR_API_KEY"] = effectiveAPIKey
             }
@@ -128,20 +310,71 @@ enum AICommitService {
 
                     // Detect specific errors for better guidance
                     if errMsg.localizedCaseInsensitiveContains("API_KEY") ||
-                       errMsg.localizedCaseInsensitiveContains("auth") ||
                        errMsg.localizedCaseInsensitiveContains("401") ||
                        errMsg.localizedCaseInsensitiveContains("Unauthorized") {
-                        continuation.resume(throwing: AICommitError.apiKeyMissing)
+                        continuation.resume(throwing: AICommitError.apiKeyMissing(.cursorAgent))
                     } else {
-                        continuation.resume(throwing: AICommitError.agentFailed(errMsg))
+                        continuation.resume(throwing: AICommitError.agentFailed(.cursorAgent, errMsg))
                     }
                 } else if output.isEmpty {
-                    continuation.resume(throwing: AICommitError.emptyResponse)
+                    continuation.resume(throwing: AICommitError.emptyResponse(.cursorAgent))
                 } else {
                     continuation.resume(returning: output)
                 }
             } catch {
-                continuation.resume(throwing: AICommitError.notFound)
+                continuation.resume(throwing: AICommitError.notFound(.cursorAgent))
+            }
+        }
+    }
+
+    private static func runCodex(prompt: String) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            let proc = Process()
+
+            if let found = findExecutablePath(for: .codex) {
+                proc.executableURL = URL(fileURLWithPath: found)
+                proc.arguments = ["exec", "--skip-git-repo-check", prompt]
+            } else {
+                proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+                proc.arguments = ["-lc", "codex exec --skip-git-repo-check \"$1\"", "--", prompt]
+            }
+
+            proc.environment = makeBaseEnvironment()
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            proc.standardInput = FileHandle.nullDevice
+
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+
+                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                if proc.terminationStatus != 0 {
+                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errMsg = String(data: errData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "codex failed"
+
+                    if errMsg.localizedCaseInsensitiveContains("login") ||
+                       errMsg.localizedCaseInsensitiveContains("authenticate") ||
+                       errMsg.localizedCaseInsensitiveContains("not logged in") ||
+                       errMsg.localizedCaseInsensitiveContains("authorization") {
+                        continuation.resume(throwing: AICommitError.authorizationRequired(.codex))
+                    } else {
+                        continuation.resume(throwing: AICommitError.agentFailed(.codex, errMsg))
+                    }
+                } else if output.isEmpty {
+                    continuation.resume(throwing: AICommitError.emptyResponse(.codex))
+                } else {
+                    continuation.resume(returning: output)
+                }
+            } catch {
+                continuation.resume(throwing: AICommitError.notFound(.codex))
             }
         }
     }
@@ -172,21 +405,34 @@ enum AICommitService {
 }
 
 enum AICommitError: LocalizedError {
-    case notFound
-    case apiKeyMissing
-    case agentFailed(String)
-    case emptyResponse
+    case notFound(AICommitTool)
+    case apiKeyMissing(AICommitTool)
+    case authorizationRequired(AICommitTool)
+    case agentFailed(AICommitTool, String)
+    case emptyResponse(AICommitTool)
 
     var errorDescription: String? {
         switch self {
-        case .notFound:
-            return "cursor-agent not found. Install it via: npm install -g @anthropic-ai/cursor-agent, or install Cursor IDE."
-        case .apiKeyMissing:
-            return "CURSOR_API_KEY is not configured. Please set it in GitN → Settings → AI Commit."
-        case .agentFailed(let msg):
-            return "cursor-agent error: \(msg)"
-        case .emptyResponse:
-            return "cursor-agent returned an empty response."
+        case .notFound(let tool):
+            switch tool {
+            case .cursorAgent:
+                return "cursor-agent not found. Install it via Cursor IDE or make the CLI available in PATH."
+            case .codex:
+                return "codex not found. Make sure the `codex` CLI is installed and available in PATH."
+            }
+        case .apiKeyMissing(let tool):
+            return "\(tool.displayName) requires an API key. Configure it in GitN → Settings → AI."
+        case .authorizationRequired(let tool):
+            switch tool {
+            case .cursorAgent:
+                return "\(tool.displayName) requires terminal authorization first. Run the login flow in your terminal, then try again."
+            case .codex:
+                return "codex is not logged in. Open Terminal and run `codex`, then complete the login flow before trying again."
+            }
+        case .agentFailed(let tool, let msg):
+            return "\(tool.displayName) error: \(msg)"
+        case .emptyResponse(let tool):
+            return "\(tool.displayName) returned an empty response."
         }
     }
 }

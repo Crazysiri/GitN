@@ -31,7 +31,7 @@ struct SidebarView: View {
     @State private var upstreamBranch = ""
 
     @State private var showMergeConfirm = false
-    @State private var mergingMR: GitLabMR?
+    @State private var mergingMR: CodeReviewItem?
 
     @State private var collapsedLocalFolders: Set<String> = []
     @State private var collapsedRemoteFolders: Set<String> = []
@@ -71,7 +71,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showSetUpstream) { setUpstreamSheet }
         .sheet(isPresented: $showAnnotateTag) { annotateTagSheet }
         .sheet(isPresented: $showCreateBranchFromTag) { createBranchFromTagSheet }
-        .alert("Merge MR", isPresented: $showMergeConfirm) {
+        .alert(viewModel.mergeActionTitle ?? "Merge", isPresented: $showMergeConfirm) {
             Button("Merge", role: .destructive) {
                 guard let mr = mergingMR else { return }
                 Task { await viewModel.performMRMerge(mr: mr) }
@@ -82,7 +82,14 @@ struct SidebarView: View {
             }
         } message: {
             if let mr = mergingMR {
-                Text("Will rebase '\(mr.sourceBranch)' onto '\(mr.targetBranch)' and merge MR !\(mr.iid).\n\nCurrent working directory will be stashed and restored after the operation.")
+                switch mr.provider {
+                case .gitlab:
+                    Text("Will rebase '\(mr.sourceBranch)' onto '\(mr.targetBranch)' and merge \(mr.provider.singularDisplayName) \(mr.numberDisplay).\n\nCurrent working directory will be stashed and restored after the operation.")
+                case .github:
+                    Text("Will ask GitHub to rebase-merge \(mr.provider.singularDisplayName) \(mr.numberDisplay).")
+                case .unknown:
+                    Text("Unsupported remote host.")
+                }
             }
         }
     }
@@ -848,7 +855,7 @@ struct SidebarView: View {
 
     private var mergeRequestsSection: some View {
         SidebarSection(
-            title: "MERGE REQUESTS",
+            title: viewModel.mergeRequestsSectionTitle,
             icon: "arrow.triangle.pull",
             count: viewModel.mergeRequests.count,
             isCollapsed: viewModel.isSectionCollapsed("mergeRequests"),
@@ -866,7 +873,7 @@ struct SidebarView: View {
         ) {
             // State filter picker
             HStack(spacing: 2) {
-                ForEach(MRStateFilter.allCases) { filter in
+                ForEach(CodeReviewFilter.allCases) { filter in
                     Button {
                         Task { await viewModel.setMRFilter(filter) }
                     } label: {
@@ -907,7 +914,7 @@ struct SidebarView: View {
                     .padding(.trailing, 12)
                     .padding(.vertical, 4)
             } else if viewModel.mergeRequests.isEmpty {
-                Text("No merge requests")
+                Text(viewModel.mergeRequestsEmptyStateText)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 28)
@@ -929,14 +936,14 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private func mrContextMenu(_ mr: GitLabMR) -> some View {
+    private func mrContextMenu(_ mr: CodeReviewItem) -> some View {
         Button("Open in Browser") {
             viewModel.openMRInBrowser(mr)
         }
 
-        if mr.stateEnum == .opened {
+        if viewModel.canPerformMerge(for: mr), let mergeActionTitle = viewModel.mergeActionTitle {
             Divider()
-            Button("Rebase & Merge") {
+            Button(mergeActionTitle) {
                 mergingMR = mr
                 showMergeConfirm = true
             }
@@ -945,7 +952,7 @@ struct SidebarView: View {
 
         Divider()
 
-        Button("Copy MR Title") {
+        Button("Copy Title") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(mr.title, forType: .string)
         }
@@ -953,9 +960,9 @@ struct SidebarView: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(mr.sourceBranch, forType: .string)
         }
-        Button("Copy MR URL") {
+        Button("Copy URL") {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(mr.webUrl, forType: .string)
+            NSPasteboard.general.setString(mr.webURL, forType: .string)
         }
     }
 }
@@ -1174,10 +1181,10 @@ struct SidebarDetachedHeadRow: View {
     }
 }
 
-// MARK: - Merge Request Row
+// MARK: - Code Review Row
 
 struct SidebarMRRow: View {
-    let mr: GitLabMR
+    let mr: CodeReviewItem
 
     @State private var isHovering = false
 
@@ -1189,8 +1196,7 @@ struct SidebarMRRow: View {
                     .font(.caption2)
                     .foregroundStyle(mrStateColor)
 
-                // MR IID badge
-                Text("!\(mr.iid)")
+                Text(mr.numberDisplay)
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 4)
@@ -1209,7 +1215,7 @@ struct SidebarMRRow: View {
                 Spacer()
 
                 if let author = mr.author {
-                    Text(author.name)
+                    Text(author.displayName)
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -1238,16 +1244,6 @@ struct SidebarMRRow: View {
                     .lineLimit(1)
             }
 
-            if let conflicts = mr.hasConflicts, conflicts {
-                HStack(spacing: 3) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.yellow)
-                    Text("Has conflicts")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.yellow)
-                }
-            }
         }
         .padding(.leading, 28)
         .padding(.trailing, 12)
@@ -1261,7 +1257,7 @@ struct SidebarMRRow: View {
     }
 
     private var mrStateIcon: String {
-        switch mr.stateEnum {
+        switch mr.state {
         case .opened: return "arrow.triangle.pull"
         case .closed: return "xmark.circle"
         case .merged: return "arrow.triangle.merge"
@@ -1269,7 +1265,7 @@ struct SidebarMRRow: View {
     }
 
     private var mrStateColor: Color {
-        switch mr.stateEnum {
+        switch mr.state {
         case .opened: return .green
         case .closed: return .red
         case .merged: return .purple
