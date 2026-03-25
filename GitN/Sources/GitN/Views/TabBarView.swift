@@ -41,6 +41,7 @@ struct TabBarView: View {
             .buttonStyle(.plain)
             .padding(.trailing, 4)
         }
+        .padding(.horizontal, 10)
         .background(
             HostingWindowAccessor { window in
                 guard hostingWindow == nil, let window else { return }
@@ -75,9 +76,9 @@ private struct HostingWindowAccessor: NSViewRepresentable {
 // MARK: - Features sheet
 
 struct FeaturesView: View {
+    @Environment(ThemeManager.self) private var theme
     let content: String
     @Binding var isPresented: Bool
-    @AppStorage("GitN.markdownPreviewScheme") private var scheme: PreviewScheme = .light
 
     var body: some View {
         VStack(spacing: 0) {
@@ -89,33 +90,6 @@ struct FeaturesView: View {
                 Text("FEATURES.md")
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
-                Menu {
-                    ForEach(PreviewScheme.allCases, id: \.rawValue) { s in
-                        Button {
-                            scheme = s
-                        } label: {
-                            HStack {
-                                Image(systemName: scheme == s ? "checkmark.circle.fill" : "circle")
-                                Text(s.rawValue)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(scheme.swatch)
-                            .frame(width: 10, height: 10)
-                            .overlay(Circle().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 0.5))
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .medium))
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
-                }
-                .buttonStyle(.plain)
-                .help("Preview color scheme")
-
                 Button {
                     isPresented = false
                 } label: {
@@ -139,10 +113,9 @@ struct FeaturesView: View {
                     .padding(24)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(scheme.background)
-            .preferredColorScheme(scheme.colorScheme)
         }
         .frame(minWidth: 680, minHeight: 500)
+        .preferredColorScheme(theme.isDark ? .dark : .light)
     }
 }
 

@@ -1,5 +1,70 @@
 import SwiftUI
 import AppKit
+import HighlightSwift
+
+private enum SourceEditorStyle {
+    struct Palette {
+        let background: NSColor
+        let surface: NSColor
+        let toolbar: NSColor
+        let border: NSColor
+        let text: NSColor
+        let keyword: NSColor
+        let string: NSColor
+        let comment: NSColor
+        let number: NSColor
+        let type: NSColor
+        let call: NSColor
+        let preprocessor: NSColor
+        let gutterBackground: NSColor
+        let gutterText: NSColor
+        let gutterSeparator: NSColor
+    }
+
+    static let editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    static let editorBoldFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
+    static let lineHeight: CGFloat = 21
+
+    static func palette(isDark: Bool) -> Palette {
+        if isDark {
+            return Palette(
+                background: NSColor(red: 0.086, green: 0.094, blue: 0.110, alpha: 1),
+                surface: NSColor(red: 0.118, green: 0.125, blue: 0.145, alpha: 1),
+                toolbar: NSColor(red: 0.133, green: 0.141, blue: 0.161, alpha: 1),
+                border: NSColor.white.withAlphaComponent(0.08),
+                text: NSColor(red: 0.839, green: 0.859, blue: 0.902, alpha: 1),
+                keyword: NSColor(red: 0.988, green: 0.572, blue: 0.384, alpha: 1),
+                string: NSColor(red: 0.639, green: 0.851, blue: 0.557, alpha: 1),
+                comment: NSColor(red: 0.451, green: 0.478, blue: 0.525, alpha: 1),
+                number: NSColor(red: 0.493, green: 0.733, blue: 0.976, alpha: 1),
+                type: NSColor(red: 0.510, green: 0.820, blue: 0.780, alpha: 1),
+                call: NSColor(red: 0.947, green: 0.792, blue: 0.471, alpha: 1),
+                preprocessor: NSColor(red: 0.776, green: 0.612, blue: 0.976, alpha: 1),
+                gutterBackground: NSColor(red: 0.098, green: 0.106, blue: 0.122, alpha: 1),
+                gutterText: NSColor(red: 0.388, green: 0.412, blue: 0.459, alpha: 1),
+                gutterSeparator: NSColor.white.withAlphaComponent(0.06)
+            )
+        }
+
+        return Palette(
+            background: NSColor(red: 0.952, green: 0.960, blue: 0.976, alpha: 1),
+            surface: NSColor(red: 0.985, green: 0.989, blue: 0.997, alpha: 1),
+            toolbar: NSColor(red: 0.943, green: 0.952, blue: 0.972, alpha: 1),
+            border: NSColor.black.withAlphaComponent(0.08),
+            text: NSColor(red: 0.137, green: 0.161, blue: 0.220, alpha: 1),
+            keyword: NSColor(red: 0.690, green: 0.278, blue: 0.188, alpha: 1),
+            string: NSColor(red: 0.173, green: 0.514, blue: 0.243, alpha: 1),
+            comment: NSColor(red: 0.486, green: 0.529, blue: 0.596, alpha: 1),
+            number: NSColor(red: 0.102, green: 0.400, blue: 0.733, alpha: 1),
+            type: NSColor(red: 0.086, green: 0.557, blue: 0.561, alpha: 1),
+            call: NSColor(red: 0.667, green: 0.478, blue: 0.106, alpha: 1),
+            preprocessor: NSColor(red: 0.506, green: 0.341, blue: 0.741, alpha: 1),
+            gutterBackground: NSColor(red: 0.957, green: 0.965, blue: 0.980, alpha: 1),
+            gutterText: NSColor(red: 0.545, green: 0.573, blue: 0.639, alpha: 1),
+            gutterSeparator: NSColor.black.withAlphaComponent(0.07)
+        )
+    }
+}
 
 // MARK: - Source language
 
@@ -67,21 +132,70 @@ extension String {
 
 // MARK: - Syntax highlighter
 
+private extension SourceLanguage {
+    var highlightIdentifier: String? {
+        switch self {
+        case .swift: return "swift"
+        case .python: return "python"
+        case .javascript: return "javascript"
+        case .typescript: return "typescript"
+        case .go: return "go"
+        case .rust: return "rust"
+        case .c: return "c"
+        case .cpp: return "cpp"
+        case .java: return "java"
+        case .shell: return "bash"
+        case .json: return "json"
+        case .yaml: return "yaml"
+        case .dart: return "dart"
+        case .kotlin: return "kotlin"
+        case .ruby: return "ruby"
+        case .php: return "php"
+        case .css: return "css"
+        case .html: return "html"
+        case .xml: return "xml"
+        case .toml: return "toml"
+        case .text: return nil
+        }
+    }
+}
+
+private actor SourceHighlightEngine {
+    static let shared = SourceHighlightEngine()
+
+    private let highlight = Highlight()
+
+    func highlightedText(
+        _ text: String,
+        language: SourceLanguage,
+        isDark: Bool
+    ) async -> AttributedString? {
+        guard let languageID = language.highlightIdentifier else { return nil }
+
+        do {
+            return try await highlight.attributedText(
+                text,
+                language: languageID,
+                colors: isDark ? .dark(.github) : .light(.github)
+            )
+        } catch {
+            return nil
+        }
+    }
+}
+
 private enum SourceHighlighter {
-    private static let baseFont    = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    private static let boldFont    = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
-
-    private static let textColor    = NSColor(red: 0.737, green: 0.745, blue: 0.769, alpha: 1)
-    private static let keywordColor = NSColor(red: 0.812, green: 0.557, blue: 0.427, alpha: 1)
-    private static let stringColor  = NSColor(red: 0.647, green: 0.784, blue: 0.514, alpha: 1)
-    private static let commentColor = NSColor(red: 0.416, green: 0.416, blue: 0.416, alpha: 1)
-    private static let numberColor  = NSColor(red: 0.431, green: 0.698, blue: 0.890, alpha: 1)
-
     private struct Rule {
         let pattern: String
         let options: NSRegularExpression.Options
-        let color: NSColor
-        let bold: Bool
+        let attributes: [NSAttributedString.Key: Any]
+    }
+
+    private static func paragraphStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = SourceEditorStyle.lineHeight
+        style.maximumLineHeight = SourceEditorStyle.lineHeight
+        return style
     }
 
     private static func keywords(for language: SourceLanguage) -> [String] {
@@ -182,44 +296,86 @@ private enum SourceHighlighter {
         }
     }
 
-    private static func rules(for language: SourceLanguage) -> [Rule] {
+    private static func rules(for language: SourceLanguage, isDark: Bool) -> [Rule] {
+        let palette = SourceEditorStyle.palette(isDark: isDark)
         var result: [Rule] = [
             // Multi-line comments (before single-line to take priority on /*…*/)
-            Rule(pattern: "/\\*[\\s\\S]*?\\*/", options: [.dotMatchesLineSeparators], color: commentColor, bold: false),
+            Rule(pattern: "/\\*[\\s\\S]*?\\*/", options: [.dotMatchesLineSeparators], attributes: [.foregroundColor: palette.comment]),
             // Single-line // comments
-            Rule(pattern: "//[^\n]*", options: [], color: commentColor, bold: false),
+            Rule(pattern: "//[^\n]*", options: [], attributes: [.foregroundColor: palette.comment]),
             // Shell / Python # comments
-            Rule(pattern: "#[^\n]*", options: [], color: commentColor, bold: false),
+            Rule(pattern: "#[^\n]*", options: [], attributes: [.foregroundColor: palette.comment]),
             // Double-quoted strings
-            Rule(pattern: #""(?:[^"\\]|\\.)*""#, options: [], color: stringColor, bold: false),
+            Rule(pattern: #""(?:[^"\\]|\\.)*""#, options: [], attributes: [.foregroundColor: palette.string]),
             // Single-quoted strings
-            Rule(pattern: #"'(?:[^'\\]|\\.)*'"#, options: [], color: stringColor, bold: false),
+            Rule(pattern: #"'(?:[^'\\]|\\.)*'"#, options: [], attributes: [.foregroundColor: palette.string]),
             // Numbers
-            Rule(pattern: #"\b\d+(\.\d+)?\b"#, options: [], color: numberColor, bold: false),
+            Rule(pattern: #"\b(0x[0-9A-Fa-f]+|0b[01]+|0o[0-7]+|\d+(\.\d+)?([eE][+-]?\d+)?)\b"#, options: [], attributes: [.foregroundColor: palette.number]),
         ]
         let kw = keywords(for: language)
         if !kw.isEmpty {
             let pattern = "\\b(" + kw.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|") + ")\\b"
-            result.append(Rule(pattern: pattern, options: [], color: keywordColor, bold: true))
+            result.append(Rule(pattern: pattern, options: [], attributes: [
+                .foregroundColor: palette.keyword,
+                .font: SourceEditorStyle.editorBoldFont
+            ]))
         }
+        result.append(Rule(pattern: #"(?m)^\s*#\w+.*$"#, options: [], attributes: [.foregroundColor: palette.preprocessor]))
+        result.append(Rule(pattern: #"\b[A-Z][A-Za-z0-9_]*\b"#, options: [], attributes: [.foregroundColor: palette.type]))
+        result.append(Rule(pattern: #"\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()"#, options: [], attributes: [.foregroundColor: palette.call]))
         return result
     }
 
-    static func highlight(_ storage: NSTextStorage, language: SourceLanguage) {
+    static func highlight(_ storage: NSTextStorage, language: SourceLanguage, isDark: Bool) {
         let str = storage.string
         let fullRange = NSRange(location: 0, length: (str as NSString).length)
+        let palette = SourceEditorStyle.palette(isDark: isDark)
         storage.beginEditing()
-        storage.addAttributes([.font: baseFont, .foregroundColor: textColor], range: fullRange)
-        for rule in rules(for: language) {
+        storage.setAttributes([
+            .font: SourceEditorStyle.editorFont,
+            .foregroundColor: palette.text,
+            .paragraphStyle: paragraphStyle()
+        ], range: fullRange)
+        for rule in rules(for: language, isDark: isDark) {
             guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: rule.options) else { continue }
             regex.enumerateMatches(in: str, range: fullRange) { match, _, _ in
                 guard let match else { return }
-                var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: rule.color]
-                if rule.bold { attrs[.font] = boldFont }
-                storage.addAttributes(attrs, range: match.range)
+                storage.addAttributes(rule.attributes, range: match.range)
             }
         }
         storage.endEditing()
+    }
+
+    static func highlightedText(_ text: String, language: SourceLanguage, isDark: Bool) async -> AttributedString? {
+        guard let attributed = await SourceHighlightEngine.shared.highlightedText(text, language: language, isDark: isDark) else {
+            return nil
+        }
+        return normalizedAttributedString(from: attributed)
+    }
+
+    private static func normalizedAttributedString(from attributed: AttributedString) -> AttributedString? {
+        let input = NSAttributedString(attributed)
+        let fullRange = NSRange(location: 0, length: input.length)
+        let normalized = NSMutableAttributedString(attributedString: input)
+        var boldRanges: [NSRange] = []
+
+        input.enumerateAttribute(.font, in: fullRange) { value, range, _ in
+            guard let font = value as? NSFont else { return }
+            if font.fontDescriptor.symbolicTraits.contains(.bold) {
+                boldRanges.append(range)
+            }
+        }
+
+        normalized.addAttributes([
+            .font: SourceEditorStyle.editorFont,
+            .paragraphStyle: paragraphStyle()
+        ], range: fullRange)
+
+        for range in boldRanges {
+            normalized.addAttribute(.font, value: SourceEditorStyle.editorBoldFont, range: range)
+        }
+
+        return try? AttributedString(normalized, including: \.appKit)
     }
 }
 
@@ -228,28 +384,102 @@ private enum SourceHighlighter {
 private struct SourceTextView: NSViewRepresentable {
     let text: String
     let language: SourceLanguage
+    let isDark: Bool
 
-    private static let background = NSColor(red: 0.118, green: 0.122, blue: 0.133, alpha: 1)
+    final class Coordinator {
+        var task: Task<Void, Never>?
+        private var requestID = 0
 
-    func makeNSView(context: Context) -> NSScrollView {
+        deinit {
+            task?.cancel()
+        }
+
+        func scheduleHighlight(
+            for textView: NSTextView,
+            text: String,
+            language: SourceLanguage,
+            isDark: Bool
+        ) {
+            requestID += 1
+            let currentRequestID = requestID
+            task?.cancel()
+
+            task = Task {
+                guard let highlighted = await SourceHighlighter.highlightedText(text, language: language, isDark: isDark) else {
+                    return
+                }
+
+                await MainActor.run {
+                    guard !Task.isCancelled,
+                          currentRequestID == self.requestID,
+                          textView.string == text,
+                          let storage = textView.textStorage
+                    else { return }
+
+                    storage.setAttributedString(NSAttributedString(highlighted))
+                    _ = textView.layoutManager?.numberOfGlyphs
+                    textView.needsDisplay = true
+                    textView.enclosingScrollView?.contentView.needsDisplay = true
+                }
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    static func background(for isDark: Bool) -> NSColor {
+        SourceEditorStyle.palette(isDark: isDark).surface
+    }
+
+    func makeNSView(context: Context) -> NSView {
         let scrollView = NSTextView.scrollableTextView()
 
         let textView = LineNumberTextView(frame: .zero)
+        textView.drawsInlineGutter        = false
         textView.isEditable              = false
         textView.isSelectable            = true
         textView.isRichText              = false
-        textView.backgroundColor         = Self.background
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.backgroundColor         = Self.background(for: isDark)
         textView.drawsBackground         = true
         textView.isVerticallyResizable   = true
-        textView.isHorizontallyResizable = false
+        textView.isHorizontallyResizable = true
         textView.maxSize                 = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                                    height: CGFloat.greatestFiniteMagnitude)
-        textView.autoresizingMask        = NSView.AutoresizingMask([.width])
-        textView.textContainer?.widthTracksTextView = true
+        textView.autoresizingMask        = []
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let palette = SourceEditorStyle.palette(isDark: isDark)
+        textView.lineColor = palette.gutterText
+        textView.gutterBackgroundColor = palette.gutterBackground
+        textView.gutterSeparatorColor = palette.gutterSeparator
+
+        scrollView.hasHorizontalScroller = true
 
         scrollView.documentView    = textView
-        scrollView.backgroundColor = Self.background
+        scrollView.backgroundColor = Self.background(for: isDark)
         scrollView.drawsBackground = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
+
+        let gutterView = StickyGutterOverlayView(frame: .zero)
+        gutterView.textView = textView
+
+        NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: nil
+        ) { [weak gutterView] _ in
+            gutterView?.needsDisplay = true
+        }
 
         // Text is intentionally NOT set here.
         // makeNSView is called while the view still has a .zero frame;
@@ -260,20 +490,27 @@ private struct SourceTextView: NSViewRepresentable {
         // is why large files appeared to work but small ones didn't).
         // updateNSView is called after SwiftUI has assigned a real frame, so
         // the initial text application happens with a correct container width.
-        return scrollView
+        return GutterHostingView(
+            scrollView: scrollView,
+            gutterView: gutterView,
+            gutterWidth: LineNumberTextView.gutterWidth
+        )
     }
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? LineNumberTextView,
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let container = nsView as? GutterHostingView,
+              let textView = container.scrollView.documentView as? LineNumberTextView,
               textView.string != text else { return }
-        applyContent(to: textView)
+        applyContent(to: textView, coordinator: context.coordinator)
+        container.gutterView.needsDisplay = true
     }
 
-    private func applyContent(to textView: NSTextView) {
+    private func applyContent(to textView: NSTextView, coordinator: Coordinator) {
         textView.string = text
         if let storage = textView.textStorage {
-            SourceHighlighter.highlight(storage, language: language)
+            SourceHighlighter.highlight(storage, language: language, isDark: isDark)
         }
+        coordinator.scheduleHighlight(for: textView, text: text, language: language, isDark: isDark)
         // Force a synchronous layout pass immediately after setting text.
         //
         // Why: NSLayoutManager is lazy — glyph positions are only computed on
@@ -292,6 +529,7 @@ private struct SourceTextView: NSViewRepresentable {
 // MARK: - SourcePreviewView
 
 struct SourcePreviewView: View {
+    @Environment(ThemeManager.self) private var theme
     let title: String
     let content: String
     let language: SourceLanguage
@@ -299,31 +537,1216 @@ struct SourcePreviewView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            Divider()
-            SourceTextView(text: content, language: language)
+            SourceTextView(text: content, language: language, isDark: theme.isDark)
         }
+        .background(Color(SourceEditorStyle.palette(isDark: theme.isDark).background))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(SourceEditorStyle.palette(isDark: theme.isDark).border), lineWidth: 1)
+        )
+        .padding(12)
         .frame(minWidth: 680, minHeight: 500)
     }
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "doc.plaintext")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+        let palette = SourceEditorStyle.palette(isDark: theme.isDark)
+        return HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Circle().fill(Color(red: 1.0, green: 0.37, blue: 0.33)).frame(width: 9, height: 9)
+                Circle().fill(Color(red: 0.98, green: 0.74, blue: 0.18)).frame(width: 9, height: 9)
+                Circle().fill(Color(red: 0.18, green: 0.80, blue: 0.44)).frame(width: 9, height: 9)
+            }
             Text(title)
                 .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color(palette.text))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
             Text(language.displayName)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color(palette.gutterText))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                .background(Color(palette.background), in: RoundedRectangle(cornerRadius: 4))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(Color(.windowBackgroundColor))
+        .background(Color(palette.toolbar))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(palette.border))
+                .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Overlay File Inspector
+
+private enum SourceDiffDecorationKind: Equatable {
+    case addition
+    case deletion
+
+    var fillColor: NSColor {
+        switch self {
+        case .addition:
+            return NSColor.systemGreen.withAlphaComponent(0.11)
+        case .deletion:
+            return NSColor.systemRed.withAlphaComponent(0.11)
+        }
+    }
+
+    var accentColor: Color {
+        switch self {
+        case .addition:
+            return .green
+        case .deletion:
+            return .red
+        }
+    }
+
+    var accentNSColor: NSColor {
+        switch self {
+        case .addition:
+            return .systemGreen
+        case .deletion:
+            return .systemRed
+        }
+    }
+}
+
+private extension RepoViewModel.FileInspectorChangeKind {
+    var sourceDecorationKind: SourceDiffDecorationKind {
+        switch self {
+        case .addition:
+            return .addition
+        case .deletion:
+            return .deletion
+        }
+    }
+}
+
+private extension RepoViewModel.FileInspectorInlineHighlight {
+    var backgroundColor: NSColor {
+        switch kind {
+        case .addition:
+            return NSColor.systemGreen.withAlphaComponent(0.30)
+        case .deletion:
+            return NSColor.systemRed.withAlphaComponent(0.28)
+        }
+    }
+}
+
+private final class HighlightedSourceTextView: LineNumberTextView {
+    static let diffGutterWidth: CGFloat = 104
+
+    var lineHighlights: [Int: SourceDiffDecorationKind] = [:]
+    var inlineHighlights: [RepoViewModel.FileInspectorInlineHighlight] = []
+    var lineNumberPairs: [Int: (old: Int?, new: Int?)] = [:]
+    var hunkActionLines: [Int: Int] = [:] {
+        didSet {
+            guard hunkActionLines != oldValue else { return }
+            refreshHunkToolTips()
+        }
+    }
+    var hunkActionToolTips: [Int: String] = [:] {
+        didSet {
+            guard hunkActionToolTips != oldValue else { return }
+            refreshHunkToolTips()
+        }
+    }
+    var hunkActionSymbol = "+" {
+        didSet {
+            guard hunkActionSymbol != oldValue else { return }
+            refreshHunkToolTips()
+        }
+    }
+    var showsDiffGutter = false {
+        didSet {
+            guard showsDiffGutter != oldValue else { return }
+            refreshHunkToolTips()
+        }
+    }
+    var onHunkAction: ((Int) -> Void)?
+    var onSave: (() -> Void)?
+    var onUndo: (() -> Void)?
+    var onRedo: (() -> Void)?
+    var isDarkTheme = true
+
+    private let diffLineFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+    private let diffActionFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+    private var diffLineColor: NSColor {
+        isDarkTheme ? NSColor(white: 0.46, alpha: 1) : .secondaryLabelColor
+    }
+    private var diffGutterBg: NSColor {
+        isDarkTheme ? NSColor(red: 0.094, green: 0.098, blue: 0.110, alpha: 1) : NSColor.windowBackgroundColor
+    }
+    private var hunkToolTipTags: [NSView.ToolTipTag] = []
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        enumerateVisibleLogicalLines(in: rect) { lineNum, _, frag in
+            if let highlight = lineHighlights[lineNum] {
+                let lineY = frag.minY + 16
+                let rowRect = NSRect(x: 0, y: lineY, width: bounds.width, height: frag.height)
+                highlight.fillColor.setFill()
+                rowRect.fill()
+            }
+        }
+
+        guard drawsInlineGutter else { return }
+
+        let gutterMinX = pinnedViewportMinX(for: rect)
+        guard showsDiffGutter else { return }
+
+        diffGutterBg.setFill()
+        NSRect(x: gutterMinX, y: rect.minY, width: Self.diffGutterWidth, height: rect.height).fill()
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: diffLineFont,
+            .foregroundColor: diffLineColor
+        ]
+
+        enumerateVisibleLogicalLines(in: rect) { lineNum, _, frag in
+            let lineY = frag.minY + 16
+            let pair = lineNumberPairs[lineNum] ?? (lineNum, lineNum)
+            if hunkActionLines[lineNum] != nil {
+                drawHunkActionSymbol(x: gutterMinX + 12, y: lineY, height: frag.height)
+            }
+            drawDiffLineNumber(pair.old, x: gutterMinX + 52, y: lineY, height: frag.height, attrs: attrs)
+            drawDiffLineNumber(pair.new, x: gutterMinX + 94, y: lineY, height: frag.height, attrs: attrs)
+
+            if let highlight = lineHighlights[lineNum] {
+                highlight.accentNSColor.withAlphaComponent(0.95).setFill()
+                let accentX = highlight == .deletion ? gutterMinX : gutterMinX + Self.diffGutterWidth / 2
+                NSRect(x: accentX, y: lineY, width: 3, height: frag.height).fill()
+            }
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if showsDiffGutter,
+           point.x < textContainerInset.width,
+           point.x <= 24,
+           let line = logicalLineNumber(at: point),
+           let hunkIndex = hunkActionLines[line] {
+            onHunkAction?(hunkIndex)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func layout() {
+        super.layout()
+        refreshHunkToolTips()
+    }
+
+    private func logicalLineNumber(at point: NSPoint) -> Int? {
+        guard let layoutManager,
+              let textContainer else { return nil }
+
+        let containerPoint = NSPoint(
+            x: max(point.x - textContainerInset.width, 0),
+            y: max(point.y - textContainerInset.height, 0)
+        )
+        let charIndex = layoutManager.characterIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        return lineNumber(forCharacterIndex: charIndex)
+    }
+
+    private func lineNumber(forCharacterIndex charIndex: Int) -> Int {
+        let text = string as NSString
+        let safeIndex = min(max(charIndex, 0), text.length)
+        var line = 1
+        var location = 0
+        while location < safeIndex {
+            let lineRange = text.lineRange(for: NSRange(location: location, length: 0))
+            location = NSMaxRange(lineRange)
+            if location <= safeIndex {
+                line += 1
+            }
+        }
+        return line
+    }
+
+    private func drawHunkActionSymbol(x: CGFloat, y: CGFloat, height: CGFloat) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: diffActionFont,
+            .foregroundColor: NSColor.labelColor
+        ]
+        let label = hunkActionSymbol as NSString
+        let size = label.size(withAttributes: attrs)
+        label.draw(
+            at: NSPoint(x: x - size.width / 2, y: y + (height - size.height) / 2),
+            withAttributes: attrs
+        )
+    }
+
+    private func refreshHunkToolTips() {
+        hunkToolTipTags.forEach(removeToolTip)
+        hunkToolTipTags.removeAll()
+
+        guard showsDiffGutter,
+              !hunkActionLines.isEmpty,
+              let layoutManager,
+              let textContainer else { return }
+
+        for line in hunkActionLines.keys.sorted() {
+            guard let lineRect = logicalLineRect(for: line, layoutManager: layoutManager, textContainer: textContainer) else { continue }
+            let tipRect = NSRect(x: 0, y: lineRect.minY, width: 24, height: lineRect.height)
+            hunkToolTipTags.append(addToolTip(tipRect, owner: self, userData: nil))
+        }
+    }
+
+    private func logicalLineRect(
+        for lineNumber: Int,
+        layoutManager: NSLayoutManager,
+        textContainer: NSTextContainer
+    ) -> NSRect? {
+        guard lineNumber > 0 else { return nil }
+        let nsText = string as NSString
+        var currentLine = 1
+        var location = 0
+
+        while currentLine < lineNumber && location < nsText.length {
+            let lineRange = nsText.lineRange(for: NSRange(location: location, length: 0))
+            location = NSMaxRange(lineRange)
+            currentLine += 1
+        }
+
+        guard currentLine == lineNumber else { return nil }
+        let targetRange = nsText.lineRange(for: NSRange(location: min(location, nsText.length), length: 0))
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: targetRange, actualCharacterRange: nil)
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        rect.origin.x += textContainerInset.width
+        rect.origin.y += textContainerInset.height
+        return rect
+    }
+
+    private func drawDiffLineNumber(_ value: Int?, x: CGFloat, y: CGFloat, height: CGFloat, attrs: [NSAttributedString.Key: Any]) {
+        let label = (value.map(String.init) ?? "") as NSString
+        let size = label.size(withAttributes: attrs)
+        label.draw(
+            at: NSPoint(x: x - size.width, y: y + (height - size.height) / 2),
+            withAttributes: attrs
+        )
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if handleShortcut(event) {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    private func handleShortcut(_ event: NSEvent) -> Bool {
+        guard let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let supportsShortcut = flags.contains(.command) || (flags.contains(.control) && !flags.contains(.command))
+        guard supportsShortcut else { return false }
+        let activeUndoManager = undoManager ?? window?.undoManager
+
+        switch key {
+        case "c":
+            copy(nil)
+        case "v":
+            paste(nil)
+        case "x":
+            cut(nil)
+        case "z":
+            if showsDiffGutter {
+                if flags.contains(.shift) {
+                    onRedo?()
+                } else {
+                    onUndo?()
+                }
+            } else {
+                if flags.contains(.shift) {
+                    activeUndoManager?.redo()
+                } else {
+                    activeUndoManager?.undo()
+                }
+            }
+        case "a":
+            selectAll(nil)
+        case "s":
+            onSave?()
+        default:
+            return false
+        }
+        return true
+    }
+}
+
+extension HighlightedSourceTextView: NSViewToolTipOwner {
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        guard let line = logicalLineNumber(at: point),
+              let range = hunkActionToolTips[line]
+        else {
+            return hunkActionSymbol == "-" ? "取消暂存这个区块" : "暂存这个区块"
+        }
+        let action = hunkActionSymbol == "-" ? "取消暂存" : "暂存"
+        return "\(action)这个区块 (\(range))"
+    }
+}
+
+private final class StickyGutterOverlayView: NSView {
+    weak var textView: LineNumberTextView?
+    var showsDiffGutter = false { didSet { needsDisplay = true } }
+    var lineHighlights: [Int: SourceDiffDecorationKind] = [:] { didSet { needsDisplay = true } }
+    var lineNumberPairs: [Int: (old: Int?, new: Int?)] = [:] { didSet { needsDisplay = true } }
+    var hunkActionLines: [Int: Int] = [:] { didSet { needsDisplay = true } }
+    var hunkActionToolTips: [Int: String] = [:] { didSet { needsDisplay = true } }
+    var hunkActionSymbol = "+" { didSet { needsDisplay = true } }
+    var isDarkTheme = true { didSet { needsDisplay = true } }
+
+    private let lineFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private var lineColor: NSColor { SourceEditorStyle.palette(isDark: isDarkTheme).gutterText }
+    private let diffLineFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+    private let diffActionFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+    private var diffLineColor: NSColor { SourceEditorStyle.palette(isDark: isDarkTheme).gutterText }
+    private var gutterBg: NSColor {
+        SourceEditorStyle.palette(isDark: isDarkTheme).gutterBackground
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let textView, let scrollView = textView.enclosingScrollView else { return }
+        let visibleRect = scrollView.contentView.bounds
+
+        gutterBg.setFill()
+        bounds.fill()
+
+        if showsDiffGutter {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: diffLineFont,
+                .foregroundColor: diffLineColor
+            ]
+
+            textView.enumerateVisibleLogicalLines(in: visibleRect) { lineNum, _, frag in
+                let lineY = frag.minY + 16 - visibleRect.minY
+                let pair = self.lineNumberPairs[lineNum] ?? (lineNum, lineNum)
+                if self.hunkActionLines[lineNum] != nil {
+                    self.drawHunkActionSymbol(x: 12, y: lineY, height: frag.height)
+                }
+                self.drawDiffLineNumber(pair.old, x: 52, y: lineY, height: frag.height, attrs: attrs)
+                self.drawDiffLineNumber(pair.new, x: 94, y: lineY, height: frag.height, attrs: attrs)
+
+                if let highlight = self.lineHighlights[lineNum] {
+                    highlight.accentNSColor.withAlphaComponent(0.95).setFill()
+                    let accentX = highlight == .deletion ? 0 : HighlightedSourceTextView.diffGutterWidth / 2
+                    NSRect(x: accentX, y: lineY, width: 3, height: frag.height).fill()
+                }
+            }
+        } else {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: lineFont,
+                .foregroundColor: lineColor
+            ]
+
+            textView.enumerateVisibleLogicalLines(in: visibleRect) { lineNum, _, frag in
+                let label = "\(lineNum)" as NSString
+                let sz = label.size(withAttributes: attrs)
+                label.draw(
+                    at: NSPoint(
+                        x: LineNumberTextView.gutterWidth - sz.width - 8,
+                        y: frag.minY + 16 + (frag.height - sz.height) / 2 - visibleRect.minY
+                    ),
+                    withAttributes: attrs
+                )
+            }
+        }
+    }
+
+    private func drawDiffLineNumber(_ value: Int?, x: CGFloat, y: CGFloat, height: CGFloat, attrs: [NSAttributedString.Key: Any]) {
+        let label = (value.map(String.init) ?? "") as NSString
+        let size = label.size(withAttributes: attrs)
+        label.draw(
+            at: NSPoint(x: x - size.width, y: y + (height - size.height) / 2),
+            withAttributes: attrs
+        )
+    }
+
+    private func drawHunkActionSymbol(x: CGFloat, y: CGFloat, height: CGFloat) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: diffActionFont,
+            .foregroundColor: NSColor.labelColor
+        ]
+        let label = hunkActionSymbol as NSString
+        let size = label.size(withAttributes: attrs)
+        label.draw(
+            at: NSPoint(x: x - size.width / 2, y: y + (height - size.height) / 2),
+            withAttributes: attrs
+        )
+    }
+}
+
+private final class LockedHorizontalClipView: NSClipView {
+    private var lockedHorizontalOriginX: CGFloat?
+    private var horizontalLockDeadline: CFTimeInterval = 0
+    private let horizontalLockDuration: CFTimeInterval = 0.35
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(newSize.width - frame.size.width) > 0.5
+        if widthChanged {
+            lockedHorizontalOriginX = bounds.origin.x
+            horizontalLockDeadline = CACurrentMediaTime() + horizontalLockDuration
+        }
+
+        super.setFrameSize(newSize)
+    }
+
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var constrained = super.constrainBoundsRect(proposedBounds)
+        let now = CACurrentMediaTime()
+
+        if let lockedHorizontalOriginX, now <= horizontalLockDeadline {
+            constrained.origin.x = lockedHorizontalOriginX
+        } else if abs(proposedBounds.width - bounds.width) > 0.5 {
+            constrained.origin.x = bounds.origin.x
+        } else if lockedHorizontalOriginX != nil {
+            self.lockedHorizontalOriginX = nil
+        }
+
+        return constrained
+    }
+}
+
+private final class GutterHostingView: NSView {
+    let scrollView: NSScrollView
+    let gutterView: StickyGutterOverlayView
+    private let gutterWidth: CGFloat
+
+    init(scrollView: NSScrollView, gutterView: StickyGutterOverlayView, gutterWidth: CGFloat) {
+        self.scrollView = scrollView
+        self.gutterView = gutterView
+        self.gutterWidth = gutterWidth
+        super.init(frame: .zero)
+        addSubview(scrollView)
+        addSubview(gutterView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        scrollView.frame = bounds
+        let clipFrame = scrollView.contentView.frame
+        gutterView.frame = NSRect(x: clipFrame.minX, y: clipFrame.minY, width: gutterWidth, height: clipFrame.height)
+    }
+}
+
+private struct EditableSourceTextView: NSViewRepresentable {
+    let text: String
+    let language: SourceLanguage
+    let isEditable: Bool
+    let isDark: Bool
+    let lineHighlights: [Int: RepoViewModel.FileInspectorChangeKind]
+    let inlineHighlights: [RepoViewModel.FileInspectorInlineHighlight]
+    let lineNumberPairs: [Int: RepoViewModel.FileInspectorLinePair]
+    let hunkActionLines: [Int: Int]
+    let hunkActionToolTips: [Int: String]
+    let hunkActionSymbol: String
+    let showsDiffGutter: Bool
+    let targetLine: Int?
+    let selectedRange: NSRange?
+    let onHunkAction: ((Int) -> Void)?
+    let prepareTextChange: ((NSRange, String?) -> String?)?
+    let onTextChange: (String, NSRange) -> Void
+    let onUndo: (() -> Void)?
+    let onRedo: (() -> Void)?
+    let onSave: () -> Void
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: EditableSourceTextView
+        var isUpdating = false
+        var lastScrolledLine: Int?
+        var pendingModelText: String?
+        var pendingSelection: NSRange?
+        var lastLocalEditAt: CFTimeInterval = 0
+
+        init(parent: EditableSourceTextView) {
+            self.parent = parent
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard let prepareTextChange = parent.prepareTextChange else { return true }
+            guard let modelText = prepareTextChange(affectedCharRange, replacementString) else {
+                NSSound.beep()
+                return false
+            }
+
+            pendingModelText = modelText
+            pendingSelection = predictedSelection(
+                from: textView.selectedRange(),
+                affectedRange: affectedCharRange,
+                replacementString: replacementString
+            )
+            lastLocalEditAt = CACurrentMediaTime()
+            return true
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            isUpdating = true
+            let selection = pendingSelection ?? textView.selectedRange()
+            parent.onTextChange(pendingModelText ?? textView.string, selection)
+            if let storage = textView.textStorage {
+                SourceHighlighter.highlight(storage, language: parent.language, isDark: parent.isDark)
+                EditableSourceTextView.applyInlineHighlights(parent.inlineHighlights, to: storage)
+                textView.setSelectedRange(selection)
+            }
+            pendingModelText = nil
+            isUpdating = false
+        }
+
+        private func predictedSelection(
+            from selectedRange: NSRange,
+            affectedRange: NSRange,
+            replacementString: String?
+        ) -> NSRange {
+            let replacementLength = ((replacementString ?? "") as NSString).length
+            let insertionPoint = affectedRange.location + replacementLength
+            if selectedRange.location >= affectedRange.location {
+                return NSRange(location: insertionPoint, length: 0)
+            }
+            return selectedRange
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let scrollView = NSTextView.scrollableTextView()
+        let clipView = LockedHorizontalClipView()
+        clipView.drawsBackground = true
+        clipView.backgroundColor = SourceTextView.background(for: isDark)
+        scrollView.contentView = clipView
+
+        let textView = HighlightedSourceTextView(frame: .zero)
+        textView.drawsInlineGutter = false
+        textView.delegate = context.coordinator
+        textView.isEditable = isEditable
+        textView.isSelectable = true
+        textView.allowsUndo = !showsDiffGutter
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.backgroundColor = SourceTextView.background(for: isDark)
+        textView.drawsBackground = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.autoresizingMask = []
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.insertionPointColor = isDark ? .white : .labelColor
+        textView.selectedTextAttributes = [.backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.28)]
+        textView.onSave = onSave
+        textView.onUndo = onUndo
+        textView.onRedo = onRedo
+        textView.isDarkTheme = isDark
+        let palette = SourceEditorStyle.palette(isDark: isDark)
+        textView.lineColor = palette.gutterText
+        textView.gutterBackgroundColor = palette.gutterBackground
+        textView.gutterSeparatorColor = palette.gutterSeparator
+        textView.textContainerInset = NSSize(
+            width: showsDiffGutter ? HighlightedSourceTextView.diffGutterWidth + 12 : LineNumberTextView.gutterWidth + 16,
+            height: 16
+        )
+        if let selectedRange {
+            textView.setSelectedRange(selectedRange)
+        }
+
+        scrollView.documentView = textView
+        scrollView.backgroundColor = SourceTextView.background(for: isDark)
+        scrollView.drawsBackground = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
+
+        let gutterView = StickyGutterOverlayView(frame: .zero)
+        gutterView.textView = textView
+        gutterView.showsDiffGutter = showsDiffGutter
+        gutterView.isDarkTheme = isDark
+
+        NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: nil
+        ) { [weak gutterView] _ in
+            gutterView?.needsDisplay = true
+        }
+
+        return GutterHostingView(
+            scrollView: scrollView,
+            gutterView: gutterView,
+            gutterWidth: showsDiffGutter ? HighlightedSourceTextView.diffGutterWidth : LineNumberTextView.gutterWidth
+        )
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard let container = nsView as? GutterHostingView,
+              let textView = container.scrollView.documentView as? HighlightedSourceTextView else { return }
+
+        context.coordinator.parent = self
+        textView.isEditable = isEditable
+        textView.allowsUndo = !showsDiffGutter
+        textView.lineHighlights = showsDiffGutter
+            ? Dictionary(uniqueKeysWithValues: lineHighlights.map { ($0.key, $0.value.sourceDecorationKind) })
+            : [:]
+        textView.inlineHighlights = showsDiffGutter ? inlineHighlights : []
+        textView.lineNumberPairs = showsDiffGutter
+            ? Dictionary(uniqueKeysWithValues: lineNumberPairs.map { ($0.key, (old: $0.value.old, new: $0.value.new)) })
+            : [:]
+        textView.hunkActionLines = showsDiffGutter ? hunkActionLines : [:]
+        textView.hunkActionToolTips = showsDiffGutter ? hunkActionToolTips : [:]
+        textView.hunkActionSymbol = hunkActionSymbol
+        textView.showsDiffGutter = showsDiffGutter
+        textView.onHunkAction = onHunkAction
+        textView.onSave = onSave
+        textView.onUndo = onUndo
+        textView.onRedo = onRedo
+        textView.isDarkTheme = isDark
+        textView.backgroundColor = SourceTextView.background(for: isDark)
+        let palette = SourceEditorStyle.palette(isDark: isDark)
+        textView.lineColor = palette.gutterText
+        textView.gutterBackgroundColor = palette.gutterBackground
+        textView.gutterSeparatorColor = palette.gutterSeparator
+        container.gutterView.showsDiffGutter = showsDiffGutter
+        container.gutterView.lineHighlights = textView.lineHighlights
+        container.gutterView.lineNumberPairs = textView.lineNumberPairs
+        container.gutterView.hunkActionLines = textView.hunkActionLines
+        container.gutterView.hunkActionToolTips = textView.hunkActionToolTips
+        container.gutterView.hunkActionSymbol = hunkActionSymbol
+        container.gutterView.isDarkTheme = isDark
+        container.scrollView.backgroundColor = SourceTextView.background(for: isDark)
+        container.scrollView.contentView.backgroundColor = SourceTextView.background(for: isDark)
+
+        let currentLineCount = max(textView.string.components(separatedBy: "\n").count, 1)
+        let incomingLineCount = max(text.components(separatedBy: "\n").count, 1)
+        let shouldForceDisplaySync = showsDiffGutter && (
+            currentLineCount != incomingLineCount ||
+            abs((textView.string as NSString).length - (text as NSString).length) > 1
+        )
+        let isWithinLocalEditWindow = showsDiffGutter &&
+            CACurrentMediaTime() - context.coordinator.lastLocalEditAt < 0.35
+        if !context.coordinator.isUpdating,
+           textView.string != text,
+           (!isWithinLocalEditWindow || shouldForceDisplaySync) {
+            textView.string = text
+            if let storage = textView.textStorage {
+                SourceHighlighter.highlight(storage, language: language, isDark: isDark)
+                Self.applyInlineHighlights(inlineHighlights, to: storage)
+            }
+            _ = textView.layoutManager?.numberOfGlyphs
+
+            let selectionToRestore = showsDiffGutter
+                ? selectedRange
+                : (context.coordinator.pendingSelection ?? selectedRange)
+            if let selectionToRestore {
+                let clampedLocation = min(selectionToRestore.location, (textView.string as NSString).length)
+                let clampedLength = min(selectionToRestore.length, (textView.string as NSString).length - clampedLocation)
+                textView.setSelectedRange(NSRange(location: clampedLocation, length: clampedLength))
+                context.coordinator.pendingSelection = nil
+            }
+        }
+
+        textView.needsDisplay = true
+        container.gutterView.needsDisplay = true
+
+        if let targetLine, context.coordinator.lastScrolledLine != targetLine {
+            context.coordinator.lastScrolledLine = targetLine
+            scroll(textView: textView, toLine: targetLine)
+            container.gutterView.needsDisplay = true
+        }
+    }
+
+    private static func applyInlineHighlights(
+        _ highlights: [RepoViewModel.FileInspectorInlineHighlight],
+        to storage: NSTextStorage
+    ) {
+        guard !highlights.isEmpty else { return }
+        let storageLength = storage.length
+        for highlight in highlights {
+            guard highlight.range.length > 0,
+                  highlight.range.location >= 0,
+                  NSMaxRange(highlight.range) <= storageLength else {
+                continue
+            }
+            storage.addAttribute(.backgroundColor, value: highlight.backgroundColor, range: highlight.range)
+        }
+    }
+
+    private func scroll(textView: NSTextView, toLine lineNumber: Int) {
+        guard lineNumber > 0,
+              let scrollView = textView.enclosingScrollView,
+              let textContainer = textView.textContainer,
+              let layoutManager = textView.layoutManager else { return }
+        let nsString = textView.string as NSString
+        var currentLine = 1
+        var location = 0
+
+        while currentLine < lineNumber && location < nsString.length {
+            let lineRange = nsString.lineRange(for: NSRange(location: location, length: 0))
+            location = NSMaxRange(lineRange)
+            currentLine += 1
+        }
+
+        let targetRange = nsString.lineRange(for: NSRange(location: min(location, nsString.length), length: 0))
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: targetRange, actualCharacterRange: nil)
+        var targetRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+
+        targetRect.origin.x += textView.textContainerInset.width
+        targetRect.origin.y += textView.textContainerInset.height
+
+        let clipView = scrollView.contentView
+        let visibleRect = clipView.documentVisibleRect
+        let maxY = max(textView.bounds.height - visibleRect.height, 0)
+
+        // Jump vertically while preserving the user's current horizontal position.
+        let desiredY = min(max(targetRect.minY - (visibleRect.height * 0.2), 0), maxY)
+        let targetOrigin = NSPoint(x: visibleRect.minX, y: desiredY)
+        clipView.scroll(to: targetOrigin)
+        scrollView.reflectScrolledClipView(clipView)
+    }
+}
+
+private struct DiffOverviewRail: View {
+    let totalLines: Int
+    let segments: [RepoViewModel.FileInspectorOverviewSegment]
+    let onJump: (Int) -> Void
+
+    private let minimumSegmentHeight: CGFloat = 6
+    private let mergePixelGap: CGFloat = 3
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.white.opacity(0.05))
+
+                Canvas { context, size in
+                    let columnWidth = max((size.width - 2) / 2, 1)
+                    drawColumn(.deletion, x: 0, width: columnWidth, height: size.height, context: &context)
+                    drawColumn(.addition, x: columnWidth + 2, width: columnWidth, height: size.height, context: &context)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let ratio = min(max(value.location.y / max(geo.size.height, 1), 0), 1)
+                        let line = max(1, Int(CGFloat(totalLines) * ratio))
+                        onJump(line)
+                    }
+            )
+        }
+    }
+
+    private func drawColumn(
+        _ kind: RepoViewModel.FileInspectorChangeKind,
+        x: CGFloat,
+        width: CGFloat,
+        height: CGFloat,
+        context: inout GraphicsContext
+    ) {
+        let decoration = kind.sourceDecorationKind
+        let bgRect = CGRect(x: x, y: 0, width: width, height: height)
+        context.fill(Path(roundedRect: bgRect, cornerRadius: 5), with: .color(decoration.accentColor.opacity(0.04)))
+
+        for segment in coalescedSegments(for: kind, height: height) {
+            let top = height * CGFloat(max(segment.startLine - 1, 0)) / CGFloat(max(totalLines, 1))
+            let segmentHeight = max(minimumSegmentHeight, height * CGFloat(max(segment.endLine - segment.startLine + 1, 1)) / CGFloat(max(totalLines, 1)))
+            let rect = CGRect(
+                x: x,
+                y: min(top, max(height - segmentHeight, 0)),
+                width: width,
+                height: segmentHeight
+            )
+            context.fill(Path(roundedRect: rect, cornerRadius: 4), with: .color(decoration.accentColor.opacity(0.55)))
+        }
+    }
+
+    private func coalescedSegments(
+        for kind: RepoViewModel.FileInspectorChangeKind,
+        height: CGFloat
+    ) -> [RepoViewModel.FileInspectorOverviewSegment] {
+        let filtered = segments.filter { $0.kind == kind }.sorted { $0.startLine < $1.startLine }
+        guard var current = filtered.first else { return [] }
+
+        var result: [RepoViewModel.FileInspectorOverviewSegment] = []
+
+        for next in filtered.dropFirst() {
+            let currentBottom = projectedBottom(for: current, height: height)
+            let nextTop = projectedTop(for: next, height: height)
+
+            if nextTop - currentBottom <= mergePixelGap {
+                current = RepoViewModel.FileInspectorOverviewSegment(
+                    startLine: current.startLine,
+                    endLine: max(current.endLine, next.endLine),
+                    kind: current.kind
+                )
+            } else {
+                result.append(current)
+                current = next
+            }
+        }
+
+        result.append(current)
+        return result
+    }
+
+    private func projectedTop(
+        for segment: RepoViewModel.FileInspectorOverviewSegment,
+        height: CGFloat
+    ) -> CGFloat {
+        height * CGFloat(max(segment.startLine - 1, 0)) / CGFloat(max(totalLines, 1))
+    }
+
+    private func projectedBottom(
+        for segment: RepoViewModel.FileInspectorOverviewSegment,
+        height: CGFloat
+    ) -> CGFloat {
+        projectedTop(for: segment, height: height)
+            + max(minimumSegmentHeight, height * CGFloat(max(segment.endLine - segment.startLine + 1, 1)) / CGFloat(max(totalLines, 1)))
+    }
+}
+
+struct FileInspectorOverlayView: View {
+    @Environment(ThemeManager.self) private var theme
+    let viewModel: RepoViewModel
+
+    @State private var targetLine: Int?
+    @State private var showCloseConfirmation = false
+    @State private var pendingModeSwitch: RepoViewModel.FileInspectorMode?
+
+    private var canToggleHunks: Bool {
+        viewModel.fileInspectorMode == .diff &&
+        !viewModel.isFileInspectorDiffEditing &&
+        !viewModel.isFileInspectorDirty &&
+        (viewModel.currentDiffContext == .staged || viewModel.currentDiffContext == .unstaged)
+    }
+
+    private var hunkActionSymbol: String {
+        viewModel.currentDiffContext == .staged ? "-" : "+"
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(theme.isDark ? 0.34 : 0.12)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                header
+                    .zIndex(1)
+                Divider().overlay(Color.white.opacity(0.08))
+
+                Group {
+                    if viewModel.fileInspectorMode == .history {
+                        FileHistoryPanelContent(viewModel: viewModel, showsToolbar: false)
+                    } else if viewModel.fileInspectorMode == .diff && viewModel.isFileTooLarge {
+                        fileTooLargeState
+                    } else if viewModel.fileInspectorMode != .diff &&
+                                !viewModel.isFileInspectorEditable &&
+                                viewModel.fileInspectorContent.isEmpty {
+                        unsupportedContentState
+                    } else {
+                        let isDiffMode = viewModel.fileInspectorMode == .diff
+                        let showsRenderedDiff = isDiffMode && !viewModel.isFileInspectorDiffEditing
+                        if !isDiffMode && viewModel.fileInspectorPath.isMarkdownFile {
+                            MarkdownInspectorContentView(
+                                text: Binding(
+                                    get: { viewModel.fileInspectorContent },
+                                    set: { viewModel.fileInspectorContent = $0 }
+                                ),
+                                isEditable: viewModel.isFileInspectorEditable
+                            )
+                        } else {
+                            HStack(spacing: 0) {
+                                EditableSourceTextView(
+                                    text: isDiffMode
+                                        ? viewModel.fileInspectorDisplayContent
+                                        : viewModel.fileInspectorContent,
+                                    language: viewModel.fileInspectorPath.sourceLanguage,
+                                    isEditable: viewModel.isFileInspectorEditable,
+                                    isDark: theme.isDark,
+                                    lineHighlights: viewModel.fileInspectorLineHighlights,
+                                    inlineHighlights: viewModel.fileInspectorInlineHighlights,
+                                    lineNumberPairs: viewModel.fileInspectorLinePairs,
+                                    hunkActionLines: canToggleHunks ? viewModel.fileInspectorHunkControls : [:],
+                                    hunkActionToolTips: canToggleHunks ? viewModel.fileInspectorHunkToolTips : [:],
+                                    hunkActionSymbol: hunkActionSymbol,
+                                    showsDiffGutter: showsRenderedDiff,
+                                    targetLine: targetLine,
+                                    selectedRange: viewModel.fileInspectorSelectedRange,
+                                    onHunkAction: canToggleHunks ? { hunkIndex in
+                                        Task {
+                                            if viewModel.currentDiffContext == .staged {
+                                                await viewModel.unstageHunk(hunkIndex)
+                                            } else {
+                                                await viewModel.stageHunk(hunkIndex)
+                                            }
+                                            if let file = viewModel.selectedDiffFile {
+                                                await viewModel.openFileInspector(
+                                                    file,
+                                                    context: viewModel.currentDiffContext,
+                                                    preferredMode: .diff
+                                                )
+                                            }
+                                        }
+                                    } : nil,
+                                    prepareTextChange: isDiffMode ? { affectedRange, replacementString in
+                                        viewModel.prepareFileInspectorDiffEdit(
+                                            affectedRange: affectedRange,
+                                            replacementString: replacementString
+                                        )
+                                    } : nil,
+                                    onTextChange: { text, selection in
+                                        if isDiffMode {
+                                            viewModel.applyPreparedFileInspectorDiffEdit(
+                                                content: text,
+                                                renderedSelection: selection
+                                            )
+                                        } else {
+                                            viewModel.fileInspectorContent = text
+                                        }
+                                    },
+                                    onUndo: isDiffMode ? {
+                                        viewModel.undoFileInspectorDiffEdit()
+                                    } : nil,
+                                    onRedo: isDiffMode ? {
+                                        viewModel.redoFileInspectorDiffEdit()
+                                    } : nil,
+                                    onSave: {
+                                        Task { await viewModel.saveFileInspector() }
+                                    }
+                                )
+
+                                if isDiffMode && !viewModel.fileInspectorOverviewSegments.isEmpty {
+                                    Divider().overlay(Color.white.opacity(0.08))
+                                    DiffOverviewRail(totalLines: viewModel.fileInspectorTotalLines, segments: viewModel.fileInspectorOverviewSegments) { line in
+                                        targetLine = line
+                                    }
+                                    .frame(width: 28)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 14)
+                                    .background(theme.isDark ? Color.black.opacity(0.16) : Color(nsColor: .windowBackgroundColor))
+                                }
+                            }
+                        }
+                    }
+                }
+                .clipped()
+            }
+            .background(Color(nsColor: SourceTextView.background(for: theme.isDark)))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1)
+            )
+            .padding(2)
+        }
+        .onChange(of: viewModel.fileInspectorPath) { _, _ in
+            targetLine = nil
+        }
+        .alert("Save Changes?", isPresented: $showCloseConfirmation) {
+            Button("Save") {
+                Task {
+                    if await viewModel.saveFileInspector() {
+                        handleConfirmedInspectorDismissal()
+                    }
+                }
+            }
+            Button("Don't Save", role: .destructive) {
+                handleConfirmedInspectorDismissal()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You have unsaved changes in \(viewModel.fileInspectorTitle).")
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 10) {
+                    Text(viewModel.fileInspectorTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    modePicker
+                }
+
+                HStack(spacing: 8) {
+                    Text(viewModel.activeFileInspectorPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if viewModel.isFileInspectorEditable && viewModel.fileInspectorMode != .history {
+                        saveHint
+                    }
+                }
+            }
+
+            Spacer()
+
+            if viewModel.isFileInspectorDirty {
+                Text("Edited")
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.16), in: Capsule())
+                    .foregroundStyle(.orange)
+            }
+
+            Button {
+                pendingModeSwitch = nil
+                if viewModel.isFileInspectorDirty {
+                    showCloseConfirmation = true
+                } else {
+                    viewModel.closeFileInspector()
+                }
+            } label: {
+                Group {
+                    if viewModel.isSavingFileInspector {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 28, height: 28)
+                    } else {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .disabled(viewModel.isSavingFileInspector)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(theme.isDark ? Color.black.opacity(0.16) : Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var modePicker: some View {
+        Picker("", selection: Binding(
+            get: { viewModel.fileInspectorMode },
+            set: { mode in
+                if viewModel.fileInspectorMode != .history &&
+                    mode == .history &&
+                    viewModel.isFileInspectorDirty {
+                    pendingModeSwitch = mode
+                    showCloseConfirmation = true
+                } else {
+                    Task { await viewModel.setFileInspectorMode(mode) }
+                }
+            }
+        )) {
+            Label("Preview", systemImage: "doc.text")
+                .tag(RepoViewModel.FileInspectorMode.preview)
+            Label("Diff", systemImage: "square.split.2x1")
+                .tag(RepoViewModel.FileInspectorMode.diff)
+            Label("History", systemImage: "clock.arrow.circlepath")
+                .tag(RepoViewModel.FileInspectorMode.history)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 320)
+    }
+
+    private var saveHint: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "keyboard")
+                .font(.system(size: 9, weight: .medium))
+            Text("Cmd+S")
+                .font(.system(size: 10, weight: .medium))
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.05), in: Capsule())
+        .foregroundStyle(.secondary)
+    }
+
+    private func handleConfirmedInspectorDismissal() {
+        if let mode = pendingModeSwitch {
+            pendingModeSwitch = nil
+            Task { await viewModel.setFileInspectorMode(mode) }
+        } else {
+            viewModel.closeFileInspector()
+        }
+    }
+
+    private var fileTooLargeState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text("Diff is too large to render")
+                .font(.system(size: 13, weight: .medium))
+            Text("\(viewModel.fileTooLargeSizeMB) MB")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Button("Switch To Preview") {
+                viewModel.fileInspectorMode = .preview
+            }
+            .buttonStyle(.borderedProminent)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var unsupportedContentState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "doc.zipper")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text("This file can't be displayed as editable text")
+                .font(.system(size: 13, weight: .medium))
+            if let encoding = viewModel.fileInspectorEncodingName {
+                Text("Detected encoding: \(encoding)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Binary file or unsupported text encoding")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Text("Editing is disabled for this file.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            if let message = viewModel.fileInspectorMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

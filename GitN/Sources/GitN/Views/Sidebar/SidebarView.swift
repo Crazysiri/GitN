@@ -502,7 +502,6 @@ struct SidebarView: View {
                     if let commit = viewModel.commits.first(where: {
                         $0.shortHash == viewModel.currentBranch || $0.hash.hasPrefix(viewModel.currentBranch)
                     }) {
-                        viewModel.scrollToCommitHash = commit.hash
                         Task { await viewModel.selectCommit(commit) }
                     }
                 }
@@ -524,7 +523,6 @@ struct SidebarView: View {
                         guard !branch.isCurrent else { return }
                         Task { await viewModel.performCheckoutBranch(branch.name) }
                     }
-                    .onTapGesture { viewModel.scrollToCommitForBranch(branch) }
                     .contextMenu {
                         localBranchContextMenu(branch)
                             .font(.system(size: 11, weight: .medium))
@@ -574,9 +572,6 @@ struct SidebarView: View {
                             .padding(.leading, 8)
                             .onTapGesture(count: 2) {
                                 Task { await viewModel.performCheckoutBranch(branch.name) }
-                            }
-                            .onTapGesture {
-                                viewModel.scrollToCommitForBranch(branch)
                             }
                             .contextMenu {
                                 remoteBranchContextMenu(branch, remoteName: remote.name)
@@ -786,9 +781,6 @@ struct SidebarView: View {
                     .onTapGesture(count: 2) {
                         Task { await viewModel.performCheckoutBranch(tag) }
                     }
-                    .onTapGesture {
-                        viewModel.scrollToCommitForTag(tag)
-                    }
                     .contextMenu {
                         tagContextMenu(tag)
                             .font(.system(size: 11, weight: .medium))
@@ -809,9 +801,6 @@ struct SidebarView: View {
         ) {
             ForEach(viewModel.stashes) { stash in
                 SidebarStashRow(stash: stash)
-                    .onTapGesture {
-                        viewModel.scrollToCommitForStash(stash)
-                    }
                     .contextMenu {
                         Group {
                             Button("Apply (keep stash)") {

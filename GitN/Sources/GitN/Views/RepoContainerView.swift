@@ -92,13 +92,6 @@ struct RepoContainerView: View {
         .sheet(isPresented: $showNewBranch) {
             newBranchSheet
         }
-        .sheet(isPresented: Binding(
-            get: { viewModel.showFileHistory },
-            set: { if !$0 { viewModel.closeFileHistory() } }
-        )) {
-            FileHistoryView(viewModel: viewModel)
-                .frame(minWidth: 800, minHeight: 550)
-        }
         .alert(
             "Branch Not Fully Merged",
             isPresented: Binding(
@@ -177,57 +170,65 @@ struct RepoContainerView: View {
 
     @ViewBuilder
     private var centerPanel: some View {
-        VStack(spacing: 0) {
-            repoToolbar
-            Divider()
-
-            if viewModel.showHostKeyPrompt {
-                hostKeyBanner
+        ZStack {
+            VStack(spacing: 0) {
+                repoToolbar
                 Divider()
-            }
 
-            if viewModel.showPushUpstreamPrompt {
-                pushUpstreamBanner
-                Divider()
-            }
-
-            GraphView(viewModel: viewModel)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if viewModel.showTerminal {
-                ZStack {
+                if viewModel.showHostKeyPrompt {
+                    hostKeyBanner
                     Divider()
-                    Color.clear
-                        .frame(height: 8)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 1)
-                                .onChanged { value in
-                                    if terminalDragStartHeight == nil {
-                                        terminalDragStartHeight = terminalHeight
-                                    }
-                                    let newH = (terminalDragStartHeight ?? terminalHeight) - value.translation.height
-                                    terminalHeight = max(100, min(700, newH))
-                                }
-                                .onEnded { _ in
-                                    terminalDragStartHeight = nil
-                                }
-                        )
-                        .onHover { inside in
-                            if inside { NSCursor.resizeUpDown.push() }
-                            else { NSCursor.pop() }
-                        }
                 }
-                .frame(height: 8)
 
-                TerminalPanelView(
-                    repoPath: viewModel.repoPath,
-                    isVisible: Binding(
-                        get: { viewModel.showTerminal },
-                        set: { viewModel.showTerminal = $0 }
+                if viewModel.showPushUpstreamPrompt {
+                    pushUpstreamBanner
+                    Divider()
+                }
+
+                GraphView(viewModel: viewModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if viewModel.showTerminal {
+                    ZStack {
+                        Divider()
+                        Color.clear
+                            .frame(height: 8)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { value in
+                                        if terminalDragStartHeight == nil {
+                                            terminalDragStartHeight = terminalHeight
+                                        }
+                                        let newH = (terminalDragStartHeight ?? terminalHeight) - value.translation.height
+                                        terminalHeight = max(100, min(700, newH))
+                                    }
+                                    .onEnded { _ in
+                                        terminalDragStartHeight = nil
+                                    }
+                            )
+                            .onHover { inside in
+                                if inside { NSCursor.resizeUpDown.push() }
+                                else { NSCursor.pop() }
+                            }
+                    }
+                    .frame(height: 8)
+
+                    TerminalPanelView(
+                        repoPath: viewModel.repoPath,
+                        isVisible: Binding(
+                            get: { viewModel.showTerminal },
+                            set: { viewModel.showTerminal = $0 }
+                        )
                     )
-                )
-                .frame(height: terminalHeight)
+                    .frame(height: terminalHeight)
+                }
+            }
+
+            if viewModel.isFileInspectorPresented {
+                FileInspectorOverlayView(viewModel: viewModel)
+                    .transition(.opacity)
+                    .zIndex(10)
             }
         }
     }

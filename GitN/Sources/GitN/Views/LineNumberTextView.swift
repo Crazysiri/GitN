@@ -9,7 +9,7 @@ import AppKit
 //
 // Used by both SourcePreviewView (read-only) and MarkdownEditorView (editable).
 
-final class LineNumberTextView: NSTextView {
+class LineNumberTextView: NSTextView {
 
     // Gutter geometry
     static  let gutterWidth : CGFloat = 48
@@ -17,10 +17,13 @@ final class LineNumberTextView: NSTextView {
     private let hTextPad    : CGFloat = 16  // padding between gutter right-edge and text
 
     // Gutter styling
-    private let lineFont   = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-    private let lineColor  = NSColor(white: 0.38, alpha: 1)
-    private let gutterBg   = NSColor(red: 0.094, green: 0.098, blue: 0.110, alpha: 1)
-    private let dividerClr = NSColor(white: 0.20, alpha: 1)
+    var lineFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    var lineColor = NSColor(white: 0.38, alpha: 1)
+    var gutterBackgroundColor = NSColor(red: 0.094, green: 0.098, blue: 0.110, alpha: 1)
+    var gutterSeparatorColor = NSColor.white.withAlphaComponent(0.06)
+    private var cachedLineStarts: [Int] = [0]
+    private var cachedStringLength = -1
+    var drawsInlineGutter = true
 
     // MARK: Init
     //
@@ -54,6 +57,11 @@ final class LineNumberTextView: NSTextView {
         textContainerInset = NSSize(width: Self.gutterWidth + hTextPad, height: vPad)
     }
 
+    override func didChangeText() {
+        super.didChangeText()
+        invalidateLineStartCache()
+    }
+
     // MARK: Frame / layout
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -77,65 +85,117 @@ final class LineNumberTextView: NSTextView {
         if let lm = layoutManager, let tc = textContainer { lm.ensureLayout(for: tc) }
         super.drawBackground(in: rect)          // fills rect with backgroundColor
 
+        guard drawsInlineGutter else { return }
+
+        let gutterMinX = pinnedViewportMinX(for: rect)
+
         // Gutter background (overdraws the left slice)
-        gutterBg.setFill()
-        NSRect(x: 0, y: rect.minY,
+        gutterBackgroundColor.setFill()
+        NSRect(x: gutterMinX, y: rect.minY,
                width: Self.gutterWidth, height: rect.height).fill()
 
-        // Separator line
-        dividerClr.setFill()
-        NSRect(x: Self.gutterWidth - 1, y: rect.minY,
+        gutterSeparatorColor.setFill()
+        NSRect(x: gutterMinX + Self.gutterWidth - 1, y: rect.minY,
                width: 1, height: rect.height).fill()
 
-        drawLineNumbers(in: rect)
+        drawLineNumbers(in: rect, gutterMinX: gutterMinX)
     }
 
-    private func drawLineNumbers(in dirtyRect: NSRect) {
-        guard let lm = layoutManager, lm.numberOfGlyphs > 0 else { return }
+    func pinnedViewportMinX(for dirtyRect: NSRect) -> CGFloat {
+        enclosingScrollView?.contentView.bounds.minX ?? dirtyRect.minX
+    }
 
-        let nsStr     = string as NSString
-        let totalLen  = nsStr.length
-        let numGlyphs = lm.numberOfGlyphs
-        let insetY    = vPad                  // matches textContainerInset.height
-
+    private func drawLineNumbers(in dirtyRect: NSRect, gutterMinX: CGFloat) {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: lineFont,
             .foregroundColor: lineColor
         ]
+        enumerateVisibleLogicalLines(in: dirtyRect) { lineNum, _, frag in
+            let label = "\(lineNum)" as NSString
+            let sz = label.size(withAttributes: attrs)
+            label.draw(
+                at: NSPoint(
+                    x: gutterMinX + Self.gutterWidth - sz.width - 8,
+                    y: frag.minY + vPad + (frag.height - sz.height) / 2
+                ),
+                withAttributes: attrs
+            )
+        }
+    }
 
-        var lineNum = 1
-        var charIdx = 0
+    func enumerateVisibleLogicalLines(
+        in dirtyRect: NSRect,
+        using body: (_ lineNumber: Int, _ charLocation: Int, _ fragmentRect: NSRect) -> Void
+    ) {
+        guard let lm = layoutManager,
+              let tc = textContainer,
+              lm.numberOfGlyphs > 0
+        else { return }
 
-        while charIdx < totalLen {
+        let nsStr = string as NSString
+        refreshLineStartCacheIfNeeded(length: nsStr.length, string: nsStr)
+
+        let containerDirtyRect = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let visibleGlyphRange = lm.glyphRange(forBoundingRect: containerDirtyRect, in: tc)
+        let visibleCharRange = lm.characterRange(forGlyphRange: visibleGlyphRange, actualGlyphRange: nil)
+        let startChar = max(0, visibleCharRange.location)
+        let endChar = min(nsStr.length, NSMaxRange(visibleCharRange) + 1)
+
+        var lineIndex = lineIndexForCharacterLocation(startChar)
+        while lineIndex < cachedLineStarts.count {
+            let charIdx = cachedLineStarts[lineIndex]
+            if charIdx >= endChar { break }
+
             let glyphIdx = lm.glyphIndexForCharacter(at: charIdx)
-            guard glyphIdx < numGlyphs else { break }
-
-            var effRange = NSRange()
-            let frag     = lm.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: &effRange)
-            let lineY    = frag.minY + insetY          // text-view coordinate
-
-            // Early exit once past the dirty rect
+            var effectiveRange = NSRange()
+            let frag = lm.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: &effectiveRange)
+            let lineY = frag.minY + vPad
             if lineY > dirtyRect.maxY { break }
 
-            // Draw only what falls inside the dirty rect
             if lineY + frag.height >= dirtyRect.minY {
-                let label = "\(lineNum)" as NSString
-                let sz    = label.size(withAttributes: attrs)
-                label.draw(
-                    at: NSPoint(
-                        x: Self.gutterWidth - sz.width - 8,
-                        y: lineY + (frag.height - sz.height) / 2
-                    ),
-                    withAttributes: attrs
-                )
+                body(lineIndex + 1, charIdx, frag)
             }
-
-            // Advance to the next *logical* line (skips wrapped fragments)
-            let lineRange = nsStr.lineRange(for: NSRange(location: charIdx, length: 0))
-            let next      = NSMaxRange(lineRange)
-            guard next > charIdx else { break }
-            charIdx = next
-            lineNum += 1
+            lineIndex += 1
         }
+    }
+
+    private func invalidateLineStartCache() {
+        cachedStringLength = -1
+        cachedLineStarts = [0]
+    }
+
+    private func refreshLineStartCacheIfNeeded(length: Int, string: NSString) {
+        guard cachedStringLength != length else { return }
+
+        cachedStringLength = length
+        cachedLineStarts = [0]
+        guard length > 0 else { return }
+
+        var index = 0
+        while index < length {
+            let lineRange = string.lineRange(for: NSRange(location: index, length: 0))
+            let next = NSMaxRange(lineRange)
+            if next < length {
+                cachedLineStarts.append(next)
+            }
+            guard next > index else { break }
+            index = next
+        }
+    }
+
+    private func lineIndexForCharacterLocation(_ location: Int) -> Int {
+        var low = 0
+        var high = max(cachedLineStarts.count - 1, 0)
+
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if cachedLineStarts[mid] <= location {
+                low = mid
+            } else {
+                high = mid - 1
+            }
+        }
+
+        return low
     }
 }

@@ -214,6 +214,12 @@ final class CommitWalker: @unchecked Sendable {
 // MARK: - Service
 
 actor GitService {
+    struct DecodedFileContent: Sendable {
+        let text: String?
+        let encodingName: String?
+        let isBinary: Bool
+    }
+
     let repoPath: String
     private var repo: OpaquePointer?
 
@@ -950,6 +956,50 @@ actor GitService {
             lines.append("+\(line)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    func workingTreeFileContent(path: String) throws -> String {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        guard let data = FileManager.default.contents(atPath: fullPath),
+              let content = String(data: data, encoding: .utf8)
+        else { return "" }
+        return content
+    }
+
+    func decodedWorkingTreeFileContent(path: String) throws -> DecodedFileContent {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        guard let data = FileManager.default.contents(atPath: fullPath) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        return Self.decodeFileData(data)
+    }
+
+    func isDirectory(path: String) -> Bool {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    func submoduleStatus(path: String) async throws -> String? {
+        let output = try await runGitOutput(["submodule", "status", "--", path])
+        let line = output.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return line.isEmpty ? nil : line
+    }
+
+    func treeEntryOID(atCommit hash: String, path: String) async throws -> String? {
+        let output = try await runGitOutput(["ls-tree", hash, "--", path])
+        let line = output.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !line.isEmpty else { return nil }
+        let fields = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        guard fields.count >= 3 else { return nil }
+        return fields[2]
+    }
+
+    func saveWorkingTreeFile(path: String, content: String) throws {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        let directory = (fullPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: nil)
+        try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
     }
 
     func stagedFileDiff(path: String) throws -> String {
@@ -2215,7 +2265,7 @@ actor GitService {
 
     // MARK: - File Actions
 
-    /// Discard working directory changes for a file (libgit2, following Xit's revert(file:))
+    /// Discard only working directory changes for a file, preserving any staged content.
     func discardFileChanges(path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
@@ -2229,7 +2279,13 @@ actor GitService {
             }
         }
 
-        // Checkout from index (equivalent to `git checkout -- path`)
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot get index")
+        }
+        defer { git_index_free(index) }
+
+        // Restore the worktree from the index so partially staged files keep their staged content.
         var opts = git_checkout_options()
         git_checkout_init_options(&opts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
         opts.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue | GIT_CHECKOUT_RECREATE_MISSING.rawValue
@@ -2240,7 +2296,7 @@ actor GitService {
 
         let rc = withUnsafeMutablePointer(to: &pathOpt) { stringsPtr in
             opts.paths = git_strarray(strings: stringsPtr, count: 1)
-            return git_checkout_tree(repo, nil, &opts)
+            return git_checkout_index(repo, index, &opts)
         }
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Discard changes failed", code: rc))
@@ -2925,5 +2981,69 @@ actor GitService {
         let size = Int(git_blob_rawsize(object))
         guard size > 0 else { return "" }
         return String(bytes: Data(bytes: rawContent, count: size), encoding: .utf8) ?? ""
+    }
+
+    func decodedFileContent(atCommit hash: String, path: String) throws -> DecodedFileContent {
+        guard let repo else { throw GitError.repoNotOpen }
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Cannot lookup commit")
+        }
+        defer { git_commit_free(commit) }
+
+        var tree: OpaquePointer?
+        guard git_commit_tree(&tree, commit) == 0, let tree else {
+            throw GitError.operationFailed("Cannot get commit tree")
+        }
+        defer { git_tree_free(tree) }
+
+        var entry: OpaquePointer?
+        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else {
+            throw GitError.operationFailed("File not found in commit")
+        }
+        defer { git_tree_entry_free(entry) }
+
+        var object: OpaquePointer?
+        guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else {
+            throw GitError.operationFailed("Cannot get blob object")
+        }
+        defer { git_object_free(object) }
+
+        guard let rawContent = git_blob_rawcontent(object) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        let size = Int(git_blob_rawsize(object))
+        let data = size > 0 ? Data(bytes: rawContent, count: size) : Data()
+        return Self.decodeFileData(data)
+    }
+
+    private nonisolated static func decodeFileData(_ data: Data) -> DecodedFileContent {
+        if data.isEmpty {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+
+        if data.contains(0) {
+            return DecodedFileContent(text: nil, encodingName: nil, isBinary: true)
+        }
+
+        let candidates: [(String.Encoding, String)] = [
+            (.utf8, "UTF-8"),
+            (.unicode, "Unicode"),
+            (.utf16LittleEndian, "UTF-16 LE"),
+            (.utf16BigEndian, "UTF-16 BE"),
+            (String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))), "GB18030")
+        ]
+
+        for (encoding, name) in candidates {
+            if let text = String(data: data, encoding: encoding) {
+                return DecodedFileContent(text: text, encodingName: name, isBinary: false)
+            }
+        }
+
+        return DecodedFileContent(text: nil, encodingName: nil, isBinary: true)
     }
 }

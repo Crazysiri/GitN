@@ -162,51 +162,13 @@ struct MarkdownEditorView: NSViewRepresentable {
     }
 }
 
-// MARK: - Preview color scheme
-
-enum PreviewScheme: String, CaseIterable {
-    case light      = "Light"
-    case dark       = "Dark"
-    case sepia      = "Sepia"
-    case githubDark = "GitHub Dark"
-
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .light:      return .light
-        case .dark:       return .dark
-        case .sepia:      return .light
-        case .githubDark: return .dark
-        }
-    }
-
-    var background: Color {
-        switch self {
-        case .light:      return Color(nsColor: .textBackgroundColor)
-        case .dark:       return Color(red: 0.11, green: 0.11, blue: 0.12)
-        case .sepia:      return Color(red: 0.961, green: 0.941, blue: 0.902)
-        case .githubDark: return Color(red: 0.051, green: 0.067, blue: 0.090)
-        }
-    }
-
-    var swatch: Color {
-        switch self {
-        case .light:      return .white
-        case .dark:       return Color(red: 0.18, green: 0.18, blue: 0.20)
-        case .sepia:      return Color(red: 0.9, green: 0.86, blue: 0.78)
-        case .githubDark: return Color(red: 0.051, green: 0.067, blue: 0.090)
-        }
-    }
-
-    var iconName: String { "circle.fill" }
-}
-
 // MARK: - Top-level preview / edit window view
 
 struct MarkdownPreviewView: View {
+    @Environment(ThemeManager.self) private var theme
     let title: String
     @State private var content: String
     @State private var isEditing = false
-    @AppStorage("GitN.markdownPreviewScheme") private var scheme: PreviewScheme = .light
 
     init(title: String, content: String) {
         self.title = title
@@ -227,11 +189,10 @@ struct MarkdownPreviewView: View {
                         .padding(24)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .background(scheme.background)
-                .preferredColorScheme(scheme.colorScheme)
             }
         }
         .frame(minWidth: 680, minHeight: 500)
+        .preferredColorScheme(theme.isDark ? .dark : .light)
     }
 
     private var toolbar: some View {
@@ -244,35 +205,6 @@ struct MarkdownPreviewView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
-            // Scheme picker — only visible in preview mode
-            if !isEditing {
-                Menu {
-                    ForEach(PreviewScheme.allCases, id: \.rawValue) { s in
-                        Button {
-                            scheme = s
-                        } label: {
-                            HStack {
-                                Image(systemName: scheme == s ? "checkmark.circle.fill" : "circle")
-                                Text(s.rawValue)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(scheme.swatch)
-                            .frame(width: 10, height: 10)
-                            .overlay(Circle().strokeBorder(Color.secondary.opacity(0.4), lineWidth: 0.5))
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9, weight: .medium))
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
-                }
-                .buttonStyle(.plain)
-                .help("Preview color scheme")
-            }
             Picker("", selection: $isEditing) {
                 Label("Preview", systemImage: "eye").tag(false)
                 Label("Edit", systemImage: "pencil").tag(true)
@@ -280,6 +212,58 @@ struct MarkdownPreviewView: View {
             .pickerStyle(.segmented)
             .frame(width: 180)
             .labelsHidden()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(.windowBackgroundColor))
+    }
+}
+
+struct MarkdownInspectorContentView: View {
+    @Environment(ThemeManager.self) private var theme
+    @Binding var text: String
+    let isEditable: Bool
+
+    @State private var isEditing = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            toolbar
+            Divider()
+
+            if isEditing && isEditable {
+                MarkdownEditorView(text: $text)
+            } else {
+                ScrollView {
+                    Markdown(text)
+                        .markdownTheme(.gitHub)
+                        .textSelection(.enabled)
+                        .padding(24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .onChange(of: isEditable) { _, editable in
+            if !editable {
+                isEditing = false
+            }
+        }
+        .preferredColorScheme(theme.isDark ? .dark : .light)
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            Spacer()
+
+            if isEditable {
+                Picker("", selection: $isEditing) {
+                    Label("Preview", systemImage: "eye").tag(false)
+                    Label("Edit", systemImage: "pencil").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                .labelsHidden()
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

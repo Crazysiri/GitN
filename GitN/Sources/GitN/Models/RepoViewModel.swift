@@ -3,6 +3,87 @@ import Combine
 
 @Observable @MainActor
 final class RepoViewModel {
+    private struct DiffLoadPayload: Sendable {
+        let fileDiffContent: String
+        let parsedDiff: ParsedDiff?
+    }
+
+    enum FileInspectorMode: String, CaseIterable {
+        case preview
+        case diff
+        case history
+    }
+
+    enum FileInspectorChangeKind: Int, Sendable {
+        case deletion = -1
+        case addition = 1
+    }
+
+    struct FileInspectorLinePair: Sendable {
+        let old: Int?
+        let new: Int?
+    }
+
+    struct FileInspectorOverviewSegment: Identifiable, Sendable {
+        let startLine: Int
+        let endLine: Int
+        let kind: FileInspectorChangeKind
+
+        var id: String { "\(kind.rawValue)-\(startLine)-\(endLine)" }
+    }
+
+    struct FileInspectorInlineHighlight: Sendable {
+        let range: NSRange
+        let kind: FileInspectorChangeKind
+    }
+
+    struct DiffEditorRow: Identifiable, Sendable {
+        enum Kind: Sendable {
+            case context
+            case addition
+            case deletion
+        }
+
+        let id: UUID
+        let kind: Kind
+        let oldLine: Int?
+        let newLine: Int?
+        let oldText: String?
+        var newText: String?
+        let isEditable: Bool
+        let contentRangeInNewText: NSRange?
+    }
+
+    struct DiffEditorDocument: Sendable {
+        typealias RowID = UUID
+
+        let rows: [DiffEditorRow]
+        let renderedText: String
+        let editableRanges: [NSRange: RowID]
+        let renderedRowRanges: [NSRange]
+    }
+
+    private struct FileInspectorEditSnapshot {
+        let content: String
+        let selectedRange: NSRange
+    }
+
+    private struct FileInspectorEditSession {
+        var lastEditAt: Date
+    }
+
+    private struct FileInspectorArtifacts: Sendable {
+        let diffEditorDocument: DiffEditorDocument?
+        let renderedText: String
+        let totalLines: Int
+        let lineHighlights: [Int: FileInspectorChangeKind]
+        let inlineHighlights: [FileInspectorInlineHighlight]
+        let linePairs: [Int: FileInspectorLinePair]
+        let hunkControls: [Int: Int]
+        let hunkToolTips: [Int: String]
+        let overviewSegments: [FileInspectorOverviewSegment]
+    }
+
     let repoPath: String
     let repoName: String
     private let git: GitService
@@ -33,9 +114,39 @@ final class RepoViewModel {
     var fileDiffContent: String = ""
     var parsedDiff: ParsedDiff?
     var selectedDiffFile: DiffFile?
+    var isLoadingDiff = false
     /// True when the selected file exceeds maxDiffFileSize.
     var isFileTooLarge = false
     var fileTooLargeSizeMB: String = ""
+    var isFileInspectorPresented = false
+    var fileInspectorMode: FileInspectorMode = .diff
+    var fileInspectorContext: DiffContext = .committed
+    var fileInspectorPath: String = ""
+    var fileInspectorContent: String = ""
+    var fileInspectorInitialContent: String = ""
+    var fileInspectorDisplayContent: String = ""
+    var fileInspectorDiffBaseText: String = ""
+    var isSavingFileInspector = false
+    var isFileInspectorEditable = true
+    var fileInspectorEncodingName: String?
+    var fileInspectorMessage: String?
+    var fileInspectorTotalLines = 1
+    var fileInspectorLineHighlights: [Int: FileInspectorChangeKind] = [:]
+    var fileInspectorInlineHighlights: [FileInspectorInlineHighlight] = []
+    var fileInspectorLinePairs: [Int: FileInspectorLinePair] = [:]
+    var fileInspectorHunkControls: [Int: Int] = [:]
+    var fileInspectorHunkToolTips: [Int: String] = [:]
+    var fileInspectorOverviewSegments: [FileInspectorOverviewSegment] = []
+    var fileInspectorDiffDocument: DiffEditorDocument?
+    var fileInspectorSelectedRange: NSRange = NSRange(location: 0, length: 0)
+    var isFileInspectorDiffEditing = false
+    private var fileInspectorUndoStack: [FileInspectorEditSnapshot] = []
+    private var fileInspectorRedoStack: [FileInspectorEditSnapshot] = []
+    private var fileInspectorEditSession: FileInspectorEditSession?
+    private var fileInspectorRebuildTask: Task<Void, Never>?
+    private var fileInspectorPreparedEditKeepsRenderedDiff = false
+    private static let fileInspectorEditGroupingInterval: TimeInterval = 0.8
+    private static let fileInspectorRebuildDebounceInterval: UInt64 = 120_000_000
 
     var fileStatuses: [FileStatus] = []
     var isStageOperationInProgress = false
@@ -119,29 +230,950 @@ final class RepoViewModel {
         NSWorkspace.shared.open(url)
     }
 
-    @MainActor
-    func openFilePreview(path: String, commitHash: String?) async {
-        var content = ""
-        if let hash = commitHash {
-            content = (try? await git.fileContent(atCommit: hash, path: path)) ?? ""
+    var fileInspectorTitle: String {
+        (activeFileInspectorPath as NSString).lastPathComponent
+    }
+
+    var activeFileInspectorPath: String {
+        if fileInspectorMode == .history, !fileHistoryPath.isEmpty {
+            return fileHistoryPath
         }
-        if content.isEmpty {
-            let fullPath = (repoPath as NSString).appendingPathComponent(path)
-            content = (try? String(contentsOfFile: fullPath, encoding: .utf8)) ?? ""
+        return fileInspectorPath
+    }
+
+    var isFileInspectorDirty: Bool {
+        isFileInspectorEditable && fileInspectorContent != fileInspectorInitialContent
+    }
+
+    func openFileInspector(
+        _ file: DiffFile,
+        context: DiffContext = .committed,
+        preferredMode: FileInspectorMode = .diff
+    ) async {
+        await selectDiffFile(file, context: context)
+        do {
+            let loaded = try await loadInspectableFileContent(path: file.path, context: context)
+            let loadedText = loaded.content.text ?? ""
+            let canEditInspectorContent = loaded.isEditable && (
+                context != .committed || selectedCommit?.isUncommitted == true || isInConflict
+            )
+            let inspectorDisplayContent: String
+            let usesRawDiffFallback = preferredMode == .diff && (loadedText.isEmpty || parsedDiff == nil)
+            let inspectorParsedDiff: ParsedDiff?
+            if usesRawDiffFallback {
+                let fallbackText = fileDiffContent.isEmpty ? loadedText : fileDiffContent
+                let compactSubmoduleDiff = Self.compactSubmoduleDiff(fallbackText)
+                inspectorDisplayContent = compactSubmoduleDiff?.baseText ?? Self.displayTextForRawDiffFallback(fallbackText)
+                inspectorParsedDiff = compactSubmoduleDiff?.parsedDiff
+            } else {
+                inspectorDisplayContent = loadedText
+                inspectorParsedDiff = parsedDiff
+            }
+            fileInspectorPath = file.path
+            fileInspectorContext = context
+            fileInspectorContent = loadedText
+            fileInspectorInitialContent = loadedText
+            fileInspectorDiffBaseText = inspectorParsedDiff.map {
+                Self.reconstructOldText(from: $0, newText: loadedText)
+            } ?? inspectorDisplayContent
+            fileInspectorDisplayContent = inspectorDisplayContent
+            fileInspectorSelectedRange = NSRange(location: 0, length: 0)
+            isFileInspectorDiffEditing = false
+            fileInspectorUndoStack.removeAll(keepingCapacity: false)
+            fileInspectorRedoStack.removeAll(keepingCapacity: false)
+            fileInspectorEditSession = nil
+            fileInspectorRebuildTask?.cancel()
+            fileInspectorRebuildTask = nil
+            isFileInspectorEditable = canEditInspectorContent
+            fileInspectorEncodingName = loaded.content.encodingName
+            fileInspectorMessage = loaded.message
+            fileInspectorMode = preferredMode
+            isFileInspectorPresented = true
+            rebuildFileInspectorArtifacts(
+                diffBaseText: fileInspectorDiffBaseText,
+                currentText: fileInspectorContent,
+                parsedDiff: inspectorParsedDiff
+            )
+        } catch {
+            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    func openFilePreview(path: String, context: DiffContext = .committed) async {
+        let file = diffFiles.first(where: { $0.path == path }) ?? DiffFile(additions: 0, deletions: 0, path: path)
+        await openFileInspector(file, context: context, preferredMode: .preview)
+    }
+
+    func closeFileInspector() {
+        isFileInspectorPresented = false
+        isFileInspectorDiffEditing = false
+        fileInspectorUndoStack.removeAll(keepingCapacity: false)
+        fileInspectorRedoStack.removeAll(keepingCapacity: false)
+        fileInspectorEditSession = nil
+        fileInspectorRebuildTask?.cancel()
+        fileInspectorRebuildTask = nil
+        closeFileHistory()
+    }
+
+    func setFileInspectorMode(_ mode: FileInspectorMode) async {
+        guard mode != fileInspectorMode || mode == .history else { return }
+        if mode == .history {
+            guard !fileInspectorPath.isEmpty else { return }
+            await openFileHistory(path: fileInspectorPath, context: fileInspectorContext)
+            return
+        }
+        if fileInspectorMode == .history {
+            let file = diffFiles.first(where: { $0.path == fileInspectorPath })
+                ?? DiffFile(additions: 0, deletions: 0, path: fileInspectorPath)
+            await openFileInspector(file, context: fileInspectorContext, preferredMode: mode)
+            return
+        }
+        fileInspectorMode = mode
+        if mode != .diff {
+            isFileInspectorDiffEditing = false
+        }
+        rebuildFileInspectorArtifacts(
+            diffBaseText: fileInspectorDiffBaseText,
+            currentText: fileInspectorContent,
+            parsedDiff: mode == .diff ? parsedDiff : nil
+        )
+    }
+
+    func saveFileInspector() async -> Bool {
+        guard !fileInspectorPath.isEmpty, !isSavingFileInspector, isFileInspectorEditable else { return false }
+        isSavingFileInspector = true
+        defer { isSavingFileInspector = false }
+
+        do {
+            try await git.saveWorkingTreeFile(path: fileInspectorPath, content: fileInspectorContent)
+            fileInspectorInitialContent = fileInspectorContent
+            isFileInspectorDiffEditing = false
+            fileInspectorEditSession = nil
+            fileInspectorRebuildTask?.cancel()
+            fileInspectorRebuildTask = nil
+            await refreshAfterPatchAction()
+            showToast(title: "Saved", detail: fileInspectorPath, style: .success)
+            return true
+        } catch {
+            showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
+            return false
+        }
+    }
+
+    private struct LoadedInspectableContent {
+        let content: GitService.DecodedFileContent
+        let isEditable: Bool
+        let message: String?
+    }
+
+    private func loadInspectableFileContent(path: String, context: DiffContext) async throws -> LoadedInspectableContent {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        if context == .committed, let commit = selectedCommit, !commit.isUncommitted {
+            if FileManager.default.fileExists(atPath: fullPath), await git.isDirectory(path: path) {
+                let text = try await submoduleDisplayText(path: path)
+                return LoadedInspectableContent(
+                    content: .init(text: text, encodingName: "Submodule", isBinary: false),
+                    isEditable: false,
+                    message: "Submodule pointers are shown as commit values and can't be edited here."
+                )
+            }
+            let decoded = try await git.decodedFileContent(atCommit: commit.hash, path: path)
+            return LoadedInspectableContent(content: decoded, isEditable: decoded.text != nil, message: nil)
+        }
+        if FileManager.default.fileExists(atPath: fullPath) {
+            if await git.isDirectory(path: path) {
+                let text = try await submoduleDisplayText(path: path)
+                return LoadedInspectableContent(
+                    content: .init(text: text, encodingName: "Submodule", isBinary: false),
+                    isEditable: false,
+                    message: "Submodule pointers are shown as commit values and can't be edited here."
+                )
+            }
+            let decoded = try await git.decodedWorkingTreeFileContent(path: path)
+            return LoadedInspectableContent(content: decoded, isEditable: decoded.text != nil, message: nil)
+        }
+        return LoadedInspectableContent(
+            content: .init(text: "", encodingName: "UTF-8", isBinary: false),
+            isEditable: true,
+            message: nil
+        )
+    }
+
+    private func submoduleDisplayText(path: String) async throws -> String {
+        let summary = Self.parseSubmoduleDiffSummary(fileDiffContent)
+        var lines = ["Submodule", "path: \(path)"]
+
+        if let old = summary.old {
+            lines.append("old: \(old)")
+        }
+        if let new = summary.new {
+            lines.append("new: \(new)")
         }
 
-        let fileName = (path as NSString).lastPathComponent
-        let view: AnyView = path.isMarkdownFile
-            ? AnyView(MarkdownPreviewView(title: fileName, content: content))
-            : AnyView(SourcePreviewView(title: fileName, content: content, language: path.sourceLanguage))
+        if summary.old == nil && summary.new == nil {
+            if let commit = selectedCommit, !commit.isUncommitted,
+               let oid = try await git.treeEntryOID(atCommit: commit.hash, path: path) {
+                lines.append("commit: \(oid)")
+            } else if let status = try await git.submoduleStatus(path: path) {
+                lines.append("status: \(status)")
+            }
+        }
 
-        let hostingController = NSHostingController(rootView: view)
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = fileName
-        window.setContentSize(NSSize(width: 800, height: 600))
-        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        return lines.joined(separator: "\n")
+    }
+
+    private nonisolated static func parseSubmoduleDiffSummary(_ diff: String) -> (old: String?, new: String?) {
+        var oldCommit: String?
+        var newCommit: String?
+
+        for line in diff.components(separatedBy: "\n") {
+            if line.hasPrefix("-Subproject commit ") {
+                oldCommit = String(line.dropFirst("-Subproject commit ".count))
+            } else if line.hasPrefix("+Subproject commit ") {
+                newCommit = String(line.dropFirst("+Subproject commit ".count))
+            }
+        }
+
+        return (oldCommit, newCommit)
+    }
+
+    private nonisolated static func displayTextForRawDiffFallback(_ diff: String) -> String {
+        let lines = diff.components(separatedBy: "\n")
+        let submoduleLines = lines.filter {
+            $0.hasPrefix("-Subproject commit ") || $0.hasPrefix("+Subproject commit ")
+        }
+        if !submoduleLines.isEmpty {
+            return submoduleLines.joined(separator: "\n")
+        }
+        return diff
+    }
+
+    private nonisolated static func compactSubmoduleDiff(_ diff: String) -> (baseText: String, parsedDiff: ParsedDiff)? {
+        let lines = diff.components(separatedBy: "\n")
+        let keptLines = lines.filter {
+            $0.hasPrefix("-Subproject commit ") || $0.hasPrefix("+Subproject commit ")
+        }
+        guard !keptLines.isEmpty else { return nil }
+
+        let compactPatch = """
+@@ -1 +1 @@
+\(keptLines.joined(separator: "\n"))
+"""
+        let baseText = keptLines.last.map { String($0.dropFirst()) } ?? ""
+        return (baseText, DiffParserEngine.parse(compactPatch))
+    }
+
+    private func rebuildFileInspectorArtifacts(
+        diffBaseText: String,
+        currentText: String,
+        parsedDiff: ParsedDiff? = nil
+    ) {
+        let artifacts = Self.buildFileInspectorArtifacts(
+            parsedDiff: parsedDiff,
+            diffBaseText: diffBaseText,
+            currentText: currentText
+        )
+        fileInspectorDiffDocument = artifacts.diffEditorDocument
+        fileInspectorDisplayContent = artifacts.renderedText
+        fileInspectorTotalLines = artifacts.totalLines
+        fileInspectorLineHighlights = artifacts.lineHighlights
+        fileInspectorInlineHighlights = artifacts.inlineHighlights
+        fileInspectorLinePairs = artifacts.linePairs
+        fileInspectorHunkControls = artifacts.hunkControls
+        fileInspectorHunkToolTips = artifacts.hunkToolTips
+        fileInspectorOverviewSegments = artifacts.overviewSegments
+    }
+
+    private nonisolated static func buildFileInspectorArtifacts(
+        parsedDiff: ParsedDiff?,
+        diffBaseText: String,
+        currentText: String
+    ) -> FileInspectorArtifacts {
+        let currentLines = textLines(currentText)
+        let normalizedTotalLines = max(currentLines.count, 1)
+        let effectiveDiff = parsedDiff.map { _ in TextDiffEngine.diff(old: diffBaseText, new: currentText) }
+        let lineRangesInCurrentText = lineContentRanges(for: currentLines)
+
+        guard let diff = effectiveDiff ?? parsedDiff else {
+            let rows = currentLines.enumerated().map { index, line in
+                DiffEditorRow(
+                    id: UUID(),
+                    kind: .context,
+                    oldLine: index + 1,
+                    newLine: index + 1,
+                    oldText: line,
+                    newText: line,
+                    isEditable: true,
+                    contentRangeInNewText: lineRangesInCurrentText[index]
+                )
+            }
+            let renderedRowRanges = lineContentRanges(for: currentLines)
+            let editableRanges = Dictionary(uniqueKeysWithValues: zip(rows, renderedRowRanges).map { row, range in
+                (range, row.id)
+            })
+            let linePairs = Dictionary(uniqueKeysWithValues: (1...normalizedTotalLines).map {
+                ($0, FileInspectorLinePair(old: $0, new: $0))
+            })
+            return FileInspectorArtifacts(
+                diffEditorDocument: DiffEditorDocument(
+                    rows: rows,
+                    renderedText: currentText,
+                    editableRanges: editableRanges,
+                    renderedRowRanges: renderedRowRanges
+                ),
+                renderedText: currentText,
+                totalLines: normalizedTotalLines,
+                lineHighlights: [:],
+                inlineHighlights: [],
+                linePairs: linePairs,
+                hunkControls: [:],
+                hunkToolTips: [:],
+                overviewSegments: []
+            )
+        }
+
+        var rows: [DiffEditorRow] = []
+        var highlights: [Int: FileInspectorChangeKind] = [:]
+        var linePairs: [Int: FileInspectorLinePair] = [:]
+        var hunkControls: [Int: Int] = [:]
+        var hunkToolTips: [Int: String] = [:]
+        var oldLine = 1
+        var newLine = 1
+        var baseIndex = 1
+
+        func appendRow(
+            kind: DiffEditorRow.Kind,
+            old: Int?,
+            new: Int?,
+            oldText: String?,
+            newText: String?,
+            editableRange: NSRange?
+        ) {
+            rows.append(
+                DiffEditorRow(
+                    id: UUID(),
+                    kind: kind,
+                    oldLine: old,
+                    newLine: new,
+                    oldText: oldText,
+                    newText: newText,
+                    isEditable: new != nil,
+                    contentRangeInNewText: editableRange
+                )
+            )
+            let rowNumber = rows.count
+            linePairs[rowNumber] = FileInspectorLinePair(old: old, new: new)
+            switch kind {
+            case .context:
+                break
+            case .addition:
+                highlights[rowNumber] = .addition
+            case .deletion:
+                highlights[rowNumber] = .deletion
+            }
+        }
+
+        for (hunkIndex, hunk) in diff.hunks.enumerated() {
+            while newLine < hunk.newStart && baseIndex <= currentLines.count {
+                let lineText = currentLines[baseIndex - 1]
+                appendRow(
+                    kind: .context,
+                    old: oldLine,
+                    new: newLine,
+                    oldText: lineText,
+                    newText: lineText,
+                    editableRange: lineRangesInCurrentText[baseIndex - 1]
+                )
+                oldLine += 1
+                newLine += 1
+                baseIndex += 1
+            }
+
+            let hunkStartRow = rows.count + 1
+            var firstChangedRow: Int?
+            for line in hunk.lines {
+                switch line.kind {
+                case .context:
+                    let lineText = baseIndex <= currentLines.count ? currentLines[baseIndex - 1] : line.content
+                    appendRow(
+                        kind: .context,
+                        old: oldLine,
+                        new: newLine,
+                        oldText: line.content,
+                        newText: lineText,
+                        editableRange: baseIndex <= lineRangesInCurrentText.count ? lineRangesInCurrentText[baseIndex - 1] : nil
+                    )
+                    oldLine += 1
+                    newLine += 1
+                    baseIndex += 1
+                case .addition:
+                    let lineText = baseIndex <= currentLines.count ? currentLines[baseIndex - 1] : line.content
+                    appendRow(
+                        kind: .addition,
+                        old: nil,
+                        new: newLine,
+                        oldText: nil,
+                        newText: lineText,
+                        editableRange: baseIndex <= lineRangesInCurrentText.count ? lineRangesInCurrentText[baseIndex - 1] : nil
+                    )
+                    if firstChangedRow == nil { firstChangedRow = rows.count }
+                    newLine += 1
+                    baseIndex += 1
+                case .deletion:
+                    appendRow(
+                        kind: .deletion,
+                        old: oldLine,
+                        new: nil,
+                        oldText: line.content,
+                        newText: nil,
+                        editableRange: nil
+                    )
+                    if firstChangedRow == nil { firstChangedRow = rows.count }
+                    oldLine += 1
+                }
+            }
+            if rows.count >= hunkStartRow {
+                let anchorRow = firstChangedRow ?? hunkStartRow
+                hunkControls[anchorRow] = hunkIndex
+                hunkToolTips[anchorRow] = hunk.changeDisplayRange
+            }
+        }
+
+        while baseIndex <= currentLines.count {
+            let lineText = currentLines[baseIndex - 1]
+            appendRow(
+                kind: .context,
+                old: oldLine,
+                new: newLine,
+                oldText: lineText,
+                newText: lineText,
+                editableRange: lineRangesInCurrentText[baseIndex - 1]
+            )
+            oldLine += 1
+            newLine += 1
+            baseIndex += 1
+        }
+
+        let renderedText = rows.map { $0.newText ?? $0.oldText ?? "" }.joined(separator: "\n")
+        let renderedRowRanges = lineContentRanges(for: rows.map { $0.newText ?? $0.oldText ?? "" })
+        let editableRanges = Dictionary(uniqueKeysWithValues: zip(rows, renderedRowRanges).compactMap { row, range in
+            row.isEditable ? (range, row.id) : nil
+        })
+        let inlineHighlights = buildInlineHighlights(rows: rows, renderedRowRanges: renderedRowRanges)
+        let overviewSegments = buildOverviewSegments(from: highlights)
+        return FileInspectorArtifacts(
+            diffEditorDocument: DiffEditorDocument(
+                rows: rows,
+                renderedText: renderedText,
+                editableRanges: editableRanges,
+                renderedRowRanges: renderedRowRanges
+            ),
+            renderedText: renderedText,
+            totalLines: max(rows.count, 1),
+            lineHighlights: highlights,
+            inlineHighlights: inlineHighlights,
+            linePairs: linePairs,
+            hunkControls: hunkControls,
+            hunkToolTips: hunkToolTips,
+            overviewSegments: overviewSegments
+        )
+    }
+
+    private nonisolated static func buildOverviewSegments(
+        from highlights: [Int: FileInspectorChangeKind]
+    ) -> [FileInspectorOverviewSegment] {
+        var segments: [FileInspectorOverviewSegment] = []
+
+        for kind in [FileInspectorChangeKind.deletion, .addition] {
+            let sortedLines = highlights
+                .filter { $0.value == kind }
+                .map(\.key)
+                .sorted()
+
+            guard let first = sortedLines.first else { continue }
+
+            var start = first
+            var end = first
+            for line in sortedLines.dropFirst() {
+                if line == end + 1 {
+                    end = line
+                } else {
+                    segments.append(FileInspectorOverviewSegment(startLine: start, endLine: end, kind: kind))
+                    start = line
+                    end = line
+                }
+            }
+            segments.append(FileInspectorOverviewSegment(startLine: start, endLine: end, kind: kind))
+        }
+
+        return segments.sorted { lhs, rhs in
+            if lhs.startLine == rhs.startLine {
+                return lhs.kind.rawValue < rhs.kind.rawValue
+            }
+            return lhs.startLine < rhs.startLine
+        }
+    }
+
+    private nonisolated static func buildInlineHighlights(
+        rows: [DiffEditorRow],
+        renderedRowRanges: [NSRange]
+    ) -> [FileInspectorInlineHighlight] {
+        guard rows.count == renderedRowRanges.count else { return [] }
+
+        var highlights: [FileInspectorInlineHighlight] = []
+        var index = 0
+
+        while index < rows.count {
+            guard rows[index].kind == .deletion else {
+                index += 1
+                continue
+            }
+
+            let deletionStart = index
+            while index < rows.count, rows[index].kind == .deletion {
+                index += 1
+            }
+            let deletionEnd = index
+
+            let additionStart = index
+            while index < rows.count, rows[index].kind == .addition {
+                index += 1
+            }
+            let additionEnd = index
+
+            guard additionStart < additionEnd else { continue }
+
+            let pairCount = min(deletionEnd - deletionStart, additionEnd - additionStart)
+            guard pairCount > 0 else { continue }
+
+            for pairOffset in 0..<pairCount {
+                let deletionIndex = deletionStart + pairOffset
+                let additionIndex = additionStart + pairOffset
+                guard let oldText = rows[deletionIndex].oldText,
+                      let newText = rows[additionIndex].newText else {
+                    continue
+                }
+
+                if let oldRange = changedUTF16Range(in: oldText, comparedTo: newText) {
+                    let renderedRange = renderedRowRanges[deletionIndex]
+                    highlights.append(
+                        FileInspectorInlineHighlight(
+                            range: NSRange(location: renderedRange.location + oldRange.location, length: oldRange.length),
+                            kind: .deletion
+                        )
+                    )
+                }
+
+                if let newRange = changedUTF16Range(in: newText, comparedTo: oldText) {
+                    let renderedRange = renderedRowRanges[additionIndex]
+                    highlights.append(
+                        FileInspectorInlineHighlight(
+                            range: NSRange(location: renderedRange.location + newRange.location, length: newRange.length),
+                            kind: .addition
+                        )
+                    )
+                }
+            }
+        }
+
+        return highlights
+    }
+
+    private nonisolated static func changedUTF16Range(in source: String, comparedTo other: String) -> NSRange? {
+        guard source != other else { return nil }
+
+        let sourceChars = Array(source)
+        let otherChars = Array(other)
+        var prefixLength = 0
+        while prefixLength < sourceChars.count,
+              prefixLength < otherChars.count,
+              sourceChars[prefixLength] == otherChars[prefixLength] {
+            prefixLength += 1
+        }
+
+        var sourceSuffix = sourceChars.count
+        var otherSuffix = otherChars.count
+        while sourceSuffix > prefixLength,
+              otherSuffix > prefixLength,
+              sourceChars[sourceSuffix - 1] == otherChars[otherSuffix - 1] {
+            sourceSuffix -= 1
+            otherSuffix -= 1
+        }
+
+        let startIndex = sourceChars.index(sourceChars.startIndex, offsetBy: prefixLength)
+        let endIndex = sourceChars.index(sourceChars.startIndex, offsetBy: sourceSuffix)
+        let sourceString = source as NSString
+        let utf16Start = String(sourceChars[..<startIndex]).utf16.count
+        let utf16Length = String(sourceChars[startIndex..<endIndex]).utf16.count
+
+        if utf16Length > 0 {
+            return NSRange(location: utf16Start, length: utf16Length)
+        }
+
+        if utf16Start <= sourceString.length {
+            return NSRange(location: utf16Start, length: 0)
+        }
+        return nil
+    }
+
+    func prepareFileInspectorDiffEdit(affectedRange: NSRange, replacementString: String?) -> String? {
+        guard fileInspectorMode == .diff,
+              isFileInspectorEditable,
+              let document = fileInspectorDiffDocument,
+              let newTextRange = Self.mapRenderedEditRange(affectedRange, in: document)
+        else {
+            return nil
+        }
+
+        fileInspectorPreparedEditKeepsRenderedDiff = Self.rowKindForRenderedLocation(
+            affectedRange.location,
+            in: document
+        ) == .addition
+
+        let current = fileInspectorContent as NSString
+        return current.replacingCharacters(in: newTextRange, with: replacementString ?? "")
+    }
+
+    func applyPreparedFileInspectorDiffEdit(content: String, renderedSelection: NSRange) {
+        guard content != fileInspectorContent || renderedSelection != fileInspectorSelectedRange else { return }
+        beginOrExtendFileInspectorEditSession()
+        fileInspectorRedoStack.removeAll(keepingCapacity: false)
+        let preEditDocument = fileInspectorDiffDocument
+        let newTextSelection = preEditDocument.flatMap {
+            Self.mapRenderedSelectionToNewTextSelection(renderedSelection, in: $0)
+        } ?? renderedSelection
+        fileInspectorContent = content
+        if fileInspectorPreparedEditKeepsRenderedDiff {
+            isFileInspectorDiffEditing = false
+            fileInspectorSelectedRange = newTextSelection
+            rebuildFileInspectorArtifacts(
+                diffBaseText: fileInspectorDiffBaseText,
+                currentText: fileInspectorContent,
+                parsedDiff: parsedDiff
+            )
+            if let document = fileInspectorDiffDocument,
+               let remappedSelection = Self.mapNewTextSelectionToRenderedSelection(newTextSelection, in: document) {
+                fileInspectorSelectedRange = remappedSelection
+            }
+        } else {
+            isFileInspectorDiffEditing = true
+            fileInspectorSelectedRange = newTextSelection
+            applyImmediateFileInspectorEditingArtifacts()
+            scheduleFileInspectorDiffRebuild()
+        }
+        fileInspectorPreparedEditKeepsRenderedDiff = false
+    }
+
+    func restoreFileInspectorDiffState(content: String, renderedSelection: NSRange) {
+        isFileInspectorDiffEditing = false
+        fileInspectorEditSession = nil
+        fileInspectorRebuildTask?.cancel()
+        fileInspectorRebuildTask = nil
+        fileInspectorContent = content
+        fileInspectorSelectedRange = renderedSelection
+        rebuildFileInspectorArtifacts(
+            diffBaseText: fileInspectorDiffBaseText,
+            currentText: fileInspectorContent,
+            parsedDiff: parsedDiff
+        )
+    }
+
+    func undoFileInspectorDiffEdit() {
+        fileInspectorEditSession = nil
+        guard let snapshot = fileInspectorUndoStack.popLast() else { return }
+        fileInspectorRedoStack.append(
+            FileInspectorEditSnapshot(content: fileInspectorContent, selectedRange: fileInspectorSelectedRange)
+        )
+        restoreFileInspectorDiffState(content: snapshot.content, renderedSelection: snapshot.selectedRange)
+    }
+
+    func redoFileInspectorDiffEdit() {
+        fileInspectorEditSession = nil
+        guard let snapshot = fileInspectorRedoStack.popLast() else { return }
+        fileInspectorUndoStack.append(
+            FileInspectorEditSnapshot(content: fileInspectorContent, selectedRange: fileInspectorSelectedRange)
+        )
+        restoreFileInspectorDiffState(content: snapshot.content, renderedSelection: snapshot.selectedRange)
+    }
+
+    private func beginOrExtendFileInspectorEditSession() {
+        let now = Date()
+        if var session = fileInspectorEditSession,
+           now.timeIntervalSince(session.lastEditAt) <= Self.fileInspectorEditGroupingInterval {
+            session.lastEditAt = now
+            fileInspectorEditSession = session
+            return
+        }
+
+        let snapshot = FileInspectorEditSnapshot(
+            content: fileInspectorContent,
+            selectedRange: fileInspectorSelectedRange
+        )
+        fileInspectorUndoStack.append(snapshot)
+        if fileInspectorUndoStack.count > 200 {
+            fileInspectorUndoStack.removeFirst(fileInspectorUndoStack.count - 200)
+        }
+        fileInspectorEditSession = FileInspectorEditSession(
+            lastEditAt: now
+        )
+    }
+
+    private func applyImmediateFileInspectorEditingArtifacts() {
+        let artifacts = Self.buildFileInspectorArtifacts(
+            parsedDiff: nil,
+            diffBaseText: fileInspectorDiffBaseText,
+            currentText: fileInspectorContent
+        )
+        fileInspectorDiffDocument = artifacts.diffEditorDocument
+        fileInspectorDisplayContent = artifacts.renderedText
+        fileInspectorTotalLines = artifacts.totalLines
+        fileInspectorLineHighlights = artifacts.lineHighlights
+        fileInspectorInlineHighlights = artifacts.inlineHighlights
+        fileInspectorLinePairs = artifacts.linePairs
+        fileInspectorHunkControls = [:]
+        fileInspectorHunkToolTips = [:]
+        fileInspectorOverviewSegments = artifacts.overviewSegments
+    }
+
+    private func scheduleFileInspectorDiffRebuild() {
+        fileInspectorRebuildTask?.cancel()
+        let diffBaseText = fileInspectorDiffBaseText
+        let currentText = fileInspectorContent
+        let parsedDiff = parsedDiff
+        let currentSelection = fileInspectorSelectedRange
+        fileInspectorRebuildTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.fileInspectorRebuildDebounceInterval)
+            guard let self else { return }
+            guard !Task.isCancelled else { return }
+            guard self.fileInspectorContent == currentText else { return }
+            self.rebuildFileInspectorArtifacts(
+                diffBaseText: diffBaseText,
+                currentText: currentText,
+                parsedDiff: parsedDiff
+            )
+            if let document = self.fileInspectorDiffDocument,
+               let renderedSelection = Self.mapNewTextSelectionToRenderedSelection(currentSelection, in: document) {
+                self.fileInspectorSelectedRange = renderedSelection
+            }
+            self.isFileInspectorDiffEditing = false
+            self.fileInspectorRebuildTask = nil
+        }
+    }
+
+    private nonisolated static func reconstructOldText(from diff: ParsedDiff, newText: String) -> String {
+        let newLines = textLines(newText)
+        var oldLines: [String] = []
+        var newLine = 1
+        var currentIndex = 1
+
+        for hunk in diff.hunks {
+            while newLine < hunk.newStart && currentIndex <= newLines.count {
+                oldLines.append(newLines[currentIndex - 1])
+                newLine += 1
+                currentIndex += 1
+            }
+
+            for line in hunk.lines {
+                switch line.kind {
+                case .context:
+                    oldLines.append(line.content)
+                    newLine += 1
+                    currentIndex += 1
+                case .addition:
+                    newLine += 1
+                    currentIndex += 1
+                case .deletion:
+                    oldLines.append(line.content)
+                }
+            }
+        }
+
+        while currentIndex <= newLines.count {
+            oldLines.append(newLines[currentIndex - 1])
+            currentIndex += 1
+        }
+
+        return oldLines.joined(separator: "\n")
+    }
+
+    private nonisolated static func textLines(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    private nonisolated static func lineContentRanges(for lines: [String]) -> [NSRange] {
+        guard !lines.isEmpty else { return [NSRange(location: 0, length: 0)] }
+
+        var ranges: [NSRange] = []
+        var location = 0
+        for (index, line) in lines.enumerated() {
+            let length = (line as NSString).length
+            ranges.append(NSRange(location: location, length: length))
+            location += length
+            if index < lines.count - 1 {
+                location += 1
+            }
+        }
+        return ranges
+    }
+
+    private nonisolated static func mapRenderedEditRange(
+        _ range: NSRange,
+        in document: DiffEditorDocument
+    ) -> NSRange? {
+        guard isRenderedEditRangeEditable(range, in: document),
+              let startLocation = mapRenderedCaretOffset(range.location, in: document),
+              let endLocation = mapRenderedCaretOffset(NSMaxRange(range), in: document)
+        else {
+            return nil
+        }
+
+        let lowerBound = min(startLocation, endLocation)
+        let upperBound = max(startLocation, endLocation)
+        return NSRange(location: lowerBound, length: upperBound - lowerBound)
+    }
+
+    private nonisolated static func rowKindForRenderedLocation(
+        _ location: Int,
+        in document: DiffEditorDocument
+    ) -> DiffEditorRow.Kind? {
+        for (index, renderedRange) in document.renderedRowRanges.enumerated() where index < document.rows.count {
+            let rowEnd = NSMaxRange(renderedRange)
+            if location >= renderedRange.location && location <= rowEnd {
+                return document.rows[index].kind
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func mapRenderedSelectionToNewTextSelection(
+        _ selection: NSRange,
+        in document: DiffEditorDocument
+    ) -> NSRange? {
+        mapRenderedEditRange(selection, in: document)
+    }
+
+    private nonisolated static func mapRenderedCaretOffset(
+        _ offset: Int,
+        in document: DiffEditorDocument
+    ) -> Int? {
+        let renderedLength = (document.renderedText as NSString).length
+        let clampedOffset = min(max(offset, 0), renderedLength)
+
+        if document.rows.isEmpty {
+            return clampedOffset == 0 ? 0 : nil
+        }
+
+        for (index, row) in document.rows.enumerated() {
+            let renderedRange = document.renderedRowRanges[index]
+            let renderedLineStart = renderedRange.location
+            let renderedLineEnd = NSMaxRange(renderedRange)
+
+            if clampedOffset < renderedLineStart || clampedOffset > renderedLineEnd {
+                continue
+            }
+
+            guard row.isEditable,
+                  let contentRange = row.contentRangeInNewText else {
+                return nil
+            }
+
+            return contentRange.location + (clampedOffset - renderedLineStart)
+        }
+
+        if clampedOffset == renderedLength,
+           let lastRow = document.rows.last,
+           lastRow.isEditable,
+           let contentRange = lastRow.contentRangeInNewText {
+            return NSMaxRange(contentRange)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func isRenderedEditRangeEditable(
+        _ range: NSRange,
+        in document: DiffEditorDocument
+    ) -> Bool {
+        let renderedLength = (document.renderedText as NSString).length
+        let clampedLocation = min(max(range.location, 0), renderedLength)
+        let clampedEnd = min(max(NSMaxRange(range), 0), renderedLength)
+        let normalizedRange = NSRange(location: min(clampedLocation, clampedEnd), length: abs(clampedEnd - clampedLocation))
+
+        for (index, row) in document.rows.enumerated() {
+            let renderedRange = document.renderedRowRanges[index]
+            if normalizedRange.intersection(renderedRange) != nil && !row.isEditable {
+                return false
+            }
+
+            let isLastRow = index == document.rows.count - 1
+            guard !isLastRow else { continue }
+
+            let newlineRange = NSRange(location: NSMaxRange(renderedRange), length: 1)
+            guard normalizedRange.intersection(newlineRange) != nil else { continue }
+
+            let nextRow = document.rows[index + 1]
+            guard row.isEditable,
+                  nextRow.isEditable,
+                  let currentContentRange = row.contentRangeInNewText,
+                  let nextContentRange = nextRow.contentRangeInNewText,
+                  nextContentRange.location == NSMaxRange(currentContentRange) + 1
+            else {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private nonisolated static func mapNewTextSelectionToRenderedSelection(
+        _ selection: NSRange,
+        in document: DiffEditorDocument
+    ) -> NSRange? {
+        guard let start = mapNewTextCaretOffset(selection.location, in: document),
+              let end = mapNewTextCaretOffset(NSMaxRange(selection), in: document) else {
+            return nil
+        }
+
+        let lowerBound = min(start, end)
+        let upperBound = max(start, end)
+        return NSRange(location: lowerBound, length: upperBound - lowerBound)
+    }
+
+    private nonisolated static func mapNewTextCaretOffset(
+        _ offset: Int,
+        in document: DiffEditorDocument
+    ) -> Int? {
+        let newTextLength = document.rows.compactMap(\.contentRangeInNewText).map { NSMaxRange($0) }.max() ?? 0
+        let clampedOffset = min(max(offset, 0), newTextLength)
+
+        for (index, row) in document.rows.enumerated() {
+            guard row.isEditable,
+                  let contentRange = row.contentRangeInNewText else {
+                continue
+            }
+
+            if clampedOffset >= contentRange.location && clampedOffset < NSMaxRange(contentRange) {
+                let renderedRange = document.renderedRowRanges[index]
+                return renderedRange.location + (clampedOffset - contentRange.location)
+            }
+
+            if clampedOffset == NSMaxRange(contentRange) {
+                let renderedRange = document.renderedRowRanges[index]
+                return NSMaxRange(renderedRange)
+            }
+        }
+
+        if clampedOffset == 0,
+           let firstEditableIndex = document.rows.firstIndex(where: \.isEditable) {
+            return document.renderedRowRanges[firstEditableIndex].location
+        }
+
+        return nil
+    }
+
+    private nonisolated static func lineCount(for text: String) -> Int {
+        max(text.components(separatedBy: "\n").count, 1)
     }
 
     func getFileDiff(hash: String, path: String) async throws -> String {
@@ -254,19 +1286,26 @@ final class RepoViewModel {
 
     // MARK: - File History
     var showFileHistory = false
+    var isLoadingFileHistory = false
     var fileHistoryPath: String = ""
     var fileHistoryCommits: [CommitInfo] = []
     var fileHistorySelectedCommit: CommitInfo?
     var fileHistoryDiff: String = ""
     var fileHistoryParsedDiff: ParsedDiff?
 
-    func openFileHistory(path: String) async {
+    func openFileHistory(path: String, context: DiffContext = .committed) async {
+        fileInspectorPath = path
+        fileInspectorContext = context
+        fileInspectorMode = .history
+        isFileInspectorPresented = true
+        showFileHistory = false
+        isLoadingFileHistory = true
         fileHistoryPath = path
         fileHistoryCommits = []
         fileHistorySelectedCommit = nil
         fileHistoryDiff = ""
         fileHistoryParsedDiff = nil
-        showFileHistory = true
+        defer { isLoadingFileHistory = false }
         do {
             fileHistoryCommits = try await git.fileLog(path: path)
         } catch {
@@ -288,6 +1327,7 @@ final class RepoViewModel {
 
     func closeFileHistory() {
         showFileHistory = false
+        isLoadingFileHistory = false
         fileHistoryPath = ""
         fileHistoryCommits = []
         fileHistorySelectedCommit = nil
@@ -769,6 +1809,7 @@ final class RepoViewModel {
 
     enum DiffContext { case staged, unstaged, committed }
     var currentDiffContext: DiffContext = .committed
+    private var diffLoadGeneration = 0
 
     /// Max file size (in bytes) for which we compute a full diff.
     /// Files larger than this get a placeholder to avoid OOM on huge files
@@ -778,23 +1819,17 @@ final class RepoViewModel {
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed, ignoreSize: Bool = false) async {
         let isUncommitted = selectedCommit?.isUncommitted == true || isInConflict
         guard selectedCommit != nil || selectedStash != nil || isInConflict else { return }
+        diffLoadGeneration += 1
+        let generation = diffLoadGeneration
         selectedDiffFile = file
         currentDiffContext = context
+        isLoadingDiff = true
         isFileTooLarge = false
         fileTooLargeSizeMB = ""
+        fileDiffContent = ""
+        parsedDiff = nil
         do {
-            if let stash = selectedStash {
-                fileDiffContent = try await git.stashFileDiff(stash.index, path: file.path)
-                if fileDiffContent.isEmpty {
-                    fileDiffContent = "No changes in this file"
-                    parsedDiff = nil
-                } else {
-                    parsedDiff = DiffParserEngine.parse(fileDiffContent)
-                    if parsedDiff == nil || parsedDiff?.hunks.isEmpty == true {
-                        parsedDiff = nil
-                    }
-                }
-            } else if isUncommitted {
+            if isUncommitted {
                 // Guard against huge files that would blow up memory
                 if !ignoreSize {
                     let fullPath = (repoPath as NSString).appendingPathComponent(file.path)
@@ -803,36 +1838,100 @@ final class RepoViewModel {
                         let sizeMB = String(format: "%.1f", Double(size) / 1_048_576.0)
                         isFileTooLarge = true
                         fileTooLargeSizeMB = sizeMB
-                        fileDiffContent = ""
-                        parsedDiff = nil
+                        isLoadingDiff = false
                         return
                     }
                 }
+            }
 
-                let status = fileStatuses.first(where: { $0.path == file.path })
-                let statusCode = status?.statusCode ?? "M "
+            let path = file.path
+            let statusCode = fileStatuses.first(where: { $0.path == path })?.statusCode ?? "M "
+            let stashIndex = selectedStash?.index
+            let commitHash = selectedCommit?.hash
+            let git = self.git
+            let payloadTask = Task.detached(priority: .userInitiated) { () throws -> DiffLoadPayload in
+                try await Self.loadDiffPayload(
+                    git: git,
+                    path: path,
+                    context: context,
+                    isUncommitted: isUncommitted,
+                    stashIndex: stashIndex,
+                    commitHash: commitHash,
+                    statusCode: statusCode
+                )
+            }
+            let payload = try await payloadTask.value
 
-                switch context {
-                case .staged:
-                    fileDiffContent = try await git.stagedFileDiff(path: file.path)
-                case .unstaged:
-                    if statusCode == "??" {
-                        fileDiffContent = try await git.readFullFileContent(path: file.path)
-                    } else {
-                        fileDiffContent = try await git.unstagedFileDiff(path: file.path)
-                    }
-                case .committed:
-                    fileDiffContent = try await git.uncommittedFileDiff(path: file.path, statusCode: statusCode)
-                }
-                parsedDiff = DiffParserEngine.parse(fileDiffContent)
-            } else if let commit = selectedCommit {
-                fileDiffContent = try await git.fileDiff(hash: commit.hash, path: file.path)
-                parsedDiff = DiffParserEngine.parse(fileDiffContent)
+            guard generation == diffLoadGeneration,
+                  selectedDiffFile?.path == path,
+                  currentDiffContext == context
+            else { return }
+
+            fileDiffContent = payload.fileDiffContent
+            parsedDiff = payload.parsedDiff
+            if isFileInspectorPresented, fileInspectorPath == path {
+                fileInspectorDiffBaseText = payload.parsedDiff.map {
+                    Self.reconstructOldText(from: $0, newText: fileInspectorContent)
+                } ?? fileInspectorContent
+                rebuildFileInspectorArtifacts(
+                    diffBaseText: fileInspectorDiffBaseText,
+                    currentText: fileInspectorContent,
+                    parsedDiff: fileInspectorMode == .diff ? payload.parsedDiff : nil
+                )
             }
         } catch {
+            guard generation == diffLoadGeneration,
+                  selectedDiffFile?.path == file.path
+            else { return }
             fileDiffContent = "Failed to load diff"
             parsedDiff = nil
         }
+        if generation == diffLoadGeneration {
+            isLoadingDiff = false
+        }
+    }
+
+    private static func loadDiffPayload(
+        git: GitService,
+        path: String,
+        context: DiffContext,
+        isUncommitted: Bool,
+        stashIndex: String?,
+        commitHash: String?,
+        statusCode: String
+    ) async throws -> DiffLoadPayload {
+        let content: String
+
+        if let stashIndex {
+            content = try await git.stashFileDiff(stashIndex, path: path)
+        } else if isUncommitted {
+            switch context {
+            case .staged:
+                content = try await git.stagedFileDiff(path: path)
+            case .unstaged:
+                if statusCode == "??" {
+                    content = try await git.readFullFileContent(path: path)
+                } else {
+                    content = try await git.unstagedFileDiff(path: path)
+                }
+            case .committed:
+                content = try await git.uncommittedFileDiff(path: path, statusCode: statusCode)
+            }
+        } else if let commitHash {
+            content = try await git.fileDiff(hash: commitHash, path: path)
+        } else {
+            return DiffLoadPayload(fileDiffContent: "", parsedDiff: nil)
+        }
+
+        if content.isEmpty {
+            return DiffLoadPayload(fileDiffContent: "No changes in this file", parsedDiff: nil)
+        }
+
+        let parsed = DiffParserEngine.parse(content)
+        return DiffLoadPayload(
+            fileDiffContent: content,
+            parsedDiff: parsed.hunks.isEmpty ? nil : parsed
+        )
     }
 
     func forceLoadFileDiff() async {
@@ -1097,6 +2196,20 @@ final class RepoViewModel {
                 do { try await git.applyPatch(patch, cached: true, reverse: true) }
                 catch { print("Unstage hunk \(i) failed: \(error)") }
             }
+        }
+        await refreshAfterPatchAction()
+    }
+
+    func unstageHunk(_ hunkIndex: Int) async {
+        guard let diff = parsedDiff, let file = selectedDiffFile else { return }
+        if diff.isNewFile {
+            await unstageFile(file.path)
+        } else {
+            let patch = diff.patchForHunk(hunkIndex)
+            guard !patch.isEmpty else { return }
+            do {
+                try await git.applyPatch(patch, cached: true, reverse: true)
+            } catch { print("Unstage hunk failed: \(error)"); return }
         }
         await refreshAfterPatchAction()
     }

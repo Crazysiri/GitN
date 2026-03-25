@@ -3,26 +3,44 @@ import SwiftUI
 struct FileHistoryView: View {
     let viewModel: RepoViewModel
 
+    var body: some View {
+        VStack(spacing: 0) {
+            FileHistoryPanelContent(viewModel: viewModel, showsToolbar: true)
+        }
+        .frame(minWidth: 700, minHeight: 500)
+        .background(Color(.windowBackgroundColor))
+    }
+}
+
+struct FileHistoryPanelContent: View {
+    let viewModel: RepoViewModel
+    let showsToolbar: Bool
+
     private var filePath: String { viewModel.fileHistoryPath }
     private var commits: [CommitInfo] { viewModel.fileHistoryCommits }
     private var selectedCommit: CommitInfo? { viewModel.fileHistorySelectedCommit }
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            Divider()
-            VSplitView {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                if showsToolbar {
+                    toolbar
+                    Divider()
+                }
+
+                let commitListHeight = min(max(geo.size.height * 0.42, 220), 360)
+
                 commitList
-                    .frame(minHeight: 200)
+                    .frame(height: commitListHeight)
+
+                Divider()
+
                 diffView
-                    .frame(minHeight: 150)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 700, minHeight: 500)
         .background(Color(.windowBackgroundColor))
     }
-
-    // MARK: - Toolbar
 
     private var toolbar: some View {
         HStack(spacing: 8) {
@@ -51,17 +69,29 @@ struct FileHistoryView: View {
         .background(Color(.controlBackgroundColor).opacity(0.5))
     }
 
-    // MARK: - Commit List
-
     private var commitList: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(commits) { commit in
-                    fileHistoryRow(commit)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            Task { await viewModel.selectFileHistoryCommit(commit) }
+        Group {
+            if viewModel.isLoadingFileHistory {
+                VStack {
+                    ProgressView("Loading history...")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if commits.isEmpty {
+                Text("No history found for this file")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(commits) { commit in
+                            fileHistoryRow(commit)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    Task { await viewModel.selectFileHistoryCommit(commit) }
+                                }
                         }
+                    }
                 }
             }
         }
@@ -70,26 +100,22 @@ struct FileHistoryView: View {
     private func fileHistoryRow(_ commit: CommitInfo) -> some View {
         let isSelected = selectedCommit?.hash == commit.hash
         return HStack(spacing: 0) {
-            // Commit hash
             Text(commit.shortHash)
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 70, alignment: .leading)
 
-            // Date
             Text(briefDate(commit.date))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .leading)
 
-            // Author
             Text(commit.authorName)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .leading)
                 .lineLimit(1)
 
-            // Message
             Text(commit.message)
                 .font(.system(size: 11))
                 .lineLimit(1)
@@ -99,8 +125,6 @@ struct FileHistoryView: View {
         .padding(.vertical, 5)
         .background(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.3) : Color.clear)
     }
-
-    // MARK: - Diff View
 
     private var diffView: some View {
         Group {
@@ -180,8 +204,6 @@ struct FileHistoryView: View {
         }
     }
 
-    // MARK: - Helpers
-
     private func prefixChar(_ kind: HunkLine.Kind) -> String {
         switch kind {
         case .addition: return "+"
@@ -207,7 +229,6 @@ struct FileHistoryView: View {
     }
 
     private func briefDate(_ dateStr: String) -> String {
-        // Input format: 2026-01-28 12:34:56 +0800
         let parts = dateStr.split(separator: " ")
         guard parts.count >= 1 else { return dateStr }
         return String(parts[0])

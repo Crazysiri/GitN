@@ -2,13 +2,13 @@ import Foundation
 
 // MARK: - Data Structures
 
-struct ParsedDiff {
+struct ParsedDiff: Sendable {
     let fileHeader: String
     let hunks: [ParsedHunk]
     let isNewFile: Bool
 }
 
-struct ParsedHunk {
+struct ParsedHunk: Sendable {
     let rawHeader: String
     let oldStart: Int
     let oldCount: Int
@@ -22,9 +22,28 @@ struct ParsedHunk {
         }
         return "行 \(oldStart)-\(oldStart + oldCount - 1)"
     }
+
+    var changeDisplayRange: String {
+        let additions = lines.compactMap(\.newLineNum)
+        let deletions = lines.compactMap(\.oldLineNum)
+
+        if !additions.isEmpty {
+            let start = additions.min() ?? newStart
+            let end = additions.max() ?? start
+            return start == end ? "新增行 \(start)" : "新增行 \(start)-\(end)"
+        }
+
+        if !deletions.isEmpty {
+            let start = deletions.min() ?? oldStart
+            let end = deletions.max() ?? start
+            return start == end ? "删除行 \(start)" : "删除行 \(start)-\(end)"
+        }
+
+        return displayRange
+    }
 }
 
-struct HunkLine: Identifiable {
+struct HunkLine: Identifiable, Sendable {
     let id: Int
     let kind: Kind
     let rawText: String
@@ -32,7 +51,7 @@ struct HunkLine: Identifiable {
     let oldLineNum: Int?
     let newLineNum: Int?
 
-    enum Kind {
+    enum Kind: Sendable {
         case context, addition, deletion
     }
 }
@@ -146,6 +165,120 @@ enum DiffParserEngine {
         let newStart = intAt(3) ?? 1
         let newCount = intAt(4) ?? 1
         return (oldStart, oldCount, newStart, newCount)
+    }
+}
+
+enum TextDiffEngine {
+    static func diff(old oldText: String, new newText: String) -> ParsedDiff {
+        let oldLines = textLines(oldText)
+        let newLines = textLines(newText)
+        let difference = newLines.difference(from: oldLines)
+
+        var removals: [Int: [String]] = [:]
+        var insertions: [Int: [String]] = [:]
+
+        for change in difference {
+            switch change {
+            case let .remove(offset, element, _):
+                removals[offset, default: []].append(element)
+            case let .insert(offset, element, _):
+                insertions[offset, default: []].append(element)
+            }
+        }
+
+        var hunks: [ParsedHunk] = []
+        var pendingLines: [HunkLine] = []
+        var pendingOldStart = 1
+        var pendingNewStart = 1
+        var oldIndex = 0
+        var newIndex = 0
+        var lineID = 0
+
+        func flushPendingHunk() {
+            guard !pendingLines.isEmpty else { return }
+
+            let oldCount = pendingLines.reduce(into: 0) { partialResult, line in
+                if line.kind != .addition { partialResult += 1 }
+            }
+            let newCount = pendingLines.reduce(into: 0) { partialResult, line in
+                if line.kind != .deletion { partialResult += 1 }
+            }
+            let header = "@@ -\(pendingOldStart),\(oldCount) +\(pendingNewStart),\(newCount) @@"
+            hunks.append(
+                ParsedHunk(
+                    rawHeader: header,
+                    oldStart: pendingOldStart,
+                    oldCount: oldCount,
+                    newStart: pendingNewStart,
+                    newCount: newCount,
+                    lines: pendingLines
+                )
+            )
+            pendingLines.removeAll(keepingCapacity: true)
+        }
+
+        while oldIndex < oldLines.count || newIndex < newLines.count {
+            if let removedBatch = removals[oldIndex], !removedBatch.isEmpty {
+                if pendingLines.isEmpty {
+                    pendingOldStart = oldIndex + 1
+                    pendingNewStart = newIndex + 1
+                }
+                for removed in removedBatch {
+                    pendingLines.append(
+                        HunkLine(
+                            id: lineID,
+                            kind: .deletion,
+                            rawText: "-" + removed,
+                            content: removed,
+                            oldLineNum: oldIndex + 1,
+                            newLineNum: nil
+                        )
+                    )
+                    lineID += 1
+                    oldIndex += 1
+                }
+                continue
+            }
+
+            if let insertedBatch = insertions[newIndex], !insertedBatch.isEmpty {
+                if pendingLines.isEmpty {
+                    pendingOldStart = oldIndex + 1
+                    pendingNewStart = newIndex + 1
+                }
+                for inserted in insertedBatch {
+                    pendingLines.append(
+                        HunkLine(
+                            id: lineID,
+                            kind: .addition,
+                            rawText: "+" + inserted,
+                            content: inserted,
+                            oldLineNum: nil,
+                            newLineNum: newIndex + 1
+                        )
+                    )
+                    lineID += 1
+                    newIndex += 1
+                }
+                continue
+            }
+
+            flushPendingHunk()
+            oldIndex += 1
+            newIndex += 1
+        }
+
+        flushPendingHunk()
+
+        return ParsedDiff(
+            fileHeader: "",
+            hunks: hunks,
+            isNewFile: oldLines.isEmpty && !newLines.isEmpty
+        )
+    }
+
+    private static func textLines(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     }
 }
 
