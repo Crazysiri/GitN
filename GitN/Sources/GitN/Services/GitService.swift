@@ -1787,9 +1787,14 @@ actor GitService {
         let sedScript = sedParts.joined(separator: "; ")
         let editor = "sed -i '' '\(sedScript)'"
 
+        // GIT_EDITOR=true prevents git from opening an interactive editor for the
+        // combined commit message in a non-TTY Process context, which would block forever.
         try await runGitWithEnv(
             ["rebase", "-i", "--autosquash", "\(oldestHash)^"],
-            env: ["GIT_SEQUENCE_EDITOR": editor]
+            env: [
+                "GIT_SEQUENCE_EDITOR": editor,
+                "GIT_EDITOR": "true"
+            ]
         )
     }
 
@@ -1961,7 +1966,7 @@ actor GitService {
     }
     
     func stashDiffFiles(_ stashRef: String) async throws -> [DiffFile] {
-        // Use --stat to get file changes with line counts
+        // Get tracked file changes (working tree + index diffs vs HEAD)
         let output = try await runGitOutput(["stash", "show", "--stat", "--format=", stashRef])
         var result: [DiffFile] = []
         
@@ -1994,6 +1999,17 @@ actor GitService {
             
             result.append(DiffFile(additions: additions, deletions: deletions, path: path))
         }
+
+        // Also include untracked files stored in the third parent (^3).
+        // These are created when stash is saved with --include-untracked (GIT_STASH_INCLUDE_UNTRACKED)
+        // and are NOT shown by `git stash show --stat`, which only covers tracked changes.
+        if let untrackedOutput = try? await runGitOutput(["ls-tree", "-r", "--name-only", "\(stashRef)^3"]) {
+            let existingPaths = Set(result.map(\.path))
+            for path in untrackedOutput.split(separator: "\n").map(String.init) where !path.isEmpty && !existingPaths.contains(path) {
+                result.append(DiffFile(additions: 1, deletions: 0, path: path))
+            }
+        }
+
         return result
     }
     
@@ -2020,18 +2036,34 @@ actor GitService {
                 if diffStartIndex > 0 {
                     return lines.suffix(from: diffStartIndex).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
                 }
+                // Last resort: check if this file lives in the untracked parent (^3).
+                // Files stashed with --include-untracked are not reachable via the main stash diff.
+                if let content = try? await runGitOutput(["show", "\(stashRef)^3:\(path)"]), !content.isEmpty {
+                    return formatNewFileAsDiff(path: path, content: content)
+                }
                 return showOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             return trimmed
         } catch {
             // If file doesn't exist in stash or stash ref is invalid, return empty string
             let errorMsg = error.localizedDescription.lowercased()
-            if errorMsg.contains("stash") || errorMsg.contains("not found") || errorMsg.contains("invalid") || 
+            if errorMsg.contains("stash") || errorMsg.contains("not found") || errorMsg.contains("invalid") ||
                errorMsg.contains("no such") || errorMsg.contains("unknown revision") {
+                // Still try ^3 for untracked files before giving up
+                if let content = try? await runGitOutput(["show", "\(stashRef)^3:\(path)"]), !content.isEmpty {
+                    return formatNewFileAsDiff(path: path, content: content)
+                }
                 return ""
             }
             throw error
         }
+    }
+
+    private func formatNewFileAsDiff(path: String, content: String) -> String {
+        let lines = content.components(separatedBy: "\n")
+        var diff = "diff --git a/\(path) b/\(path)\nnew file mode 100644\n--- /dev/null\n+++ b/\(path)\n@@ -0,0 +1,\(lines.count) @@\n"
+        diff += lines.map { "+\($0)" }.joined(separator: "\n")
+        return diff
     }
 
     // MARK: - Git CLI helper

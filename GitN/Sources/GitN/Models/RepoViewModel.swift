@@ -40,7 +40,8 @@ final class RepoViewModel {
     var fileStatuses: [FileStatus] = []
     var isStageOperationInProgress = false
     var selectedFilePaths: Set<String> = []
-    /// Anchor path for Shift+click range selection.
+    var selectedFileListContext: DiffContext?
+    /// Anchor path for Shift+click range selection .
     var lastSelectedFilePath: String?
     var commitSummary: String = ""
     var commitDescription: String = ""
@@ -202,6 +203,7 @@ final class RepoViewModel {
         let diffFile = diffFiles.first(where: { $0.path == firstStatus.path })
             ?? DiffFile(additions: 0, deletions: 0, path: firstStatus.path)
         selectedFilePaths = [firstStatus.path]
+        selectedFileListContext = .unstaged
         await selectDiffFile(diffFile, context: .unstaged)
     }
 
@@ -211,7 +213,18 @@ final class RepoViewModel {
     ///   - isRange: `true` when ⇧ is held (select range from anchor).
     ///   - orderedPaths: The full ordered list of visible paths in the
     ///     section (staged / unstaged) so we can compute the range.
-    func toggleFileSelection(_ path: String, isMulti: Bool, isRange: Bool = false, orderedPaths: [String] = []) {
+    func toggleFileSelection(
+        _ path: String,
+        context: DiffContext,
+        isMulti: Bool,
+        isRange: Bool = false,
+        orderedPaths: [String] = []
+    ) {
+        if selectedFileListContext != context {
+            selectedFilePaths = []
+        }
+        selectedFileListContext = context
+
         if isRange, let anchor = lastSelectedFilePath, !orderedPaths.isEmpty {
             // Shift+click: select the range [anchor … path] inclusive.
             if let anchorIdx = orderedPaths.firstIndex(of: anchor),
@@ -722,6 +735,7 @@ final class RepoViewModel {
         fileDiffContent = ""
         parsedDiff = nil
         selectedFilePaths = []
+        selectedFileListContext = nil
         do {
             if commit.isUncommitted {
                 refreshUncommittedDiffFiles()
@@ -733,6 +747,7 @@ final class RepoViewModel {
                     let diffFile = diffFiles.first(where: { $0.path == status.path })
                         ?? DiffFile(additions: 0, deletions: 0, path: status.path)
                     selectedFilePaths = [status.path]
+                    selectedFileListContext = context
                     await selectDiffFile(diffFile, context: context)
                 }
             } else {
@@ -1817,13 +1832,15 @@ final class RepoViewModel {
                     mergeCommitMessage = await git.mergeCommitMessage()
                 }
                 showToast(title: type.title, detail: "There are merge conflicts that need to be resolved", style: .error)
-                await loadAll()
             } else {
                 operationError = errorMessage
             }
         } catch {
             operationError = errorMessage
         }
+        // Always refresh after any failed stash/merge operation so the file list
+        // reflects whatever partial state libgit2 left in the working directory.
+        await loadAll()
     }
 
     func refreshConflictState() async {

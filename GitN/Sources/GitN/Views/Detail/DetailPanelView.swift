@@ -22,10 +22,16 @@ struct DetailPanelView: View {
     @State private var rubberBandOrigin: CGPoint = .zero
     @State private var rubberBandCurrent: CGPoint = .zero
     @State private var unstagedRowFrames: [String: CGRect] = [:]
+    @State private var unstagedSectionMinY: CGFloat?
     @FocusState private var focusedTarget: FocusTarget?
 
     private var supportsUnstagedRubberBandSelection: Bool {
-        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 16
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        if version.majorVersion >= 16 { return true }
+        if version.majorVersion == 15 {
+            return version.minorVersion < 6
+        }
+        return false
     }
 
     var body: some View {
@@ -434,35 +440,30 @@ struct DetailPanelView: View {
     }
 
     private var compareFileList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(viewModel.diffFiles) { file in
-                        DiffFileRow(
-                            file: file,
-                            isSelected: viewModel.selectedDiffFile?.path == file.path
-                        )
-                        .id(file.path)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            focusedTarget = .fileList
-                            Task { await viewModel.selectCompareFile(file) }
+        fileListContainer(maxHeight: 200) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.diffFiles) { file in
+                            DiffFileRow(
+                                file: file,
+                                isSelected: viewModel.selectedDiffFile?.path == file.path
+                            )
+                            .id(file.path)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                focusedTarget = .fileList
+                                Task { await viewModel.selectCompareFile(file) }
+                            }
+                            .contextMenu { commitFileContextMenu(file) }
                         }
-                        .contextMenu { commitFileContextMenu(file) }
                     }
                 }
-            }
-            .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
-                scrollFileRow(path, with: proxy)
+                .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
+                    scrollFileRow(path, with: proxy)
+                }
             }
         }
-        .frame(maxHeight: 200)
-        .focusable()
-        .focused($focusedTarget, equals: .fileList)
-        .onMoveCommand(perform: handleFileListMove)
-        .simultaneousGesture(TapGesture().onEnded {
-            focusedTarget = .fileList
-        })
     }
 
     // MARK: - File list
@@ -477,35 +478,30 @@ struct DetailPanelView: View {
     }
 
     private var plainFileList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(viewModel.diffFiles) { file in
-                        DiffFileRow(
-                            file: file,
-                            isSelected: viewModel.selectedDiffFile?.path == file.path
-                        )
-                        .id(file.path)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            focusedTarget = .fileList
-                            Task { await viewModel.selectDiffFile(file) }
+        fileListContainer(maxHeight: 200) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.diffFiles) { file in
+                            DiffFileRow(
+                                file: file,
+                                isSelected: viewModel.selectedDiffFile?.path == file.path
+                            )
+                            .id(file.path)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                focusedTarget = .fileList
+                                Task { await viewModel.selectDiffFile(file) }
+                            }
+                            .contextMenu { commitFileContextMenu(file) }
                         }
-                        .contextMenu { commitFileContextMenu(file) }
                     }
                 }
-            }
-            .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
-                scrollFileRow(path, with: proxy)
+                .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
+                    scrollFileRow(path, with: proxy)
+                }
             }
         }
-        .frame(maxHeight: 200)
-        .focusable()
-        .focused($focusedTarget, equals: .fileList)
-        .onMoveCommand(perform: handleFileListMove)
-        .simultaneousGesture(TapGesture().onEnded {
-            focusedTarget = .fileList
-        })
     }
 
     // MARK: - Commit File Context Menu
@@ -571,186 +567,183 @@ struct DetailPanelView: View {
         let stagedPaths = stagedList.map(\.path)
         let unstagedPaths = unstagedList.map(\.path)
 
-        return ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    // Staged section — entire area is a drop target (works even when empty)
+        return fileListContainer(maxHeight: 240) {
+            ScrollViewReader { proxy in
+                let scrollView = ScrollView {
                     LazyVStack(spacing: 0) {
-                        stagingSectionHeader(
-                            title: "已暂存",
-                            count: stagedList.count,
-                            allSelected: !stagedList.isEmpty,
-                            onToggle: {
-                                Task {
-                                    if stagedList.isEmpty {
-                                        await viewModel.stageAllFiles()
-                                    } else {
-                                        await viewModel.unstageAllFiles()
+                        // Staged section — entire area is a drop target (works even when empty)
+                        LazyVStack(spacing: 0) {
+                            stagingSectionHeader(
+                                title: "已暂存",
+                                count: stagedList.count,
+                                allSelected: !stagedList.isEmpty,
+                                onToggle: {
+                                    Task {
+                                        if stagedList.isEmpty {
+                                            await viewModel.stageAllFiles()
+                                        } else {
+                                            await viewModel.unstageAllFiles()
+                                        }
                                     }
                                 }
-                            }
-                        )
-
-                        ForEach(stagedList) { file in
-                            StagingFileRow(
-                                file: file,
-                                isSelected: viewModel.selectedFilePaths.contains(file.path)
-                                    || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
-                                isStaged: true,
-                                onToggle: { Task { await viewModel.unstageFile(file.path) } }
                             )
-                            .equatable()
-                            .id(file.path)
-                            .onTapGesture {
-                                focusedTarget = .fileList
-                                let flags = NSEvent.modifierFlags
-                                viewModel.toggleFileSelection(
-                                    file.path,
-                                    isMulti: flags.contains(.command),
-                                    isRange: flags.contains(.shift),
-                                    orderedPaths: stagedPaths
+
+                            ForEach(stagedList) { file in
+                                StagingFileRow(
+                                    file: file,
+                                    isSelected: isStatusFileSelected(file.path, in: .staged),
+                                    isStaged: true,
+                                    onToggle: { Task { await viewModel.unstageFile(file.path) } }
                                 )
-                                Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
-                            }
-                            .contextMenu { stagedFileContextMenu(file) }
-                            .draggable(dragPayload(for: file.path))
-                        }
-
-                        // Empty drop hint when no staged files
-                        if stagedList.isEmpty {
-                            Text("Drag files here to stage")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .frame(maxWidth: .infinity, minHeight: 28)
-                        }
-                    }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        handleDrop(providers: providers, toStaged: true)
-                    }
-
-                    Divider().padding(.vertical, 2)
-
-                    // Unstaged section — entire area is a drop target
-                    // Supports rubber-band (marquee) multi-selection via long-press + drag
-                    applyUnstagedSelectionGesture(to: LazyVStack(spacing: 0) {
-                        stagingSectionHeader(
-                            title: "未暂存",
-                            count: unstagedList.count,
-                            allSelected: false,
-                            onToggle: {
-                                Task { await viewModel.stageAllFiles() }
-                            },
-                            onDiscard: {
-                                // If files are multi-selected, discard only selected unstaged files;
-                                // otherwise discard all unstaged files.
-                                let selected = viewModel.selectedFilePaths
-                                let unstagedPathSet = Set(unstagedList.map(\.path))
-                                let targets = selected.filter { unstagedPathSet.contains($0) }
-                                if targets.count > 1 {
-                                    confirmDiscard(Array(targets))
-                                } else {
-                                    confirmDiscard(unstagedList.map(\.path))
+                                .equatable()
+                                .id(fileRowID(for: file.path, context: .staged))
+                                .onTapGesture {
+                                    focusedTarget = .fileList
+                                    let flags = NSEvent.modifierFlags
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .staged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: stagedPaths
+                                    )
+                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
                                 }
+                                .contextMenu { stagedFileContextMenu(file) }
+                                .draggable(dragPayload(for: file.path))
                             }
-                        )
 
-                        ForEach(unstagedList) { file in
-                            StagingFileRow(
-                                file: file,
-                                isSelected: viewModel.selectedFilePaths.contains(file.path)
-                                    || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
-                                isStaged: false,
-                                onToggle: { Task { await viewModel.stageFile(file.path) } }
+                            if stagedList.isEmpty {
+                                Text("Drag files here to stage")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, minHeight: 28)
+                            }
+                        }
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, toStaged: true)
+                        }
+
+                        Divider().padding(.vertical, 2)
+
+                        applyUnstagedSelectionGesture(to: LazyVStack(spacing: 0) {
+                            stagingSectionHeader(
+                                title: "未暂存",
+                                count: unstagedList.count,
+                                allSelected: false,
+                                onToggle: {
+                                    Task { await viewModel.stageAllFiles() }
+                                },
+                                onDiscard: {
+                                    let selected = viewModel.selectedFilePaths
+                                    let unstagedPathSet = Set(unstagedList.map(\.path))
+                                    let targets = selected.filter { unstagedPathSet.contains($0) }
+                                    if targets.count > 1 {
+                                        confirmDiscard(Array(targets))
+                                    } else {
+                                        confirmDiscard(unstagedList.map(\.path))
+                                    }
+                                }
                             )
-                            .equatable()
-                            .id(file.path)
-                            .modifier(UnstagedRowFrameReporter(
-                                isEnabled: supportsUnstagedRubberBandSelection,
-                                filePath: file.path
-                            ))
-                            .onTapGesture {
-                                guard !isRubberBanding else { return }
-                                focusedTarget = .fileList
-                                let flags = NSEvent.modifierFlags
-                                viewModel.toggleFileSelection(
-                                    file.path,
-                                    isMulti: flags.contains(.command),
-                                    isRange: flags.contains(.shift),
-                                    orderedPaths: unstagedPaths
-                                )
-                                Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
-                            }
-                            .contextMenu { unstagedFileContextMenu(file) }
-                            .draggable(dragPayload(for: file.path))
-                        }
 
-                        // Empty drop hint when no unstaged files
-                        if unstagedList.isEmpty {
-                            Text("Drag files here to unstage")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .frame(maxWidth: .infinity, minHeight: 28)
+                            ForEach(unstagedList) { file in
+                                StagingFileRow(
+                                    file: file,
+                                    isSelected: isStatusFileSelected(file.path, in: .unstaged),
+                                    isStaged: false,
+                                    onToggle: { Task { await viewModel.stageFile(file.path) } }
+                                )
+                                .equatable()
+                                .id(fileRowID(for: file.path, context: .unstaged))
+                                .modifier(UnstagedRowFrameReporter(
+                                    isEnabled: supportsUnstagedRubberBandSelection,
+                                    filePath: file.path
+                                ))
+                                .onTapGesture {
+                                    guard !isRubberBanding else { return }
+                                    focusedTarget = .fileList
+                                    let flags = NSEvent.modifierFlags
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .unstaged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: unstagedPaths
+                                    )
+                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                                }
+                                .contextMenu { unstagedFileContextMenu(file) }
+                                .draggable(dragPayload(for: file.path))
+                            }
+
+                            if unstagedList.isEmpty {
+                                Text("Drag files here to unstage")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, minHeight: 28)
+                            }
                         }
-                    }
-                    .coordinateSpace(name: "unstagedArea")
-                    .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
-                        guard supportsUnstagedRubberBandSelection else { return }
-                        unstagedRowFrames = frames
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if supportsUnstagedRubberBandSelection && isRubberBanding {
-                            rubberBandOverlay
+                        .modifier(UnstagedSectionBoundsReporter(
+                            isEnabled: supportsUnstagedRubberBandSelection
+                        ))
+                        .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
+                            guard supportsUnstagedRubberBandSelection else { return }
+                            unstagedRowFrames = frames
                         }
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, toStaged: false)
+                        })
                     }
+                }
+                .coordinateSpace(name: "unstagedArea")
+                .onPreferenceChange(UnstagedSectionBoundsKey.self) { minY in
+                    guard supportsUnstagedRubberBandSelection else { return }
+                    unstagedSectionMinY = minY
+                }
+                .overlay(alignment: .topLeading) {
+                    if supportsUnstagedRubberBandSelection && isRubberBanding {
+                        rubberBandOverlay
+                    }
+                }
+                .onChange(of: selectedStatusRowID) { _, rowID in
+                    scrollFileRow(rowID, with: proxy)
+                }
+
+                if supportsUnstagedRubberBandSelection {
+                    scrollView.highPriorityGesture(unstagedRubberBandGesture)
+                } else {
+                    scrollView
+                }
+            }
+            .allowsHitTesting(!viewModel.isStageOperationInProgress)
+            .overlay(alignment: .topTrailing) {
+                if viewModel.isStageOperationInProgress {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Processing...")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color(.windowBackgroundColor).opacity(0.72))
                     )
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        handleDrop(providers: providers, toStaged: false)
-                    }
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
+                    )
+                    .padding(8)
                 }
-            }
-            .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
-                scrollFileRow(path, with: proxy)
-            }
-        }
-        .frame(maxHeight: 240)
-        .focusable()
-        .focused($focusedTarget, equals: .fileList)
-        .onMoveCommand(perform: handleFileListMove)
-        .simultaneousGesture(TapGesture().onEnded {
-            focusedTarget = .fileList
-        })
-        .allowsHitTesting(!viewModel.isStageOperationInProgress)
-        .overlay(alignment: .topTrailing) {
-            if viewModel.isStageOperationInProgress {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Processing...")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule()
-                        .fill(Color(.windowBackgroundColor).opacity(0.72))
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
-                )
-                .padding(8)
             }
         }
     }
 
     @ViewBuilder
     private func applyUnstagedSelectionGesture<Content: View>(to content: Content) -> some View {
-        if supportsUnstagedRubberBandSelection {
-            content.highPriorityGesture(unstagedRubberBandGesture)
-        } else {
-            content
-        }
+        content
     }
 
     private var unstagedRubberBandGesture: some Gesture {
@@ -759,13 +752,19 @@ struct DetailPanelView: View {
             .onChanged { value in
                 switch value {
                 case .first(true):
-                    viewModel.selectedFilePaths = []
-                    viewModel.selectedDiffFile = nil
+                    break
                 case .second(true, let drag?):
+                    guard isValidRubberBandStart(drag.startLocation) else {
+                        if isRubberBanding {
+                            isRubberBanding = false
+                        }
+                        return
+                    }
                     if !isRubberBanding {
                         isRubberBanding = true
                         rubberBandOrigin = drag.startLocation
                         viewModel.selectedFilePaths = []
+                        viewModel.selectedFileListContext = .unstaged
                         viewModel.selectedDiffFile = nil
                     }
                     rubberBandCurrent = drag.location
@@ -785,125 +784,118 @@ struct DetailPanelView: View {
         let conflictPaths = Set(conflictedFiles.map(\.path))
         let resolvedPaths = Set(resolvedFiles.map(\.path))
 
-        return ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 0) {
-                    // Staged section — drop target
+        return fileListContainer(maxHeight: 200) {
+            ScrollViewReader { proxy in
+                ScrollView {
                     VStack(spacing: 0) {
-                        stagingSectionHeader(
-                            title: "已暂存",
-                            count: conflictStagedFiles(excludingConflicts: conflictPaths).count,
-                            allSelected: !conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty,
-                            onToggle: {
-                                Task {
-                                    if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                                        await viewModel.stageAllFiles()
-                                    } else {
-                                        await viewModel.unstageAllFiles()
+                        VStack(spacing: 0) {
+                            stagingSectionHeader(
+                                title: "已暂存",
+                                count: conflictStagedFiles(excludingConflicts: conflictPaths).count,
+                                allSelected: !conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty,
+                                onToggle: {
+                                    Task {
+                                        if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                                            await viewModel.stageAllFiles()
+                                        } else {
+                                            await viewModel.unstageAllFiles()
+                                        }
                                     }
                                 }
-                            }
-                        )
-
-                        ForEach(conflictStagedFiles(excludingConflicts: conflictPaths)) { file in
-                            StagingFileRow(
-                                file: file,
-                                isSelected: viewModel.selectedFilePaths.contains(file.path)
-                                    || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .staged),
-                                isStaged: true,
-                                onToggle: { Task { await viewModel.unstageFile(file.path) } }
                             )
-                            .id(file.path)
-                            .onTapGesture {
-                                focusedTarget = .fileList
-                                let flags = NSEvent.modifierFlags
-                                viewModel.toggleFileSelection(
-                                    file.path,
-                                    isMulti: flags.contains(.command),
-                                    isRange: flags.contains(.shift),
-                                    orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
+
+                            ForEach(conflictStagedFiles(excludingConflicts: conflictPaths)) { file in
+                                StagingFileRow(
+                                    file: file,
+                                    isSelected: isStatusFileSelected(file.path, in: .staged),
+                                    isStaged: true,
+                                    onToggle: { Task { await viewModel.unstageFile(file.path) } }
                                 )
-                                Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                                .id(fileRowID(for: file.path, context: .staged))
+                                .onTapGesture {
+                                    focusedTarget = .fileList
+                                    let flags = NSEvent.modifierFlags
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .staged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                                    )
+                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                                }
+                                .contextMenu {
+                                    conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                                }
+                                .draggable(dragPayload(for: file.path))
                             }
-                            .contextMenu {
-                                conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+
+                            if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                                Text("Drag files here to stage")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, minHeight: 28)
                             }
-                            .draggable(dragPayload(for: file.path))
+                        }
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, toStaged: true)
                         }
 
-                        if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                            Text("Drag files here to stage")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .frame(maxWidth: .infinity, minHeight: 28)
-                        }
-                    }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        handleDrop(providers: providers, toStaged: true)
-                    }
+                        Divider().padding(.vertical, 2)
 
-                    Divider().padding(.vertical, 2)
-
-                    // Unstaged section — drop target
-                    VStack(spacing: 0) {
-                        stagingSectionHeader(
-                            title: "未暂存",
-                            count: conflictUnstagedFiles(excludingConflicts: conflictPaths).count,
-                            allSelected: false,
-                            onToggle: {
-                                Task { await viewModel.stageAllFiles() }
-                            }
-                        )
-
-                        ForEach(conflictUnstagedFiles(excludingConflicts: conflictPaths)) { file in
-                            StagingFileRow(
-                                file: file,
-                                isSelected: viewModel.selectedFilePaths.contains(file.path)
-                                    || (viewModel.selectedDiffFile?.path == file.path && viewModel.currentDiffContext == .unstaged),
-                                isStaged: false,
-                                onToggle: { Task { await viewModel.stageFile(file.path) } }
+                        VStack(spacing: 0) {
+                            stagingSectionHeader(
+                                title: "未暂存",
+                                count: conflictUnstagedFiles(excludingConflicts: conflictPaths).count,
+                                allSelected: false,
+                                onToggle: {
+                                    Task { await viewModel.stageAllFiles() }
+                                }
                             )
-                            .id(file.path)
-                            .onTapGesture {
-                                focusedTarget = .fileList
-                                let flags = NSEvent.modifierFlags
-                                viewModel.toggleFileSelection(
-                                    file.path,
-                                    isMulti: flags.contains(.command),
-                                    isRange: flags.contains(.shift),
-                                    orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
-                                )
-                                Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
-                            }
-                            .contextMenu {
-                                conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
-                            }
-                            .draggable(dragPayload(for: file.path))
-                        }
 
-                        if conflictUnstagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                            Text("Drag files here to unstage")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                                .frame(maxWidth: .infinity, minHeight: 28)
+                            ForEach(conflictUnstagedFiles(excludingConflicts: conflictPaths)) { file in
+                                StagingFileRow(
+                                    file: file,
+                                    isSelected: isStatusFileSelected(file.path, in: .unstaged),
+                                    isStaged: false,
+                                    onToggle: { Task { await viewModel.stageFile(file.path) } }
+                                )
+                                .id(fileRowID(for: file.path, context: .unstaged))
+                                .onTapGesture {
+                                    focusedTarget = .fileList
+                                    let flags = NSEvent.modifierFlags
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .unstaged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                                    )
+                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                                }
+                                .contextMenu {
+                                    conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
+                                }
+                                .draggable(dragPayload(for: file.path))
+                            }
+
+                            if conflictUnstagedFiles(excludingConflicts: conflictPaths).isEmpty {
+                                Text("Drag files here to unstage")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity, minHeight: 28)
+                            }
                         }
-                    }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        handleDrop(providers: providers, toStaged: false)
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, toStaged: false)
+                        }
                     }
                 }
-            }
-            .onChange(of: viewModel.selectedDiffFile?.path) { _, path in
-                scrollFileRow(path, with: proxy)
+                .onChange(of: selectedStatusRowID) { _, rowID in
+                    scrollFileRow(rowID, with: proxy)
+                }
             }
         }
-        .frame(maxHeight: 200)
-        .focusable()
-        .focused($focusedTarget, equals: .fileList)
-        .onMoveCommand(perform: handleFileListMove)
-        .simultaneousGesture(TapGesture().onEnded {
-            focusedTarget = .fileList
-        })
     }
 
     private func conflictStagedFiles(excludingConflicts conflictPaths: Set<String>) -> [FileStatus] {
@@ -1219,6 +1211,11 @@ struct DetailPanelView: View {
             }
         }
         viewModel.selectedFilePaths = newSelection
+    }
+
+    private func isValidRubberBandStart(_ location: CGPoint) -> Bool {
+        guard let unstagedSectionMinY else { return false }
+        return location.y >= unstagedSectionMinY
     }
 
     // MARK: - Diff Content
@@ -1756,6 +1753,64 @@ struct DetailPanelView: View {
         viewModel.fileStatuses.filter(\.hasUnstagedChanges)
     }
 
+    private var selectedStatusRowID: String? {
+        guard let path = viewModel.selectedDiffFile?.path else { return nil }
+        switch viewModel.currentDiffContext {
+        case .staged, .unstaged:
+            return fileRowID(for: path, context: viewModel.currentDiffContext)
+        case .committed:
+            return nil
+        }
+    }
+
+    private func fileRowID(for path: String, context: RepoViewModel.DiffContext) -> String {
+        let prefix: String
+        switch context {
+        case .staged:
+            prefix = "staged"
+        case .unstaged:
+            prefix = "unstaged"
+        case .committed:
+            prefix = "committed"
+        }
+        return "\(prefix)::\(path)"
+    }
+
+    private func isStatusFileSelected(_ path: String, in context: RepoViewModel.DiffContext) -> Bool {
+        let isMultiSelected = viewModel.selectedFileListContext == context && viewModel.selectedFilePaths.contains(path)
+        let isDiffSelected = viewModel.selectedDiffFile?.path == path && viewModel.currentDiffContext == context
+        return isMultiSelected || isDiffSelected
+    }
+
+    @ViewBuilder
+    private func fileListContainer<Content: View>(maxHeight: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+        let base = content()
+            .frame(maxHeight: maxHeight)
+            .contentShape(Rectangle())
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .inset(by: 1)
+                    .stroke(
+                        focusedTarget == .fileList
+                            ? Color.accentColor.opacity(0.9)
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            }
+            .focusable()
+            .focused($focusedTarget, equals: .fileList)
+            .onMoveCommand(perform: handleFileListMove)
+            .simultaneousGesture(TapGesture().onEnded {
+                focusedTarget = .fileList
+            })
+
+        if #available(macOS 15.0, *) {
+            base.focusEffectDisabled()
+        } else {
+            base
+        }
+    }
+
     private func handleFileListMove(_ direction: MoveCommandDirection) {
         guard focusedTarget == .fileList else { return }
 
@@ -1811,6 +1866,7 @@ struct DetailPanelView: View {
         let file = files[target]
         let diffFile = matchingDiffFile(for: file)
         viewModel.selectedFilePaths = [file.path]
+        viewModel.selectedFileListContext = context
         Task { await viewModel.selectDiffFile(diffFile, context: context) }
     }
 
@@ -1829,11 +1885,11 @@ struct DetailPanelView: View {
         return nextIndex
     }
 
-    private func scrollFileRow(_ path: String?, with proxy: ScrollViewProxy) {
-        guard let path else { return }
+    private func scrollFileRow(_ rowID: String?, with proxy: ScrollViewProxy) {
+        guard let rowID else { return }
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.12)) {
-                proxy.scrollTo(path, anchor: .center)
+                proxy.scrollTo(rowID, anchor: .center)
             }
         }
     }
@@ -1855,6 +1911,15 @@ private struct UnstagedRowFrameKey: PreferenceKey {
     }
 }
 
+private struct UnstagedSectionBoundsKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() {
+            value = next
+        }
+    }
+}
+
 private struct UnstagedRowFrameReporter: ViewModifier {
     let isEnabled: Bool
     let filePath: String
@@ -1867,6 +1932,26 @@ private struct UnstagedRowFrameReporter: ViewModifier {
                     Color.clear.preference(
                         key: UnstagedRowFrameKey.self,
                         value: [filePath: geo.frame(in: .named("unstagedArea"))]
+                    )
+                }
+            )
+        } else {
+            content
+        }
+    }
+}
+
+private struct UnstagedSectionBoundsReporter: ViewModifier {
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: UnstagedSectionBoundsKey.self,
+                        value: geo.frame(in: .named("unstagedArea")).minY
                     )
                 }
             )
