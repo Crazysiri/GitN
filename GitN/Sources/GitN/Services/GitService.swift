@@ -220,6 +220,15 @@ actor GitService {
         let isBinary: Bool
     }
 
+    struct BlameLine: Sendable {
+        let finalLineNumber: Int
+        let commitHash: String
+        let shortCommitHash: String
+        let author: String
+        let date: String
+        let summary: String
+    }
+
     let repoPath: String
     private var repo: OpaquePointer?
 
@@ -299,6 +308,72 @@ actor GitService {
             return []
         }
         return Set(output.components(separatedBy: "\n").filter { !$0.isEmpty })
+    }
+
+    func blameLines(at revision: String, path: String) async throws -> [Int: BlameLine] {
+        let output = try await runGitOutput(["blame", "--line-porcelain", revision, "--", path])
+        var result: [Int: BlameLine] = [:]
+
+        var currentCommitHash = ""
+        var currentFinalLineNumber = 0
+        var currentAuthor = ""
+        var currentAuthorTime: Int?
+        var currentSummary = ""
+
+        func finalizeCurrentLine() {
+            guard currentFinalLineNumber > 0 else { return }
+            let formattedDate: String
+            if let currentAuthorTime {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd HH:mm"
+                formatter.timeZone = .current
+                formattedDate = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(currentAuthorTime)))
+            } else {
+                formattedDate = ""
+            }
+            result[currentFinalLineNumber] = BlameLine(
+                finalLineNumber: currentFinalLineNumber,
+                commitHash: currentCommitHash,
+                shortCommitHash: String(currentCommitHash.prefix(7)),
+                author: currentAuthor,
+                date: formattedDate,
+                summary: currentSummary
+            )
+        }
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.first == "\t" {
+                finalizeCurrentLine()
+                currentCommitHash = ""
+                currentFinalLineNumber = 0
+                currentAuthor = ""
+                currentAuthorTime = nil
+                currentSummary = ""
+                continue
+            }
+
+            let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            if parts.count >= 3,
+               parts[0].allSatisfy({ $0.isHexDigit }),
+               let finalLineNumber = Int(parts[2]) {
+                currentCommitHash = String(parts[0])
+                currentFinalLineNumber = finalLineNumber
+                currentAuthor = ""
+                currentAuthorTime = nil
+                currentSummary = ""
+                continue
+            }
+
+            if line.hasPrefix("author ") {
+                currentAuthor = String(line.dropFirst("author ".count))
+            } else if line.hasPrefix("author-time ") {
+                currentAuthorTime = Int(line.dropFirst("author-time ".count))
+            } else if line.hasPrefix("summary ") {
+                currentSummary = String(line.dropFirst("summary ".count))
+            }
+        }
+
+        return result
     }
 
     // MARK: - Branches

@@ -1,6 +1,12 @@
 import SwiftUI
 import Combine
 
+private enum DiffEditorDebugLog {
+    static func emit(_ message: @autoclosure () -> String) {
+        print("[DiffEditor] \(message())")
+    }
+}
+
 @Observable @MainActor
 final class RepoViewModel {
     private struct DiffLoadPayload: Sendable {
@@ -35,6 +41,28 @@ final class RepoViewModel {
     struct FileInspectorInlineHighlight: Sendable {
         let range: NSRange
         let kind: FileInspectorChangeKind
+    }
+
+    struct FileInspectorBlameInfo: Sendable, Equatable {
+        let author: String
+        let date: String
+        let shortCommitHash: String
+        let summary: String
+
+        var toolTipText: String {
+            var parts: [String] = []
+            if !author.isEmpty || !date.isEmpty {
+                let head = [author, date].filter { !$0.isEmpty }.joined(separator: " · ")
+                if !head.isEmpty {
+                    parts.append(head)
+                }
+            }
+            let tail = [shortCommitHash, summary].filter { !$0.isEmpty }.joined(separator: " ")
+            if !tail.isEmpty {
+                parts.append(tail)
+            }
+            return parts.joined(separator: "\n")
+        }
     }
 
     struct DiffEditorRow: Identifiable, Sendable {
@@ -137,6 +165,7 @@ final class RepoViewModel {
     var fileInspectorHunkControls: [Int: Int] = [:]
     var fileInspectorHunkToolTips: [Int: String] = [:]
     var fileInspectorOverviewSegments: [FileInspectorOverviewSegment] = []
+    var fileInspectorLineBlames: [Int: FileInspectorBlameInfo] = [:]
     var fileInspectorDiffDocument: DiffEditorDocument?
     var fileInspectorSelectedRange: NSRange = NSRange(location: 0, length: 0)
     var isFileInspectorDiffEditing = false
@@ -144,7 +173,9 @@ final class RepoViewModel {
     private var fileInspectorRedoStack: [FileInspectorEditSnapshot] = []
     private var fileInspectorEditSession: FileInspectorEditSession?
     private var fileInspectorRebuildTask: Task<Void, Never>?
+    private var fileInspectorBlameTask: Task<Void, Never>?
     private var fileInspectorPreparedEditKeepsRenderedDiff = false
+    private var fileInspectorBlameCache: [String: [Int: FileInspectorBlameInfo]] = [:]
     private static let fileInspectorEditGroupingInterval: TimeInterval = 0.8
     private static let fileInspectorRebuildDebounceInterval: UInt64 = 120_000_000
 
@@ -284,6 +315,8 @@ final class RepoViewModel {
             fileInspectorEditSession = nil
             fileInspectorRebuildTask?.cancel()
             fileInspectorRebuildTask = nil
+            fileInspectorBlameTask?.cancel()
+            fileInspectorBlameTask = nil
             isFileInspectorEditable = canEditInspectorContent
             fileInspectorEncodingName = loaded.content.encodingName
             fileInspectorMessage = loaded.message
@@ -312,7 +345,21 @@ final class RepoViewModel {
         fileInspectorEditSession = nil
         fileInspectorRebuildTask?.cancel()
         fileInspectorRebuildTask = nil
+        fileInspectorBlameTask?.cancel()
+        fileInspectorBlameTask = nil
+        fileInspectorLineBlames = [:]
         closeFileHistory()
+    }
+
+    private func clearDetailSelection() {
+        closeFileInspector()
+        selectedCommit = nil
+        selectedStash = nil
+        selectedDiffFile = nil
+        fileDiffContent = ""
+        parsedDiff = nil
+        selectedFilePaths = []
+        selectedFileListContext = nil
     }
 
     func setFileInspectorMode(_ mode: FileInspectorMode) async {
@@ -351,6 +398,8 @@ final class RepoViewModel {
             fileInspectorEditSession = nil
             fileInspectorRebuildTask?.cancel()
             fileInspectorRebuildTask = nil
+            fileInspectorBlameTask?.cancel()
+            fileInspectorBlameTask = nil
             await refreshAfterPatchAction()
             showToast(title: "Saved", detail: fileInspectorPath, style: .success)
             return true
@@ -482,6 +531,145 @@ final class RepoViewModel {
         fileInspectorHunkControls = artifacts.hunkControls
         fileInspectorHunkToolTips = artifacts.hunkToolTips
         fileInspectorOverviewSegments = artifacts.overviewSegments
+        refreshFileInspectorLineBlames()
+    }
+
+    private func refreshFileInspectorLineBlames() {
+        fileInspectorBlameTask?.cancel()
+
+        guard fileInspectorMode == .diff,
+              let file = selectedDiffFile,
+              !fileInspectorLinePairs.isEmpty else {
+            fileInspectorLineBlames = [:]
+            return
+        }
+
+        let linePairs = fileInspectorLinePairs
+        let lineHighlights = fileInspectorLineHighlights
+        let context = currentDiffContext
+        let selectedCommit = selectedCommit
+        let cacheSnapshot = fileInspectorBlameCache
+        let git = git
+
+        fileInspectorBlameTask = Task { [weak self] in
+            guard let self else { return }
+
+            enum BlameSource {
+                case revision(path: String, revision: String)
+                case marker(RepoViewModel.FileInspectorBlameInfo)
+                case unavailable
+            }
+
+            func makeMarker(author: String, summary: String) -> RepoViewModel.FileInspectorBlameInfo {
+                RepoViewModel.FileInspectorBlameInfo(
+                    author: author,
+                    date: "",
+                    shortCommitHash: "",
+                    summary: summary
+                )
+            }
+
+            let newSource: BlameSource
+            let oldSource: BlameSource
+
+            if let commit = selectedCommit, !commit.isUncommitted {
+                newSource = .revision(path: file.path, revision: commit.hash)
+                if let parentHash = commit.parentHashes.first {
+                    oldSource = .revision(path: file.oldPath ?? file.path, revision: parentHash)
+                } else {
+                    oldSource = .marker(makeMarker(author: "Initial commit", summary: "No parent revision"))
+                }
+            } else {
+                oldSource = .revision(path: file.oldPath ?? file.path, revision: "HEAD")
+                switch context {
+                case .staged:
+                    newSource = .marker(makeMarker(author: "Staged change", summary: "Not committed yet"))
+                case .unstaged, .committed:
+                    newSource = .marker(makeMarker(author: "Uncommitted change", summary: "Not committed yet"))
+                }
+            }
+
+            var cache = cacheSnapshot
+
+            func loadBlames(for source: BlameSource) async -> [Int: RepoViewModel.FileInspectorBlameInfo] {
+                switch source {
+                case .marker, .unavailable:
+                    return [:]
+                case let .revision(path, revision):
+                    let cacheKey = "\(revision)\u{1F}\(path)"
+                    if let cached = cache[cacheKey] {
+                        return cached
+                    }
+                    do {
+                        let lines = try await git.blameLines(at: revision, path: path)
+                        let mapped = Dictionary(uniqueKeysWithValues: lines.map { line, info in
+                            (
+                                line,
+                                RepoViewModel.FileInspectorBlameInfo(
+                                    author: info.author,
+                                    date: info.date,
+                                    shortCommitHash: info.shortCommitHash,
+                                    summary: info.summary
+                                )
+                            )
+                        })
+                        cache[cacheKey] = mapped
+                        return mapped
+                    } catch {
+                        cache[cacheKey] = [:]
+                        return [:]
+                    }
+                }
+            }
+
+            let newBlames = await loadBlames(for: newSource)
+            let oldBlames = await loadBlames(for: oldSource)
+
+            var resolved: [Int: RepoViewModel.FileInspectorBlameInfo] = [:]
+            for line in linePairs.keys.sorted() {
+                let pair = linePairs[line]
+                let highlight = lineHighlights[line]
+                let blame: RepoViewModel.FileInspectorBlameInfo?
+
+                switch highlight {
+                case .deletion:
+                    blame = pair?.old.flatMap { oldLine in
+                        switch oldSource {
+                        case let .marker(info): return info
+                        case .unavailable: return nil
+                        case .revision: return oldBlames[oldLine]
+                        }
+                    }
+                case .addition:
+                    blame = pair?.new.flatMap { newLine in
+                        switch newSource {
+                        case let .marker(info): return info
+                        case .unavailable: return nil
+                        case .revision: return newBlames[newLine]
+                        }
+                    } ?? {
+                        switch newSource {
+                        case let .marker(info): return info
+                        case .unavailable, .revision: return nil
+                        }
+                    }()
+                case nil:
+                    if let commit = selectedCommit, !commit.isUncommitted {
+                        blame = pair?.new.flatMap { newBlames[$0] }
+                    } else {
+                        blame = pair?.old.flatMap { oldBlames[$0] }
+                    }
+                }
+
+                if let blame, !blame.toolTipText.isEmpty {
+                    resolved[line] = blame
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+            self.fileInspectorBlameCache = cache
+            self.fileInspectorLineBlames = resolved
+        }
     }
 
     private nonisolated static func buildFileInspectorArtifacts(
@@ -817,11 +1005,15 @@ final class RepoViewModel {
     }
 
     func prepareFileInspectorDiffEdit(affectedRange: NSRange, replacementString: String?) -> String? {
+        DiffEditorDebugLog.emit(
+            "prepare affectedRange=\(NSStringFromRange(affectedRange)) replacement=\(String(reflecting: replacementString)) selected=\(NSStringFromRange(fileInspectorSelectedRange)) contentLength=\((fileInspectorContent as NSString).length) displayLength=\((fileInspectorDisplayContent as NSString).length) editing=\(isFileInspectorDiffEditing)"
+        )
         guard fileInspectorMode == .diff,
               isFileInspectorEditable,
               let document = fileInspectorDiffDocument,
               let newTextRange = Self.mapRenderedEditRange(affectedRange, in: document)
         else {
+            DiffEditorDebugLog.emit("prepare rejected")
             return nil
         }
 
@@ -831,10 +1023,16 @@ final class RepoViewModel {
         ) == .addition
 
         let current = fileInspectorContent as NSString
+        DiffEditorDebugLog.emit(
+            "prepare mappedRange=\(NSStringFromRange(newTextRange)) keepsRenderedDiff=\(fileInspectorPreparedEditKeepsRenderedDiff)"
+        )
         return current.replacingCharacters(in: newTextRange, with: replacementString ?? "")
     }
 
     func applyPreparedFileInspectorDiffEdit(content: String, renderedSelection: NSRange) {
+        DiffEditorDebugLog.emit(
+            "apply renderedSelection=\(NSStringFromRange(renderedSelection)) currentSelected=\(NSStringFromRange(fileInspectorSelectedRange)) newContentLength=\((content as NSString).length) oldContentLength=\((fileInspectorContent as NSString).length)"
+        )
         guard content != fileInspectorContent || renderedSelection != fileInspectorSelectedRange else { return }
         beginOrExtendFileInspectorEditSession()
         fileInspectorRedoStack.removeAll(keepingCapacity: false)
@@ -842,6 +1040,9 @@ final class RepoViewModel {
         let newTextSelection = preEditDocument.flatMap {
             Self.mapRenderedSelectionToNewTextSelection(renderedSelection, in: $0)
         } ?? renderedSelection
+        DiffEditorDebugLog.emit(
+            "apply mappedNewSelection=\(NSStringFromRange(newTextSelection)) hadDocument=\(preEditDocument != nil)"
+        )
         fileInspectorContent = content
         if fileInspectorPreparedEditKeepsRenderedDiff {
             isFileInspectorDiffEditing = false
@@ -854,6 +1055,9 @@ final class RepoViewModel {
             if let document = fileInspectorDiffDocument,
                let remappedSelection = Self.mapNewTextSelectionToRenderedSelection(newTextSelection, in: document) {
                 fileInspectorSelectedRange = remappedSelection
+                DiffEditorDebugLog.emit(
+                    "apply remappedRenderedSelection=\(NSStringFromRange(remappedSelection)) after rebuild"
+                )
             }
         } else {
             isFileInspectorDiffEditing = true
@@ -861,10 +1065,16 @@ final class RepoViewModel {
             applyImmediateFileInspectorEditingArtifacts()
             scheduleFileInspectorDiffRebuild()
         }
+        DiffEditorDebugLog.emit(
+            "apply finalSelected=\(NSStringFromRange(fileInspectorSelectedRange)) editing=\(isFileInspectorDiffEditing) displayLength=\((fileInspectorDisplayContent as NSString).length)"
+        )
         fileInspectorPreparedEditKeepsRenderedDiff = false
     }
 
     func restoreFileInspectorDiffState(content: String, renderedSelection: NSRange) {
+        DiffEditorDebugLog.emit(
+            "restore contentLength=\((content as NSString).length) renderedSelection=\(NSStringFromRange(renderedSelection))"
+        )
         isFileInspectorDiffEditing = false
         fileInspectorEditSession = nil
         fileInspectorRebuildTask?.cancel()
@@ -881,6 +1091,9 @@ final class RepoViewModel {
     func undoFileInspectorDiffEdit() {
         fileInspectorEditSession = nil
         guard let snapshot = fileInspectorUndoStack.popLast() else { return }
+        DiffEditorDebugLog.emit(
+            "undo currentSelected=\(NSStringFromRange(fileInspectorSelectedRange)) restoringSelected=\(NSStringFromRange(snapshot.selectedRange)) undoRemaining=\(fileInspectorUndoStack.count) redoCount=\(fileInspectorRedoStack.count)"
+        )
         fileInspectorRedoStack.append(
             FileInspectorEditSnapshot(content: fileInspectorContent, selectedRange: fileInspectorSelectedRange)
         )
@@ -890,6 +1103,9 @@ final class RepoViewModel {
     func redoFileInspectorDiffEdit() {
         fileInspectorEditSession = nil
         guard let snapshot = fileInspectorRedoStack.popLast() else { return }
+        DiffEditorDebugLog.emit(
+            "redo currentSelected=\(NSStringFromRange(fileInspectorSelectedRange)) restoringSelected=\(NSStringFromRange(snapshot.selectedRange)) undoCount=\(fileInspectorUndoStack.count) redoRemaining=\(fileInspectorRedoStack.count)"
+        )
         fileInspectorUndoStack.append(
             FileInspectorEditSnapshot(content: fileInspectorContent, selectedRange: fileInspectorSelectedRange)
         )
@@ -908,6 +1124,9 @@ final class RepoViewModel {
         let snapshot = FileInspectorEditSnapshot(
             content: fileInspectorContent,
             selectedRange: fileInspectorSelectedRange
+        )
+        DiffEditorDebugLog.emit(
+            "beginEditSession snapshotSelected=\(NSStringFromRange(snapshot.selectedRange)) undoCountBefore=\(fileInspectorUndoStack.count)"
         )
         fileInspectorUndoStack.append(snapshot)
         if fileInspectorUndoStack.count > 200 {
@@ -941,6 +1160,9 @@ final class RepoViewModel {
         let currentText = fileInspectorContent
         let parsedDiff = parsedDiff
         let currentSelection = fileInspectorSelectedRange
+        DiffEditorDebugLog.emit(
+            "scheduleRebuild currentSelection=\(NSStringFromRange(currentSelection)) currentLength=\((currentText as NSString).length)"
+        )
         fileInspectorRebuildTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.fileInspectorRebuildDebounceInterval)
             guard let self else { return }
@@ -954,6 +1176,9 @@ final class RepoViewModel {
             if let document = self.fileInspectorDiffDocument,
                let renderedSelection = Self.mapNewTextSelectionToRenderedSelection(currentSelection, in: document) {
                 self.fileInspectorSelectedRange = renderedSelection
+                DiffEditorDebugLog.emit(
+                    "scheduleRebuild remappedSelection=\(NSStringFromRange(renderedSelection))"
+                )
             }
             self.isFileInspectorDiffEditing = false
             self.fileInspectorRebuildTask = nil
@@ -2046,6 +2271,7 @@ final class RepoViewModel {
             commitSummary = ""
             commitDescription = ""
             isAmend = false
+            clearDetailSelection()
             await loadAll()
         } catch {
             operationError = "Commit failed: \(error.localizedDescription)"
@@ -2813,27 +3039,55 @@ final class RepoViewModel {
         selectedDiffFile = nil
     }
 
-    func scrollToCommitForBranch(_ branch: BranchInfo) {
-        if let commit = commits.first(where: { $0.shortHash == branch.shortHash || $0.hash.hasPrefix(branch.shortHash) }) {
-            scrollToCommitHash = commit.hash
-            Task { await selectCommit(commit) }
+    private func revealCommit(hash: String) async {
+        scrollToCommitHash = hash
+
+        if let commit = commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) }) {
+            await selectCommit(commit)
+            return
+        }
+
+        while !allCommitsLoaded {
+            await loadMoreCommits()
+            if let commit = commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) }) {
+                scrollToCommitHash = commit.hash
+                await selectCommit(commit)
+                return
+            }
         }
     }
 
-    func scrollToCommitForTag(_ tagName: String) {
+    func scrollToCommitForBranch(_ branch: BranchInfo) async {
+        if let commit = commits.first(where: { $0.shortHash == branch.shortHash || $0.hash.hasPrefix(branch.shortHash) }) {
+            await revealCommit(hash: commit.hash)
+            return
+        }
+
+        do {
+            let fullHash = try await git.branchCommitHash(branch.name, isRemote: branch.isRemote)
+            await revealCommit(hash: fullHash)
+        } catch {}
+    }
+
+    func scrollToCommitForTag(_ tagName: String) async {
         // 查找 refs 中包含该 tag 的 commit
         if let commit = commits.first(where: { commit in
             commit.refs.contains { ref in
                 ref.contains("tag:") && ref.contains(tagName)
             }
         }) {
-            scrollToCommitHash = commit.hash
-            Task { await selectCommit(commit) }
+            await revealCommit(hash: commit.hash)
+            return
         }
+
+        do {
+            let fullHash = try await git.tagCommitHash(name: tagName)
+            await revealCommit(hash: fullHash)
+        } catch {}
     }
     
-    func scrollToCommitForStash(_ stash: StashInfo) {
-        Task { await selectStash(stash) }
+    func scrollToCommitForStash(_ stash: StashInfo) async {
+        await selectStash(stash)
     }
     
     func selectStash(_ stash: StashInfo) async {

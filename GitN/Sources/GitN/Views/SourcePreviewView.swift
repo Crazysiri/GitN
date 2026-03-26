@@ -2,6 +2,12 @@ import SwiftUI
 import AppKit
 import HighlightSwift
 
+private enum DiffIMELog {
+    static func emit(_ message: @autoclosure () -> String) {
+        print("[DiffIME] \(message())")
+    }
+}
+
 private enum SourceEditorStyle {
     struct Palette {
         let background: NSColor
@@ -21,9 +27,9 @@ private enum SourceEditorStyle {
         let gutterSeparator: NSColor
     }
 
-    static let editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    static let editorBoldFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
-    static let lineHeight: CGFloat = 21
+    static let editorFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    static let editorBoldFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+    static let lineHeight: CGFloat = 20
 
     static func palette(isDark: Bool) -> Palette {
         if isDark {
@@ -639,6 +645,7 @@ private extension RepoViewModel.FileInspectorInlineHighlight {
 
 private final class HighlightedSourceTextView: LineNumberTextView {
     static let diffGutterWidth: CGFloat = 104
+    static let diffGutterVerticalOffset: CGFloat = 2
 
     var lineHighlights: [Int: SourceDiffDecorationKind] = [:]
     var inlineHighlights: [RepoViewModel.FileInspectorInlineHighlight] = []
@@ -652,6 +659,12 @@ private final class HighlightedSourceTextView: LineNumberTextView {
     var hunkActionToolTips: [Int: String] = [:] {
         didSet {
             guard hunkActionToolTips != oldValue else { return }
+            refreshHunkToolTips()
+        }
+    }
+    var lineBlames: [Int: RepoViewModel.FileInspectorBlameInfo] = [:] {
+        didSet {
+            guard lineBlames != oldValue else { return }
             refreshHunkToolTips()
         }
     }
@@ -681,7 +694,8 @@ private final class HighlightedSourceTextView: LineNumberTextView {
     private var diffGutterBg: NSColor {
         isDarkTheme ? NSColor(red: 0.094, green: 0.098, blue: 0.110, alpha: 1) : NSColor.windowBackgroundColor
     }
-    private var hunkToolTipTags: [NSView.ToolTipTag] = []
+    private var hoverTrackingArea: NSTrackingArea?
+    private var lastTooltipKey: String?
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -742,6 +756,65 @@ private final class HighlightedSourceTextView: LineNumberTextView {
         refreshHunkToolTips()
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard showsDiffGutter else {
+            DiffLineTooltipPanel.shared.cancelAndHide()
+            super.mouseMoved(with: event)
+            return
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        guard point.x <= Self.diffGutterWidth else {
+            lastTooltipKey = nil
+            DiffLineTooltipPanel.shared.cancelAndHide()
+            super.mouseMoved(with: event)
+            return
+        }
+
+        guard let tooltipText = tooltipText(at: point), !tooltipText.isEmpty else {
+            lastTooltipKey = nil
+            DiffLineTooltipPanel.shared.cancelAndHide()
+            super.mouseMoved(with: event)
+            return
+        }
+
+        let tooltipKey = tooltipIdentity(at: point, text: tooltipText)
+        if tooltipKey != lastTooltipKey {
+            lastTooltipKey = tooltipKey
+            DiffLineTooltipPanel.shared.cancelAndHide()
+        }
+
+        let windowPoint = convert(point, to: nil)
+        let screenPoint = window?.convertPoint(toScreen: windowPoint) ?? .zero
+        DiffLineTooltipPanel.shared.scheduleShow(
+            text: tooltipText,
+            at: NSPoint(x: screenPoint.x + 14, y: screenPoint.y - 8)
+        )
+
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        lastTooltipKey = nil
+        DiffLineTooltipPanel.shared.cancelAndHide()
+        super.mouseExited(with: event)
+    }
+
     private func logicalLineNumber(at point: NSPoint) -> Int? {
         guard let layoutManager,
               let textContainer else { return nil }
@@ -787,19 +860,24 @@ private final class HighlightedSourceTextView: LineNumberTextView {
     }
 
     private func refreshHunkToolTips() {
-        hunkToolTipTags.forEach(removeToolTip)
-        hunkToolTipTags.removeAll()
-
         guard showsDiffGutter,
-              !hunkActionLines.isEmpty,
-              let layoutManager,
-              let textContainer else { return }
+              (!hunkActionLines.isEmpty || !lineBlames.isEmpty) else { return }
+    }
 
-        for line in hunkActionLines.keys.sorted() {
-            guard let lineRect = logicalLineRect(for: line, layoutManager: layoutManager, textContainer: textContainer) else { continue }
-            let tipRect = NSRect(x: 0, y: lineRect.minY, width: 24, height: lineRect.height)
-            hunkToolTipTags.append(addToolTip(tipRect, owner: self, userData: nil))
+    private func tooltipText(at point: NSPoint) -> String? {
+        guard point.x <= Self.diffGutterWidth else { return nil }
+        guard let line = logicalLineNumber(at: point) else { return nil }
+        if point.x <= 24, let range = hunkActionToolTips[line] {
+            let action = hunkActionSymbol == "-" ? "取消暂存" : "暂存"
+            return "\(action)这个区块 (\(range))"
         }
+        return lineBlames[line]?.toolTipText
+    }
+
+    private func tooltipIdentity(at point: NSPoint, text: String) -> String {
+        let line = logicalLineNumber(at: point) ?? 0
+        let lane = point.x <= 24 ? "hunk" : "line"
+        return "\(lane)-\(line)-\(text)"
     }
 
     private func logicalLineRect(
@@ -831,7 +909,10 @@ private final class HighlightedSourceTextView: LineNumberTextView {
         let label = (value.map(String.init) ?? "") as NSString
         let size = label.size(withAttributes: attrs)
         label.draw(
-            at: NSPoint(x: x - size.width, y: y + (height - size.height) / 2),
+            at: NSPoint(
+                x: x - size.width,
+                y: y + (height - size.height) / 2 + Self.diffGutterVerticalOffset
+            ),
             withAttributes: attrs
         )
     }
@@ -858,15 +939,15 @@ private final class HighlightedSourceTextView: LineNumberTextView {
         case "x":
             cut(nil)
         case "z":
-            if showsDiffGutter {
-                if flags.contains(.shift) {
-                    onRedo?()
+            if flags.contains(.shift) {
+                if let onRedo {
+                    onRedo()
                 } else {
-                    onUndo?()
+                    activeUndoManager?.redo()
                 }
             } else {
-                if flags.contains(.shift) {
-                    activeUndoManager?.redo()
+                if let onUndo {
+                    onUndo()
                 } else {
                     activeUndoManager?.undo()
                 }
@@ -882,15 +963,97 @@ private final class HighlightedSourceTextView: LineNumberTextView {
     }
 }
 
-extension HighlightedSourceTextView: NSViewToolTipOwner {
-    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
-        guard let line = logicalLineNumber(at: point),
-              let range = hunkActionToolTips[line]
-        else {
-            return hunkActionSymbol == "-" ? "取消暂存这个区块" : "暂存这个区块"
+private final class DiffLineTooltipPanel: NSPanel {
+    static let shared = DiffLineTooltipPanel()
+    private let tooltipView = DiffLineTooltipView()
+    private var pendingShow: DispatchWorkItem?
+
+    private init() {
+        super.init(contentRect: .zero,
+                   styleMask: [.borderless, .nonactivatingPanel],
+                   backing: .buffered,
+                   defer: false)
+        isFloatingPanel = true
+        level = .popUpMenu
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
+        ignoresMouseEvents = true
+        contentView = tooltipView
+    }
+
+    func scheduleShow(text: String, at origin: NSPoint) {
+        pendingShow?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.present(text: text, at: origin)
         }
-        let action = hunkActionSymbol == "-" ? "取消暂存" : "暂存"
-        return "\(action)这个区块 (\(range))"
+        pendingShow = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+    }
+
+    func cancelAndHide() {
+        pendingShow?.cancel()
+        pendingShow = nil
+        if isVisible { orderOut(nil) }
+    }
+
+    private func present(text: String, at origin: NSPoint) {
+        let size = tooltipView.configure(text: text)
+        setContentSize(size)
+        setFrameOrigin(origin)
+        if !isVisible {
+            orderFront(nil)
+        }
+    }
+}
+
+private final class DiffLineTooltipView: NSView {
+    private var text = ""
+    override var isFlipped: Bool { true }
+
+    func configure(text: String) -> CGSize {
+        guard self.text != text else {
+            return fittingSize(for: text)
+        }
+        self.text = text
+        needsDisplay = true
+        return fittingSize(for: text)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.black.withAlphaComponent(0.08).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ]
+        let textRect = bounds.insetBy(dx: 8, dy: 6)
+        (text as NSString).draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attrs)
+    }
+
+    private func fittingSize(for text: String) -> CGSize {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .paragraphStyle: paragraph
+        ]
+        let maxWidth: CGFloat = 320
+        let raw = (text as NSString).boundingRect(
+            with: NSSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: attrs
+        ).integral
+        return CGSize(width: max(80, raw.width + 16), height: max(24, raw.height + 12))
     }
 }
 
@@ -969,7 +1132,10 @@ private final class StickyGutterOverlayView: NSView {
         let label = (value.map(String.init) ?? "") as NSString
         let size = label.size(withAttributes: attrs)
         label.draw(
-            at: NSPoint(x: x - size.width, y: y + (height - size.height) / 2),
+            at: NSPoint(
+                x: x - size.width,
+                y: y + (height - size.height) / 2 + HighlightedSourceTextView.diffGutterVerticalOffset
+            ),
             withAttributes: attrs
         )
     }
@@ -1055,11 +1221,13 @@ private struct EditableSourceTextView: NSViewRepresentable {
     let lineNumberPairs: [Int: RepoViewModel.FileInspectorLinePair]
     let hunkActionLines: [Int: Int]
     let hunkActionToolTips: [Int: String]
+    let lineBlames: [Int: RepoViewModel.FileInspectorBlameInfo]
     let hunkActionSymbol: String
     let showsDiffGutter: Bool
     let targetLine: Int?
     let selectedRange: NSRange?
     let onHunkAction: ((Int) -> Void)?
+    let onSelectionChange: ((NSRange) -> Void)?
     let prepareTextChange: ((NSRange, String?) -> String?)?
     let onTextChange: (String, NSRange) -> Void
     let onUndo: (() -> Void)?
@@ -1073,6 +1241,8 @@ private struct EditableSourceTextView: NSViewRepresentable {
         var pendingModelText: String?
         var pendingSelection: NSRange?
         var lastLocalEditAt: CFTimeInterval = 0
+        var compositionBaseText: String?
+        var suppressSelectionSync = false
 
         init(parent: EditableSourceTextView) {
             self.parent = parent
@@ -1083,8 +1253,22 @@ private struct EditableSourceTextView: NSViewRepresentable {
             shouldChangeTextIn affectedCharRange: NSRange,
             replacementString: String?
         ) -> Bool {
+            DiffIMELog.emit(
+                "shouldChange range=\(NSStringFromRange(affectedCharRange)) replacement=\(String(reflecting: replacementString)) selected=\(NSStringFromRange(textView.selectedRange())) marked=\(textView.hasMarkedText()) textLength=\((textView.string as NSString).length)"
+            )
+            if textView.hasMarkedText(), parent.prepareTextChange != nil {
+                if compositionBaseText == nil {
+                    compositionBaseText = textView.string
+                    DiffIMELog.emit("shouldChange deferring IME composition with baseLength=\((textView.string as NSString).length)")
+                }
+                suppressSelectionSync = true
+                pendingModelText = nil
+                pendingSelection = nil
+                return true
+            }
             guard let prepareTextChange = parent.prepareTextChange else { return true }
             guard let modelText = prepareTextChange(affectedCharRange, replacementString) else {
+                DiffIMELog.emit("shouldChange rejected")
                 NSSound.beep()
                 return false
             }
@@ -1095,22 +1279,77 @@ private struct EditableSourceTextView: NSViewRepresentable {
                 affectedRange: affectedCharRange,
                 replacementString: replacementString
             )
+            suppressSelectionSync = true
+            DiffIMELog.emit(
+                "shouldChange accepted pendingSelection=\(NSStringFromRange(pendingSelection ?? NSRange(location: NSNotFound, length: 0))) modelLength=\((modelText as NSString).length)"
+            )
             lastLocalEditAt = CACurrentMediaTime()
             return true
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            let isComposingMarkedText = textView.hasMarkedText()
             isUpdating = true
-            let selection = pendingSelection ?? textView.selectedRange()
-            parent.onTextChange(pendingModelText ?? textView.string, selection)
-            if let storage = textView.textStorage {
+            let liveSelection = textView.selectedRange()
+            let selection = isComposingMarkedText
+                ? liveSelection
+                : (pendingSelection ?? liveSelection)
+            DiffIMELog.emit(
+                "textDidChange marked=\(isComposingMarkedText) selected=\(NSStringFromRange(textView.selectedRange())) effectiveSelection=\(NSStringFromRange(selection)) pendingSelection=\(NSStringFromRange(pendingSelection ?? NSRange(location: NSNotFound, length: 0))) viewLength=\((textView.string as NSString).length) modelLength=\(((pendingModelText ?? textView.string) as NSString).length)"
+            )
+            if isComposingMarkedText {
+                pendingSelection = nil
+                pendingModelText = nil
+                isUpdating = false
+                return
+            }
+
+            if let compositionBaseText, let prepareTextChange = parent.prepareTextChange {
+                let currentText = textView.string
+                guard let delta = Self.singleReplacement(from: compositionBaseText, to: currentText),
+                      let modelText = prepareTextChange(delta.range, delta.replacement) else {
+                    DiffIMELog.emit("textDidChange failed to map committed IME text; restoring base text")
+                    textView.string = compositionBaseText
+                    if let storage = textView.textStorage {
+                        SourceHighlighter.highlight(storage, language: parent.language, isDark: parent.isDark)
+                        EditableSourceTextView.applyInlineHighlights(parent.inlineHighlights, to: storage)
+                    }
+                    textView.setSelectedRange(liveSelection)
+                    self.compositionBaseText = nil
+                    suppressSelectionSync = false
+                    isUpdating = false
+                    NSSound.beep()
+                    return
+                }
+                DiffIMELog.emit(
+                    "textDidChange committed IME deltaRange=\(NSStringFromRange(delta.range)) replacement=\(String(reflecting: delta.replacement)) modelLength=\((modelText as NSString).length)"
+                )
+                parent.onTextChange(modelText, liveSelection)
+                self.compositionBaseText = nil
+            } else {
+                parent.onTextChange(pendingModelText ?? textView.string, selection)
+            }
+            parent.onSelectionChange?(selection)
+            if !isComposingMarkedText, let storage = textView.textStorage {
                 SourceHighlighter.highlight(storage, language: parent.language, isDark: parent.isDark)
                 EditableSourceTextView.applyInlineHighlights(parent.inlineHighlights, to: storage)
                 textView.setSelectedRange(selection)
             }
             pendingModelText = nil
+            suppressSelectionSync = false
             isUpdating = false
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView, !isUpdating else { return }
+            if suppressSelectionSync || textView.hasMarkedText() || compositionBaseText != nil {
+                DiffIMELog.emit("selectionDidChange suppressed selected=\(NSStringFromRange(textView.selectedRange())) marked=\(textView.hasMarkedText())")
+                return
+            }
+            let selection = textView.selectedRange()
+            DiffIMELog.emit("selectionDidChange selected=\(NSStringFromRange(selection)) marked=\(textView.hasMarkedText())")
+            parent.onSelectionChange?(selection)
         }
 
         private func predictedSelection(
@@ -1124,6 +1363,41 @@ private struct EditableSourceTextView: NSViewRepresentable {
                 return NSRange(location: insertionPoint, length: 0)
             }
             return selectedRange
+        }
+
+        private static func singleReplacement(from source: String, to target: String) -> (range: NSRange, replacement: String)? {
+            if source == target {
+                return (NSRange(location: 0, length: 0), "")
+            }
+
+            let sourceChars = Array(source)
+            let targetChars = Array(target)
+
+            var prefixLength = 0
+            while prefixLength < sourceChars.count,
+                  prefixLength < targetChars.count,
+                  sourceChars[prefixLength] == targetChars[prefixLength] {
+                prefixLength += 1
+            }
+
+            var sourceSuffix = sourceChars.count
+            var targetSuffix = targetChars.count
+            while sourceSuffix > prefixLength,
+                  targetSuffix > prefixLength,
+                  sourceChars[sourceSuffix - 1] == targetChars[targetSuffix - 1] {
+                sourceSuffix -= 1
+                targetSuffix -= 1
+            }
+
+            let sourceStart = sourceChars.index(sourceChars.startIndex, offsetBy: prefixLength)
+            let sourceEnd = sourceChars.index(sourceChars.startIndex, offsetBy: sourceSuffix)
+            let targetStart = targetChars.index(targetChars.startIndex, offsetBy: prefixLength)
+            let targetEnd = targetChars.index(targetChars.startIndex, offsetBy: targetSuffix)
+
+            let utf16Location = String(sourceChars[..<sourceStart]).utf16.count
+            let utf16Length = String(sourceChars[sourceStart..<sourceEnd]).utf16.count
+            let replacement = String(targetChars[targetStart..<targetEnd])
+            return (NSRange(location: utf16Location, length: utf16Length), replacement)
         }
     }
 
@@ -1143,7 +1417,7 @@ private struct EditableSourceTextView: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.isEditable = isEditable
         textView.isSelectable = true
-        textView.allowsUndo = !showsDiffGutter
+        textView.allowsUndo = onUndo == nil && onRedo == nil
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -1167,12 +1441,13 @@ private struct EditableSourceTextView: NSViewRepresentable {
         textView.onUndo = onUndo
         textView.onRedo = onRedo
         textView.isDarkTheme = isDark
+        textView.lineBlames = showsDiffGutter ? lineBlames : [:]
         let palette = SourceEditorStyle.palette(isDark: isDark)
         textView.lineColor = palette.gutterText
         textView.gutterBackgroundColor = palette.gutterBackground
         textView.gutterSeparatorColor = palette.gutterSeparator
         textView.textContainerInset = NSSize(
-            width: showsDiffGutter ? HighlightedSourceTextView.diffGutterWidth + 12 : LineNumberTextView.gutterWidth + 16,
+            width: showsDiffGutter ? HighlightedSourceTextView.diffGutterWidth : LineNumberTextView.gutterWidth + 16,
             height: 16
         )
         if let selectedRange {
@@ -1211,7 +1486,7 @@ private struct EditableSourceTextView: NSViewRepresentable {
 
         context.coordinator.parent = self
         textView.isEditable = isEditable
-        textView.allowsUndo = !showsDiffGutter
+        textView.allowsUndo = onUndo == nil && onRedo == nil
         textView.lineHighlights = showsDiffGutter
             ? Dictionary(uniqueKeysWithValues: lineHighlights.map { ($0.key, $0.value.sourceDecorationKind) })
             : [:]
@@ -1221,6 +1496,7 @@ private struct EditableSourceTextView: NSViewRepresentable {
             : [:]
         textView.hunkActionLines = showsDiffGutter ? hunkActionLines : [:]
         textView.hunkActionToolTips = showsDiffGutter ? hunkActionToolTips : [:]
+        textView.lineBlames = showsDiffGutter ? lineBlames : [:]
         textView.hunkActionSymbol = hunkActionSymbol
         textView.showsDiffGutter = showsDiffGutter
         textView.onHunkAction = onHunkAction
@@ -1251,9 +1527,19 @@ private struct EditableSourceTextView: NSViewRepresentable {
         )
         let isWithinLocalEditWindow = showsDiffGutter &&
             CACurrentMediaTime() - context.coordinator.lastLocalEditAt < 0.35
+        let isComposingMarkedText = textView.hasMarkedText()
+        if showsDiffGutter {
+            DiffIMELog.emit(
+                "updateNSView marked=\(isComposingMarkedText) isUpdating=\(context.coordinator.isUpdating) localWindow=\(isWithinLocalEditWindow) currentLength=\((textView.string as NSString).length) incomingLength=\((text as NSString).length) selected=\(NSStringFromRange(textView.selectedRange())) modelSelected=\(NSStringFromRange(selectedRange ?? NSRange(location: NSNotFound, length: 0))) forceSync=\(shouldForceDisplaySync)"
+            )
+        }
         if !context.coordinator.isUpdating,
+           !isComposingMarkedText,
            textView.string != text,
            (!isWithinLocalEditWindow || shouldForceDisplaySync) {
+            DiffIMELog.emit("updateNSView applying external text sync")
+            context.coordinator.isUpdating = true
+            context.coordinator.suppressSelectionSync = true
             textView.string = text
             if let storage = textView.textStorage {
                 SourceHighlighter.highlight(storage, language: language, isDark: isDark)
@@ -1270,6 +1556,8 @@ private struct EditableSourceTextView: NSViewRepresentable {
                 textView.setSelectedRange(NSRange(location: clampedLocation, length: clampedLength))
                 context.coordinator.pendingSelection = nil
             }
+            context.coordinator.suppressSelectionSync = false
+            context.coordinator.isUpdating = false
         }
 
         textView.needsDisplay = true
@@ -1496,6 +1784,7 @@ struct FileInspectorOverlayView: View {
                                     lineNumberPairs: viewModel.fileInspectorLinePairs,
                                     hunkActionLines: canToggleHunks ? viewModel.fileInspectorHunkControls : [:],
                                     hunkActionToolTips: canToggleHunks ? viewModel.fileInspectorHunkToolTips : [:],
+                                    lineBlames: viewModel.fileInspectorLineBlames,
                                     hunkActionSymbol: hunkActionSymbol,
                                     showsDiffGutter: showsRenderedDiff,
                                     targetLine: targetLine,
@@ -1516,6 +1805,9 @@ struct FileInspectorOverlayView: View {
                                             }
                                         }
                                     } : nil,
+                                    onSelectionChange: { selection in
+                                        viewModel.fileInspectorSelectedRange = selection
+                                    },
                                     prepareTextChange: isDiffMode ? { affectedRange, replacementString in
                                         viewModel.prepareFileInspectorDiffEdit(
                                             affectedRange: affectedRange,
@@ -1560,12 +1852,10 @@ struct FileInspectorOverlayView: View {
                 .clipped()
             }
             .background(Color(nsColor: SourceTextView.background(for: theme.isDark)))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                Rectangle()
                     .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1)
             )
-            .padding(2)
         }
         .onChange(of: viewModel.fileInspectorPath) { _, _ in
             targetLine = nil
@@ -1592,14 +1882,14 @@ struct FileInspectorOverlayView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 10) {
                     Text(viewModel.fileInspectorTitle)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     modePicker
                 }
 
                 HStack(spacing: 8) {
                     Text(viewModel.activeFileInspectorPath)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -1614,9 +1904,9 @@ struct FileInspectorOverlayView: View {
 
             if viewModel.isFileInspectorDirty {
                 Text("Edited")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 9, weight: .medium))
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 3)
                     .background(Color.orange.opacity(0.16), in: Capsule())
                     .foregroundStyle(.orange)
             }
@@ -1633,11 +1923,11 @@ struct FileInspectorOverlayView: View {
                     if viewModel.isSavingFileInspector {
                         ProgressView()
                             .controlSize(.small)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 24, height: 24)
                     } else {
                         Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 28, height: 28)
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 24, height: 24)
                     }
                 }
             }
@@ -1645,8 +1935,8 @@ struct FileInspectorOverlayView: View {
             .foregroundStyle(.secondary)
             .disabled(viewModel.isSavingFileInspector)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(theme.isDark ? Color.black.opacity(0.16) : Color(nsColor: .windowBackgroundColor))
     }
 
@@ -1673,18 +1963,20 @@ struct FileInspectorOverlayView: View {
         }
         .labelsHidden()
         .pickerStyle(.segmented)
-        .frame(width: 320)
+        .controlSize(.small)
+        .scaleEffect(0.92)
+        .frame(width: 280)
     }
 
     private var saveHint: some View {
         HStack(spacing: 4) {
             Image(systemName: "keyboard")
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 8, weight: .medium))
             Text("Cmd+S")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 9, weight: .medium))
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
         .background(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.05), in: Capsule())
         .foregroundStyle(.secondary)
     }

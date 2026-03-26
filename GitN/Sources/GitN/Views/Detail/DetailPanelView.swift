@@ -1398,7 +1398,11 @@ struct DetailPanelView: View {
                     diff: diff,
                     isUncommitted: isUncommitted,
                     diffContext: viewModel.currentDiffContext,
-                    viewModel: viewModel
+                    viewModel: viewModel,
+                    onMoveSelection: { step in
+                        focusedTarget = .fileList
+                        handleFileListStep(step)
+                    }
                 )
             } else if viewModel.selectedDiffFile != nil {
                 if viewModel.isLoadingDiff {
@@ -1979,6 +1983,12 @@ struct DetailPanelView: View {
             return
         }
 
+        handleFileListStep(step)
+    }
+
+    private func handleFileListStep(_ step: Int) {
+        guard step != 0 else { return }
+
         if viewModel.isInConflict {
             let conflictPaths = Set(viewModel.currentConflictedFiles.map(\.path))
             let files = viewModel.currentDiffContext == .staged
@@ -2004,7 +2014,15 @@ struct DetailPanelView: View {
             step: step
         ) else { return }
 
-        Task { await viewModel.selectDiffFile(files[target]) }
+        let file = files[target]
+        Task {
+            if viewModel.isCompareMode {
+                await viewModel.selectCompareFile(file)
+            } else {
+                await viewModel.selectDiffFile(file)
+            }
+            await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+        }
     }
 
     private func navigateStatusFiles(_ files: [FileStatus], context: RepoViewModel.DiffContext, step: Int) {
@@ -2022,7 +2040,10 @@ struct DetailPanelView: View {
         let diffFile = matchingDiffFile(for: file)
         viewModel.selectedFilePaths = [file.path]
         viewModel.selectedFileListContext = context
-        Task { await viewModel.selectDiffFile(diffFile, context: context) }
+        Task {
+            await viewModel.selectDiffFile(diffFile, context: context)
+            await viewModel.openFileInspector(diffFile, context: context, preferredMode: .diff)
+        }
     }
 
     private func targetIndex(currentPath: String?, orderedPaths: [String], step: Int) -> Int? {
@@ -2053,6 +2074,11 @@ struct DetailPanelView: View {
 
     private func handleFileListSelectionChange(_ rowID: String?, with proxy: ScrollViewProxy) {
         guard !isResizingPane else { return }
+        if focusedTarget != .fileList {
+            DispatchQueue.main.async {
+                focusedTarget = .fileList
+            }
+        }
         if suppressNextFileListAutoScroll {
             suppressNextFileListAutoScroll = false
             return
@@ -2519,6 +2545,7 @@ struct DiffHunkView: View {
     let isUncommitted: Bool
     let diffContext: RepoViewModel.DiffContext
     let viewModel: RepoViewModel
+    let onMoveSelection: ((Int) -> Void)?
 
     @State private var selectedLines: [Int: Set<Int>] = [:]
 
@@ -2540,7 +2567,8 @@ struct DiffHunkView: View {
                 hunks: diff.hunks,
                 filePath: viewModel.selectedDiffFile?.path,
                 isUncommitted: isUncommitted,
-                selectedLines: $selectedLines
+                selectedLines: $selectedLines,
+                onMoveSelection: onMoveSelection
             )
         }
     }
@@ -2620,6 +2648,7 @@ private final class DiffTextViewNS: NSTextView {
     var lineInfos: [LineInfo] = []
     var gutterEndX: CGFloat = 0
     var onGutterClick: ((Int, Int, HunkLine.Kind) -> Void)?
+    var onMoveSelection: ((Int) -> Void)?
 
     /// Draw full-width line backgrounds *before* text is rendered.
     override func draw(_ dirtyRect: NSRect) {
@@ -2658,6 +2687,24 @@ private final class DiffTextViewNS: NSTextView {
             onGutterClick?(info.hunkIdx, info.lineId, info.kind)
             break
         }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.isEmpty {
+            switch event.keyCode {
+            case 125:
+                onMoveSelection?(1)
+                return
+            case 126:
+                onMoveSelection?(-1)
+                return
+            default:
+                break
+            }
+        }
+
+        super.keyDown(with: event)
     }
 
     /// Copy selected text without gutter (line numbers + ±) to clipboard.
@@ -2702,6 +2749,7 @@ private struct SelectableDiffView: NSViewRepresentable {
     var filePath: String? = nil
     let isUncommitted: Bool
     @Binding var selectedLines: [Int: Set<Int>]
+    let onMoveSelection: ((Int) -> Void)?
 
     final class Coordinator: NSObject {
         /// Live binding kept up-to-date in updateNSView so closures always write to current state.
@@ -2740,6 +2788,7 @@ private struct SelectableDiffView: NSViewRepresentable {
                                                  height: CGFloat.greatestFiniteMagnitude)
         tv.textContainer?.lineFragmentPadding = 8
         tv.autoresizingMask = [.width]
+        tv.onMoveSelection = onMoveSelection
 
         let coordinator = context.coordinator
         tv.onGutterClick = { [weak coordinator] hunkIdx, lineId, kind in
@@ -2761,6 +2810,7 @@ private struct SelectableDiffView: NSViewRepresentable {
         // Keep coordinator in sync with latest values
         context.coordinator.selectedLines = $selectedLines
         context.coordinator.isUncommitted = isUncommitted
+        tv.onMoveSelection = onMoveSelection
 
         let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         let gutterSample = "0000 0000 + " as NSString
