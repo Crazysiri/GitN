@@ -187,7 +187,7 @@ body {
 }
 
 .gitn-line-addition {
-  background: rgba(46, 160, 67, 0.18);
+  background: rgba(46, 160, 67, 0.26);
 }
 
 .gitn-line-addition-margin {
@@ -198,7 +198,7 @@ body {
 /* Inline character-level highlight within an addition line (paired with a deletion).
    Mirrors Swift's FileInspectorInlineHighlight .addition — systemGreen @0.30 alpha. */
 .gitn-inline-addition {
-  background: rgba(46, 160, 67, 0.40);
+  background: rgba(46, 160, 67, 0.55);
   border-radius: 2px;
 }
 
@@ -226,6 +226,8 @@ body {
   font-family: var(--gitn-font-family);
   font-weight: var(--gitn-font-weight);
   overflow: hidden;
+  pointer-events: auto;
+  cursor: text;
 }
 
 .gitn-deletion-content-scroll {
@@ -242,4 +244,8 @@ body {
   padding: 0;
   white-space: pre;
   color: rgba(248, 81, 73, 0.98);
+  user-select: text;
+  -webkit-user-select: text;
+  tab-size: var(--gitn-tab-size, 4);
+  -moz-tab-size: var(--gitn-tab-size, 4);
 }

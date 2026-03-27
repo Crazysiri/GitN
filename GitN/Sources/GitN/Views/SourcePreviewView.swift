@@ -70,6 +70,7 @@ struct FileInspectorOverlayView: View {
     @State private var targetLine: Int?
     @State private var showCloseConfirmation = false
     @State private var pendingModeSwitch: RepoViewModel.FileInspectorMode?
+    @State private var commandBridge = MonacoCommandBridge()
 
     private var supportsHunkActions: Bool {
         viewModel.fileInspectorMode == .diff &&
@@ -217,6 +218,34 @@ struct FileInspectorOverlayView: View {
                     .foregroundStyle(.orange)
             }
 
+            if viewModel.fileInspectorMode == .diff {
+                HStack(spacing: 0) {
+                    Button {
+                        commandBridge.navigateDiff(next: false)
+                    } label: {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Previous change")
+
+                    Button {
+                        commandBridge.navigateDiff(next: true)
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Next change")
+                }
+            }
+
             Button {
                 pendingModeSwitch = nil
                 if viewModel.isFileInspectorDirty {
@@ -242,7 +271,8 @@ struct FileInspectorOverlayView: View {
             .disabled(viewModel.isSavingFileInspector)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 11)
         .background(theme.isDark ? Color.black.opacity(0.16) : Color(nsColor: .windowBackgroundColor))
     }
 
@@ -271,7 +301,7 @@ struct FileInspectorOverlayView: View {
         .pickerStyle(.segmented)
         .controlSize(.small)
         .scaleEffect(0.92)
-        .frame(width: 380)
+        .frame(width: 270)
     }
 
     @ViewBuilder
@@ -293,6 +323,7 @@ struct FileInspectorOverlayView: View {
                     lineBlames: monacoLineBlames
                 )
             ],
+            commandBridge: commandBridge,
             onContentChange: { _, content in
                 viewModel.fileInspectorContent = content
                 viewModel.fileInspectorDisplayContent = content
@@ -343,6 +374,7 @@ struct FileInspectorOverlayView: View {
                         isEditable: viewModel.isFileInspectorEditable
                     ),
                     items: [],
+                    commandBridge: nil,
                     onContentChange: { _, content in
                         viewModel.fileInspectorContent = content
                     },

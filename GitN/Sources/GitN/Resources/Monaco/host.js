@@ -14,6 +14,7 @@
     pendingLineBlames: null,
     tooltipElement: null,
     activeTooltipKey: null,
+    currentHunkIndex: -1,
   };
   
 
@@ -230,6 +231,20 @@
     state.editors.push(editor);
   }
 
+  function addWheelForwarding(element) {
+    element.addEventListener("wheel", function(event) {
+      var editor = state.diffEditor;
+      if (editor) {
+        editor.setScrollPosition({
+          scrollTop: Math.max(0, editor.getScrollTop() + event.deltaY),
+          scrollLeft: Math.max(0, editor.getScrollLeft() + event.deltaX),
+        });
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+  }
+
   function renderSingleDiff(item) {
     try {
       console.log("[MonacoHost] render diff", {
@@ -252,6 +267,7 @@
       gutterOverlay.className = "gitn-gutter-overlay";
       shellNode.appendChild(gutterOverlay);
       state.gutterOverlay = gutterOverlay;
+      addWheelForwarding(gutterOverlay);
 
       const contentOverlay = document.createElement("div");
       contentOverlay.className = "gitn-content-overlay";
@@ -307,6 +323,8 @@
     const lineHeight = editor.getOption(window.monaco.editor.EditorOption.lineHeight);
     const layout = editor.getLayoutInfo();
     const gutterNumberOffset = Math.max(layout.contentLeft - layout.lineNumbersWidth, 0);
+    const model = editor.getModel();
+    const tabSize = model ? model.getOptions().tabSize : 4;
     shellNode.style.setProperty("--gitn-font-size", `${fontInfo.fontSize}px`);
     shellNode.style.setProperty("--gitn-line-height", `${lineHeight}px`);
     shellNode.style.setProperty("--gitn-font-family", fontInfo.fontFamily || "ui-monospace, SFMono-Regular, Menlo, monospace");
@@ -317,6 +335,7 @@
     shellNode.style.setProperty("--gitn-gutter-number-offset", `${gutterNumberOffset}px`);
     shellNode.style.setProperty("--gitn-deletion-number-column-width", `${layout.lineNumbersWidth}px`);
     shellNode.style.setProperty("--gitn-deletion-accent-width", "3px");
+    shellNode.style.setProperty("--gitn-tab-size", String(tabSize));
   }
 
   function applyOverlayLayout(editor) {
@@ -496,12 +515,6 @@
     const fallbackTop = deletionBlockTop(editor, entry.anchorLine, fallbackHeight);
 
     if (!entry || !entry.spacerNode || !entry.spacerNode.isConnected) {
-      reportDebug("deletionFrame:fallback:missingSpacer", {
-        id: entry && entry.id,
-        anchorLine: entry && entry.anchorLine,
-        fallbackTop,
-        fallbackHeight,
-      });
       return { top: fallbackTop, height: fallbackHeight };
     }
 
@@ -516,31 +529,9 @@
       : null;
 
     if (spacerTop === null || spacerHeight === null || spacerHeight <= 0) {
-      reportDebug("deletionFrame:fallback:invalidSpacerMetrics", {
-        id: entry.id,
-        anchorLine: entry.anchorLine,
-        measurementTag: measurementNode && measurementNode.tagName ? measurementNode.tagName : null,
-        measurementClass: measurementNode && measurementNode.className ? String(measurementNode.className) : null,
-        spacerTop,
-        spacerHeight,
-        fallbackTop,
-        fallbackHeight,
-      });
       return { top: fallbackTop, height: fallbackHeight };
     }
 
-    reportDebug("deletionFrame:resolved", {
-      id: entry.id,
-      anchorLine: entry.anchorLine,
-      measurementTag: measurementNode && measurementNode.tagName ? measurementNode.tagName : null,
-      measurementClass: measurementNode && measurementNode.className ? String(measurementNode.className) : null,
-      spacerTop,
-      scrollTop,
-      resolvedTop: spacerTop - scrollTop,
-      resolvedHeight: spacerHeight,
-      fallbackTop,
-      fallbackHeight,
-    });
     return {
       top: spacerTop - scrollTop,
       height: spacerHeight,
@@ -632,6 +623,7 @@
     contentBlock.className = "gitn-deletion-content-block";
     contentBlock.style.top = `${top}px`;
     contentBlock.style.height = `${zoneHeight}px`;
+    addWheelForwarding(contentBlock);
 
     const scrollContent = document.createElement("div");
     scrollContent.className = "gitn-deletion-content-scroll";
@@ -703,9 +695,6 @@
     }
 
     const observer = new window.ResizeObserver(() => {
-      reportDebug("deletionZone:resizeObserved", {
-        zones: renderDeletions.map((entry) => entry.id),
-      });
       scheduleDeletionGutterRender(editor);
     });
 
@@ -741,6 +730,7 @@
       state.contentOverlay.innerHTML = "";
     }
     state.diffModel = null;
+    state.currentHunkIndex = -1;
   }
 
   function splitLines(text) {
@@ -1152,27 +1142,12 @@
     applyOverlayLayout(editor);
     const scrollLeft = editor.getScrollLeft();
     const renderDeletions = Array.isArray(state.diffModel.renderDeletions) ? state.diffModel.renderDeletions : [];
-    reportDebug("renderDeletionGutter:start", {
-      scrollTop: editor.getScrollTop(),
-      lineHeight,
-      renderDeletions: renderDeletions.map((entry) => ({
-        id: entry.id,
-        anchorLine: entry.anchorLine,
-        heightInLines: entry.heightInLines,
-      })),
-    });
     renderVisibleGutter(editor, gutterOverlay, renderDeletions);
 
     for (const entry of renderDeletions) {
       const frame = resolveDeletionBlockFrame(editor, gutterOverlay, entry);
       const zoneHeight = frame.height;
       const top = frame.top;
-      reportDebug("renderDeletionGutter:block", {
-        id: entry.id,
-        top,
-        zoneHeight,
-        deletedLines: entry.deletedLines.length,
-      });
       gutterOverlay.appendChild(createDeletionGutterBlock(entry, top, zoneHeight));
       contentOverlay.appendChild(createDeletionContentBlock(entry, top, zoneHeight, scrollLeft));
     }
@@ -1184,6 +1159,66 @@
 
   function ensureMonacoReady() {
     return !!(window.monaco && window.monaco.editor);
+  }
+
+  function getDiffHunkLines() {
+    if (!state.diffModel) {
+      return [];
+    }
+    const lines = [];
+    for (const add of (state.diffModel.additionDecorations || [])) {
+      if (typeof add.startLineNumber === "number") {
+        lines.push(add.startLineNumber);
+      }
+    }
+    for (const del of (state.diffModel.renderDeletions || [])) {
+      if (typeof del.anchorLine === "number") {
+        lines.push(Math.max(del.anchorLine - 1, 1));
+      }
+    }
+    const unique = Array.from(new Set(lines)).sort(function(a, b) { return a - b; });
+    return unique;
+  }
+
+  function navigateDiff(direction) {
+    if (!state.diffEditor || !state.diffModel) {
+      return;
+    }
+    var editor = state.diffEditor;
+    var hunkLines = getDiffHunkLines();
+    if (hunkLines.length === 0) {
+      return;
+    }
+
+    var idx = state.currentHunkIndex;
+
+    if (idx < 0 || idx >= hunkLines.length) {
+      // Index not yet set: seed from current scroll position.
+      // scrollTop / lineHeight is an approximation but good enough for the
+      // initial seed — subsequent clicks use the reliable ±1 index path.
+      var lineHeight = editor.getOption(window.monaco.editor.EditorOption.lineHeight);
+      var topLine = Math.floor(editor.getScrollTop() / lineHeight) + 1;
+      if (direction === "next") {
+        idx = 0;
+        for (var i = 0; i < hunkLines.length; i++) {
+          if (hunkLines[i] > topLine) { idx = i; break; }
+        }
+      } else {
+        idx = hunkLines.length - 1;
+        for (var j = hunkLines.length - 1; j >= 0; j--) {
+          if (hunkLines[j] < topLine) { idx = j; break; }
+        }
+      }
+    } else {
+      if (direction === "next") {
+        idx = (idx + 1) % hunkLines.length;
+      } else {
+        idx = (idx - 1 + hunkLines.length) % hunkLines.length;
+      }
+    }
+
+    state.currentHunkIndex = idx;
+    editor.revealLineInCenter(hunkLines[idx]);
   }
 
   window.gitnMonaco = {
@@ -1214,6 +1249,9 @@
       } catch (error) {
         reportError(error && error.message ? error.message : error, error && error.stack ? error.stack : "");
       }
+    },
+    navigateDiff(direction) {
+      navigateDiff(direction);
     },
   };
 

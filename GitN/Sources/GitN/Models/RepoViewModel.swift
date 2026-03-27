@@ -2074,8 +2074,18 @@ final class RepoViewModel {
 
     /// Max file size (in bytes) for which we compute a full diff.
     /// Files larger than this get a placeholder to avoid OOM on huge files
-    /// (e.g. Xcode project.pbxproj).
-    private static let maxDiffFileSize: Int = 1_024_000  // ~1 MB
+    /// (e.g. Xcode project.pbxproj). Configurable via Settings (default 3 MB).
+    static let maxDiffFileSizeKey = "GitN.maxDiffFileSizeMB"
+    static let defaultMaxDiffFileSizeMB = 3
+
+    static var maxDiffFileSizeMB: Int {
+        let stored = UserDefaults.standard.integer(forKey: maxDiffFileSizeKey)
+        return stored > 0 ? stored : defaultMaxDiffFileSizeMB
+    }
+
+    private static var maxDiffFileSize: Int {
+        maxDiffFileSizeMB * 1_048_576
+    }
 
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed, ignoreSize: Bool = false) async {
         let isUncommitted = selectedCommit?.isUncommitted == true || isInConflict

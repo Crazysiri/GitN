@@ -55,11 +55,22 @@ struct MonacoHostPayload: Encodable, Equatable {
     let items: [MonacoDiffPayload]
 }
 
+final class MonacoCommandBridge {
+    weak var webView: WKWebView?
+
+    func navigateDiff(next: Bool) {
+        let direction = next ? "next" : "prev"
+        let js = "window.gitnMonaco && window.gitnMonaco.navigateDiff('\(direction)');"
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+}
+
 struct MonacoInspectorView: NSViewRepresentable {
     let mode: RepoViewModel.FileInspectorMode
     let isDark: Bool
     let preview: MonacoPreviewPayload?
     let items: [MonacoDiffPayload]
+    let commandBridge: MonacoCommandBridge?
     let onContentChange: (String, String) -> Void
     let onHunkAction: ((String, Int, String) -> Void)?
     let onSaveRequest: (() -> Void)?
@@ -84,6 +95,7 @@ struct MonacoInspectorView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
+        commandBridge?.webView = webView
 
         if let resourceURL = Bundle.module.resourceURL?.appendingPathComponent("Monaco"),
            let indexURL = Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "Monaco") {

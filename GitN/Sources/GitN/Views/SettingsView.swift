@@ -1,6 +1,24 @@
 import SwiftUI
 
+private enum SettingsTab: String, CaseIterable {
+    case ai = "AI"
+    case git = "Git"
+    case editor = "Editor"
+    case about = "About"
+
+    var icon: String {
+        switch self {
+        case .ai:     "sparkles"
+        case .git:    "network"
+        case .editor: "doc.text"
+        case .about:  "info.circle"
+        }
+    }
+}
+
 struct SettingsView: View {
+    @State private var activeTab: SettingsTab = .ai
+
     @State private var aiPrompt: String = AICommitService.userPrompt
     @State private var selectedTool: AICommitTool = AICommitService.selectedTool
     @State private var cursorAPIKey: String = AICommitService.cursorAPIKey
@@ -16,24 +34,61 @@ struct SettingsView: View {
     @State private var githubToken: String = GitHubService.githubToken
     @State private var githubTokenHasChanges = false
 
+    @State private var maxDiffFileSizeMB: Int = {
+        let stored = UserDefaults.standard.integer(forKey: RepoViewModel.maxDiffFileSizeKey)
+        return stored > 0 ? stored : RepoViewModel.defaultMaxDiffFileSizeMB
+    }()
+    @State private var maxDiffSizeHasChanges = false
+
     var body: some View {
-        TabView {
-            aiSettingsTab
-                .tabItem {
-                    Label("AI", systemImage: "sparkles")
-                }
+        VStack(spacing: 0) {
+            tabBar
 
-            gitSettingsTab
-                .tabItem {
-                    Label("Git", systemImage: "network")
-                }
+            Divider()
 
-            aboutTab
-                .tabItem {
-                    Label("About", systemImage: "info.circle")
+            Group {
+                switch activeTab {
+                case .ai:     aiSettingsTab
+                case .git:    gitSettingsTab
+                case .editor: editorSettingsTab
+                case .about:  aboutTab
                 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 520, height: 480)
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 0) {
+            ForEach(SettingsTab.allCases, id: \.self) { tab in
+                tabBarButton(tab)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color(.windowBackgroundColor))
+    }
+
+    @ViewBuilder
+    private func tabBarButton(_ tab: SettingsTab) -> some View {
+        let isSelected = activeTab == tab
+        Button { activeTab = tab } label: {
+            VStack(spacing: 3) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 20, weight: .regular))
+                    .frame(width: 26, height: 26)
+                Text(tab.rawValue)
+                    .font(.system(size: 11))
+            }
+            .frame(width: 68)
+            .padding(.vertical, 5)
+            .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - AI Settings
@@ -466,6 +521,68 @@ struct SettingsView: View {
                 }
             }
             .padding(.top, 4)
+        }
+    }
+
+    // MARK: - Editor Settings
+
+    private var editorSettingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                diffSizeLimitSection
+            }
+            .padding(20)
+        }
+    }
+
+    private var diffSizeLimitSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Diff Size Limit")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Maximum file size for computing diffs. Files larger than this threshold will show a placeholder instead of the full diff to avoid high memory usage.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField("", value: $maxDiffFileSizeMB, formatter: NumberFormatter())
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 60)
+                    .onChange(of: maxDiffFileSizeMB) {
+                        maxDiffSizeHasChanges = true
+                    }
+
+                Text("MB")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Stepper("", value: $maxDiffFileSizeMB, in: 1...100)
+                    .labelsHidden()
+                    .onChange(of: maxDiffFileSizeMB) {
+                        maxDiffSizeHasChanges = true
+                    }
+
+                Button("Save") {
+                    UserDefaults.standard.set(maxDiffFileSizeMB, forKey: RepoViewModel.maxDiffFileSizeKey)
+                    maxDiffSizeHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!maxDiffSizeHasChanges)
+
+                Button("Reset") {
+                    maxDiffFileSizeMB = RepoViewModel.defaultMaxDiffFileSizeMB
+                    UserDefaults.standard.removeObject(forKey: RepoViewModel.maxDiffFileSizeKey)
+                    maxDiffSizeHasChanges = false
+                }
+                .controlSize(.small)
+                .disabled(maxDiffFileSizeMB == RepoViewModel.defaultMaxDiffFileSizeMB && !maxDiffSizeHasChanges)
+            }
+
+            Text("Current limit: \(maxDiffFileSizeMB) MB  ·  Default: \(RepoViewModel.defaultMaxDiffFileSizeMB) MB")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
         }
     }
 
