@@ -2838,7 +2838,7 @@ private struct SelectableDiffView: NSViewRepresentable {
         }
 
         // Force synchronous layout after updating the attributed string.
-        // Same root cause as SourcePreviewView: NSLayoutManager is lazy, so when
+        // Same root cause as the old NSTextView-based source inspector: NSLayoutManager is lazy, so when
         // the text container width is updated later (widthTracksTextView fires
         // once SwiftUI assigns the real frame), textContainerChangedGeometry has
         // no previous glyph positions to diff against and produces an empty dirty

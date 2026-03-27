@@ -1,0 +1,245 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.gitn-hover-tooltip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 320px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(28, 30, 34, 0.96);
+  color: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+#root.root {
+  width: 100%;
+  height: 100%;
+}
+
+#root.single-diff-root {
+  width: 100%;
+  height: 100%;
+}
+
+.preview-editor {
+  width: 100%;
+  height: 100%;
+}
+
+.single-diff-editor {
+  width: 100%;
+  height: 100%;
+}
+
+.single-diff-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  --gitn-font-size: 12px;
+  --gitn-line-height: 19px;
+  --gitn-font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --gitn-font-weight: normal;
+  --gitn-content-left: 0px;
+  --gitn-line-numbers-width: 0px;
+  --gitn-line-decorations-width: 0px;
+  --gitn-gutter-number-offset: 0px;
+  --gitn-deletion-accent-width: 3px;
+  --gitn-line-number-gap: 8px;
+}
+
+.gitn-gutter-overlay {
+  position: absolute;
+  inset: 0 auto 0 0;
+  pointer-events: auto;
+  overflow: hidden;
+  z-index: 4;
+}
+
+.gitn-content-overlay {
+  position: absolute;
+  inset: 0 0 0 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 2;
+}
+
+.gitn-deletion-gutter-block {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  overflow: visible;
+}
+
+.gitn-gutter-overlay-line,
+.gitn-deletion-gutter-line {
+  position: relative;
+  left: 0;
+  right: 0;
+  height: var(--gitn-line-height);
+  min-height: var(--gitn-line-height);
+  font-size: var(--gitn-font-size);
+  line-height: var(--gitn-line-height);
+  font-family: var(--gitn-font-family);
+  font-weight: var(--gitn-font-weight);
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.gitn-gutter-overlay-line {
+  position: absolute;
+  z-index: 1;
+}
+
+.gitn-gutter-overlay-line-with-actions {
+  overflow: visible;
+  z-index: 6;
+}
+
+.gitn-deletion-gutter-block-with-actions {
+  z-index: 6;
+}
+
+.gitn-gutter-number-content {
+  width: calc((var(--gitn-line-numbers-width) - var(--gitn-line-number-gap)) / 2);
+  height: var(--gitn-line-height);
+  min-height: var(--gitn-line-height);
+}
+
+.gitn-gutter-old-number {
+  color: rgba(255, 255, 255, 0.45);
+  display: block;
+  text-align: right;
+  white-space: pre;
+  pointer-events: none;
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--gitn-line-height);
+}
+
+.gitn-hunk-actions {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.gitn-hunk-action {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  pointer-events: auto;
+}
+
+.gitn-hunk-action:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.gitn-hunk-action-stage,
+.gitn-hunk-action-unstage {
+  font-size: 22px;
+}
+
+.gitn-hunk-action-discard {
+  font-size: 16px;
+}
+
+.gitn-gutter-overlay-line-with-actions:hover .gitn-hunk-actions,
+.gitn-deletion-gutter-block-with-actions:hover .gitn-hunk-actions {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.gitn-line-addition {
+  background: rgba(46, 160, 67, 0.18);
+}
+
+.gitn-line-addition-margin {
+  background: transparent;
+  border-left: none;
+}
+
+/* Inline character-level highlight within an addition line (paired with a deletion).
+   Mirrors Swift's FileInspectorInlineHighlight .addition — systemGreen @0.30 alpha. */
+.gitn-inline-addition {
+  background: rgba(46, 160, 67, 0.40);
+  border-radius: 2px;
+}
+
+/* Inline character-level highlight within a deletion line rendered in the content overlay.
+   Mirrors Swift's FileInspectorInlineHighlight .deletion — systemRed @0.28 alpha. */
+.gitn-inline-deletion {
+  background: rgba(255, 80, 70, 0.42);
+  border-radius: 2px;
+}
+
+.gitn-deletion-spacer {
+  width: 100%;
+  height: 100%;
+}
+
+.gitn-deletion-content-block {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: rgba(86, 27, 24, 0.92);
+  border-top: 1px solid rgba(248, 81, 73, 0.18);
+  color: inherit;
+  font-size: var(--gitn-font-size);
+  line-height: var(--gitn-line-height);
+  font-family: var(--gitn-font-family);
+  font-weight: var(--gitn-font-weight);
+  overflow: hidden;
+}
+
+.gitn-deletion-content-scroll {
+  min-width: 100%;
+}
+
+.gitn-deletion-line {
+  display: block;
+  min-height: var(--gitn-line-height);
+}
+
+.gitn-deletion-line-content {
+  display: block;
+  padding: 0;
+  white-space: pre;
+  color: rgba(248, 81, 73, 0.98);
+}

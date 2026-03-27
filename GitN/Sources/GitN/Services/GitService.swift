@@ -1041,11 +1041,83 @@ actor GitService {
         return content
     }
 
+    func headFileContent(path: String) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var headRef: OpaquePointer?
+        guard git_repository_head(&headRef, repo) == 0, let headRef else { return "" }
+        defer { git_reference_free(headRef) }
+
+        var commitObj: OpaquePointer?
+        guard git_reference_peel(&commitObj, headRef, GIT_OBJECT_COMMIT) == 0, let commitObj else { return "" }
+        defer { git_object_free(commitObj) }
+
+        var tree: OpaquePointer?
+        guard git_commit_tree(&tree, commitObj) == 0, let tree else { return "" }
+        defer { git_tree_free(tree) }
+
+        var entry: OpaquePointer?
+        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else { return "" }
+        defer { git_tree_entry_free(entry) }
+
+        var object: OpaquePointer?
+        guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else { return "" }
+        defer { git_object_free(object) }
+
+        return Self.stringContent(forBlobObject: object)
+    }
+
+    func stagedFileContent(path: String) throws -> String {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return "" }
+        defer { git_index_free(index) }
+
+        guard let entry = git_index_get_bypath(index, path, 0) else { return "" }
+
+        var blob: OpaquePointer?
+        var oid = entry.pointee.id
+        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return "" }
+        defer { git_blob_free(blob) }
+
+        return Self.stringContent(forBlobObject: blob)
+    }
+
     func decodedWorkingTreeFileContent(path: String) throws -> DecodedFileContent {
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         guard let data = FileManager.default.contents(atPath: fullPath) else {
             return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
         }
+        return Self.decodeFileData(data)
+    }
+
+    func decodedStagedFileContent(path: String) throws -> DecodedFileContent {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        defer { git_index_free(index) }
+
+        guard let entry = git_index_get_bypath(index, path, 0) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+
+        var blob: OpaquePointer?
+        var oid = entry.pointee.id
+        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        defer { git_blob_free(blob) }
+
+        guard let rawContent = git_blob_rawcontent(blob) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+
+        let size = Int(git_blob_rawsize(blob))
+        let data = size > 0 ? Data(bytes: rawContent, count: size) : Data()
         return Self.decodeFileData(data)
     }
 
@@ -3120,5 +3192,12 @@ actor GitService {
         }
 
         return DecodedFileContent(text: nil, encodingName: nil, isBinary: true)
+    }
+
+    private nonisolated static func stringContent(forBlobObject object: OpaquePointer) -> String {
+        guard let rawContent = git_blob_rawcontent(object) else { return "" }
+        let size = Int(git_blob_rawsize(object))
+        guard size > 0 else { return "" }
+        return String(bytes: Data(bytes: rawContent, count: size), encoding: .utf8) ?? ""
     }
 }

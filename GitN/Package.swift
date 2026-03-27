@@ -106,12 +106,16 @@ let package = Package(
             name: "GitN",
             dependencies: ["Clibgit2", "SwiftTerm", .product(name: "MarkdownUI", package: "swift-markdown-ui"), .product(name: "HighlightSwift", package: "highlightswift")],
             path: "Sources/GitN",
-            resources: [.copy("FEATURES.md")],
+            resources: [
+                .copy("FEATURES.md"),
+                .copy("Resources/Monaco"),
+            ],
             linkerSettings: [
                 .linkedLibrary("z"),
                 .linkedLibrary("iconv"),
                 .linkedFramework("Security"),
                 .linkedFramework("CoreFoundation"),
+                .linkedFramework("WebKit"),
             ]
         ),
     ]

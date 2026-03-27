@@ -16,14 +16,21 @@ echo "  Building ${APP_NAME}.app ..."
 echo "=========================================="
 
 echo ""
-echo "[0/3] Ensuring libgit2 source..."
+echo "[0/4] Ensuring libgit2 source..."
 "${SCRIPT_DIR}/Scripts/ensure_libgit2.sh"
 
 # ──────────────────────────────────────────────
-# Step 1: Generate app icon
+# Step 1: Build Monaco editor bundle
 # ──────────────────────────────────────────────
 echo ""
-echo "[1/3] Generating app icon..."
+echo "[1/4] Building Monaco editor..."
+"${SCRIPT_DIR}/Scripts/build_monaco.sh"
+
+# ──────────────────────────────────────────────
+# Step 2: Generate app icon
+# ──────────────────────────────────────────────
+echo ""
+echo "[2/4] Generating app icon..."
 
 ICONSET_DIR="${OUTPUT_DIR}/${APP_NAME}.iconset"
 ICNS_FILE="${OUTPUT_DIR}/AppIcon.icns"
@@ -54,10 +61,10 @@ else
 fi
 
 # ──────────────────────────────────────────────
-# Step 2: Build Swift package (release)
+# Step 3: Build Swift package (release)
 # ──────────────────────────────────────────────
 echo ""
-echo "[2/3] Building Swift package (${BUILD_CONFIG})..."
+echo "[3/4] Building Swift package (${BUILD_CONFIG})..."
 
 echo "       Cleaning previous build..."
 swift package clean 2>/dev/null || true
@@ -73,10 +80,10 @@ fi
 echo "       Binary built: ${BINARY}"
 
 # ──────────────────────────────────────────────
-# Step 3: Create .app bundle & sign
+# Step 4: Create .app bundle & sign
 # ──────────────────────────────────────────────
 echo ""
-echo "[3/3] Creating app bundle..."
+echo "[4/4] Creating app bundle..."
 
 rm -rf "$BUNDLE_DIR"
 mkdir -p "${BUNDLE_DIR}/Contents/MacOS"

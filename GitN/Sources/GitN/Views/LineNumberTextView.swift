@@ -7,7 +7,7 @@ import AppKit
 // with the text with zero extra view-hierarchy complexity, and alignment is
 // derived straight from NSLayoutManager.lineFragmentRect — always pixel-perfect.
 //
-// Used by both SourcePreviewView (read-only) and MarkdownEditorView (editable).
+// Used by MarkdownEditorView.
 
 class LineNumberTextView: NSTextView {
 

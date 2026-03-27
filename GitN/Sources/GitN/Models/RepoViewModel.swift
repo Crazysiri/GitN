@@ -7,10 +7,17 @@ private enum DiffEditorDebugLog {
     }
 }
 
+private enum MonacoDebugLog {
+    static func emit(_ message: @autoclosure () -> String) {
+        print("[MonacoBridge] \(message())")
+    }
+}
+
 @Observable @MainActor
 final class RepoViewModel {
     private struct DiffLoadPayload: Sendable {
         let fileDiffContent: String
+        let baseText: String
         let parsedDiff: ParsedDiff?
     }
 
@@ -140,6 +147,7 @@ final class RepoViewModel {
     var selectedStash: StashInfo?
     var diffFiles: [DiffFile] = []
     var fileDiffContent: String = ""
+    var diffBaseText: String = ""
     var parsedDiff: ParsedDiff?
     var selectedDiffFile: DiffFile?
     var isLoadingDiff = false
@@ -262,7 +270,7 @@ final class RepoViewModel {
     }
 
     var fileInspectorTitle: String {
-        (activeFileInspectorPath as NSString).lastPathComponent
+        return (activeFileInspectorPath as NSString).lastPathComponent
     }
 
     var activeFileInspectorPath: String {
@@ -273,7 +281,7 @@ final class RepoViewModel {
     }
 
     var isFileInspectorDirty: Bool {
-        isFileInspectorEditable && fileInspectorContent != fileInspectorInitialContent
+        return isFileInspectorEditable && fileInspectorContent != fileInspectorInitialContent
     }
 
     func openFileInspector(
@@ -289,24 +297,31 @@ final class RepoViewModel {
                 context != .committed || selectedCommit?.isUncommitted == true || isInConflict
             )
             let inspectorDisplayContent: String
-            let usesRawDiffFallback = preferredMode == .diff && (loadedText.isEmpty || parsedDiff == nil)
+            let inspectorBaseText: String
+            let usesRawDiffFallback = preferredMode == .diff && parsedDiff == nil
             let inspectorParsedDiff: ParsedDiff?
             if usesRawDiffFallback {
                 let fallbackText = fileDiffContent.isEmpty ? loadedText : fileDiffContent
                 let compactSubmoduleDiff = Self.compactSubmoduleDiff(fallbackText)
                 inspectorDisplayContent = compactSubmoduleDiff?.baseText ?? Self.displayTextForRawDiffFallback(fallbackText)
+                inspectorBaseText = compactSubmoduleDiff?.baseText ?? inspectorDisplayContent
                 inspectorParsedDiff = compactSubmoduleDiff?.parsedDiff
             } else {
                 inspectorDisplayContent = loadedText
-                inspectorParsedDiff = parsedDiff
+                inspectorParsedDiff = preferredMode == .diff ? parsedDiff : nil
+                inspectorBaseText = if let inspectorParsedDiff, preferredMode == .diff {
+                    diffBaseText.isEmpty
+                        ? Self.reconstructOldText(from: inspectorParsedDiff, newText: loadedText)
+                        : diffBaseText
+                } else {
+                    inspectorDisplayContent
+                }
             }
             fileInspectorPath = file.path
             fileInspectorContext = context
             fileInspectorContent = loadedText
             fileInspectorInitialContent = loadedText
-            fileInspectorDiffBaseText = inspectorParsedDiff.map {
-                Self.reconstructOldText(from: $0, newText: loadedText)
-            } ?? inspectorDisplayContent
+            fileInspectorDiffBaseText = inspectorBaseText
             fileInspectorDisplayContent = inspectorDisplayContent
             fileInspectorSelectedRange = NSRange(location: 0, length: 0)
             isFileInspectorDiffEditing = false
@@ -357,6 +372,7 @@ final class RepoViewModel {
         selectedStash = nil
         selectedDiffFile = nil
         fileDiffContent = ""
+        diffBaseText = ""
         parsedDiff = nil
         selectedFilePaths = []
         selectedFileListContext = nil
@@ -415,6 +431,20 @@ final class RepoViewModel {
         let message: String?
     }
 
+    static func monacoLanguage(for language: SourceLanguage) -> String {
+        switch language {
+        case .swift, .python, .javascript, .typescript, .go, .rust, .c, .cpp, .java,
+             .json, .yaml, .dart, .ruby, .php, .css, .html, .xml:
+            return language.rawValue
+        case .shell:
+            return "shellscript"
+        case .kotlin, .toml:
+            return "plaintext"
+        case .text:
+            return "plaintext"
+        }
+    }
+
     private func loadInspectableFileContent(path: String, context: DiffContext) async throws -> LoadedInspectableContent {
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         if context == .committed, let commit = selectedCommit, !commit.isUncommitted {
@@ -438,7 +468,13 @@ final class RepoViewModel {
                     message: "Submodule pointers are shown as commit values and can't be edited here."
                 )
             }
-            let decoded = try await git.decodedWorkingTreeFileContent(path: path)
+            let decoded: GitService.DecodedFileContent
+            switch context {
+            case .staged:
+                decoded = try await git.decodedStagedFileContent(path: path)
+            case .unstaged, .committed:
+                decoded = try await git.decodedWorkingTreeFileContent(path: path)
+            }
             return LoadedInspectableContent(content: decoded, isEditable: decoded.text != nil, message: nil)
         }
         return LoadedInspectableContent(
@@ -2093,11 +2129,13 @@ final class RepoViewModel {
             else { return }
 
             fileDiffContent = payload.fileDiffContent
+            diffBaseText = payload.baseText
             parsedDiff = payload.parsedDiff
+            MonacoDebugLog.emit(
+                "selectDiffFile path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(Self.lineCount(for: payload.baseText)) modifiedLines=\(Self.lineCount(for: fileInspectorPath == path && isFileInspectorPresented ? fileInspectorContent : "")) parsedHunks=\(payload.parsedDiff?.hunks.count ?? 0) diffBytes=\(payload.fileDiffContent.utf8.count)"
+            )
             if isFileInspectorPresented, fileInspectorPath == path {
-                fileInspectorDiffBaseText = payload.parsedDiff.map {
-                    Self.reconstructOldText(from: $0, newText: fileInspectorContent)
-                } ?? fileInspectorContent
+                fileInspectorDiffBaseText = payload.parsedDiff != nil ? payload.baseText : fileInspectorContent
                 rebuildFileInspectorArtifacts(
                     diffBaseText: fileInspectorDiffBaseText,
                     currentText: fileInspectorContent,
@@ -2109,6 +2147,7 @@ final class RepoViewModel {
                   selectedDiffFile?.path == file.path
             else { return }
             fileDiffContent = "Failed to load diff"
+            diffBaseText = ""
             parsedDiff = nil
         }
         if generation == diffLoadGeneration {
@@ -2126,35 +2165,79 @@ final class RepoViewModel {
         statusCode: String
     ) async throws -> DiffLoadPayload {
         let content: String
+        let baseText: String
+        let newTextForFallback: String?
+
+        let isStaged = {
+            let idx = statusCode.first ?? " "
+            return idx != " " && idx != "?"
+        }()
 
         if let stashIndex {
             content = try await git.stashFileDiff(stashIndex, path: path)
+            baseText = ""
+            newTextForFallback = nil
         } else if isUncommitted {
             switch context {
             case .staged:
                 content = try await git.stagedFileDiff(path: path)
+                baseText = try await git.headFileContent(path: path)
+                newTextForFallback = try await git.stagedFileContent(path: path)
             case .unstaged:
                 if statusCode == "??" {
                     content = try await git.readFullFileContent(path: path)
+                    baseText = ""
                 } else {
                     content = try await git.unstagedFileDiff(path: path)
+                    baseText = try await git.stagedFileContent(path: path)
                 }
+                newTextForFallback = try await git.workingTreeFileContent(path: path)
             case .committed:
                 content = try await git.uncommittedFileDiff(path: path, statusCode: statusCode)
+                if statusCode == "??" {
+                    baseText = ""
+                } else {
+                    baseText = try await git.headFileContent(path: path)
+                }
+                if isStaged {
+                    newTextForFallback = try await git.workingTreeFileContent(path: path)
+                } else if statusCode == "??" {
+                    newTextForFallback = try await git.workingTreeFileContent(path: path)
+                } else {
+                    newTextForFallback = try await git.workingTreeFileContent(path: path)
+                }
             }
         } else if let commitHash {
             content = try await git.fileDiff(hash: commitHash, path: path)
+            baseText = ""
+            newTextForFallback = nil
         } else {
-            return DiffLoadPayload(fileDiffContent: "", parsedDiff: nil)
+            return DiffLoadPayload(fileDiffContent: "", baseText: "", parsedDiff: nil)
         }
 
         if content.isEmpty {
-            return DiffLoadPayload(fileDiffContent: "No changes in this file", parsedDiff: nil)
+            if let newTextForFallback, !baseText.isEmpty || !newTextForFallback.isEmpty {
+                let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
+                if !synthetic.hunks.isEmpty {
+                    return DiffLoadPayload(fileDiffContent: "No changes in this file", baseText: baseText, parsedDiff: synthetic)
+                }
+            }
+            return DiffLoadPayload(fileDiffContent: "No changes in this file", baseText: baseText, parsedDiff: nil)
         }
 
         let parsed = DiffParserEngine.parse(content)
+        if parsed.hunks.isEmpty, let newTextForFallback {
+            let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
+            if !synthetic.hunks.isEmpty {
+                MonacoDebugLog.emit(
+                    "synthetic diff path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(lineCount(for: baseText)) modifiedLines=\(lineCount(for: newTextForFallback)) hunks=\(synthetic.hunks.count)"
+                )
+                return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic)
+            }
+        }
         return DiffLoadPayload(
             fileDiffContent: content,
+            baseText: baseText,
             parsedDiff: parsed.hunks.isEmpty ? nil : parsed
         )
     }
