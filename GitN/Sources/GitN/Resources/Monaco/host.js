@@ -675,7 +675,6 @@
     }
     window.requestAnimationFrame(() => {
       if (isEditorAlive(editor)) {
-        reportDebug("scheduleDeletionGutterRender:raf");
         renderDeletionGutter(editor);
       }
     });
@@ -1154,6 +1153,8 @@
   }
 
   function applyTheme(isDark) {
+    document.body.classList.toggle("theme-dark", !!isDark);
+    document.body.classList.toggle("theme-light", !isDark);
     window.monaco.editor.setTheme(isDark ? "vs-dark" : "vs");
   }
 

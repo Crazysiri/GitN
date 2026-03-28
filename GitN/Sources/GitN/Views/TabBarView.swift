@@ -7,14 +7,35 @@ struct TabBarView: View {
     @State private var windowWidth: CGFloat = 1100
     @State private var hostingWindow: NSWindow? = nil
 
+    private enum Layout {
+        static let barHeight: CGFloat = 47
+        static let trailingControlsWidth: CGFloat = 30
+        static let trailingGap: CGFloat = 10
+        static let minTabWidth: CGFloat = 110
+        static let maxTabWidth: CGFloat = 200
+        static let contentHorizontalPadding: CGFloat = 10
+        static let maxToolbarFraction: CGFloat = 0.68
+        static let tabCornerRadius: CGFloat = 7
+        static let tabBaseWidth: CGFloat = 72
+        static let characterWidth: CGFloat = 7.2
+        static let maxVisibleCharacters = 20
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
+        let maxTabAreaWidth = max(Layout.minTabWidth, windowWidth * Layout.maxToolbarFraction)
+        let tabWidths = resolvedTabWidths(for: maxTabAreaWidth)
+        let totalTabsWidth = tabWidths.reduce(0, +)
+        let visibleTabAreaWidth = min(maxTabAreaWidth, totalTabsWidth + Layout.contentHorizontalPadding + 1)
+        let toolbarWidth = visibleTabAreaWidth + Layout.trailingGap + Layout.trailingControlsWidth
+
+        HStack(spacing: Layout.trailingGap) {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 1) {
-                    ForEach(appModel.tabs) { tab in
+                HStack(spacing: 0) {
+                    ForEach(Array(zip(appModel.tabs.indices, appModel.tabs)), id: \.1.id) { index, tab in
                         TabItemView(
                             tab: tab,
                             isSelected: tab.id == appModel.selectedTabID,
+                            maxWidth: tabWidths[index],
                             onSelect: {
                                 appModel.selectedTabID = tab.id
                                 appModel.showNewTab = false
@@ -23,25 +44,22 @@ struct TabBarView: View {
                         )
                     }
                 }
-                .padding(.horizontal, 4)
+                .padding(.leading, 1)
+                .padding(.trailing, Layout.contentHorizontalPadding)
             }
-            .frame(maxWidth: windowWidth * 0.65)
-
-            Divider()
-                .frame(height: 14)
-                .padding(.horizontal, 6)
+            .frame(width: visibleTabAreaWidth, alignment: .leading)
 
             Button(action: { appModel.showNewTabView() }) {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 20, height: 20)
-                    .background(Color(.controlColor), in: RoundedRectangle(cornerRadius: 5))
+                    .frame(width: Layout.trailingControlsWidth, height: Layout.barHeight)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 4)
         }
-        .padding(.horizontal, 10)
+        .frame(width: toolbarWidth, height: Layout.barHeight, alignment: .leading)
+        .background(ChromePalette.navigationBackground)
         .background(
             HostingWindowAccessor { window in
                 guard hostingWindow == nil, let window else { return }
@@ -53,12 +71,35 @@ struct TabBarView: View {
             guard let window = notification.object as? NSWindow,
                   window === hostingWindow else { return }
             windowWidth = window.frame.width
-            print("[TabBarView] didResize windowWidth=\(windowWidth)")
         }
+    }
+
+    private func resolvedTabWidths(for availableWidth: CGFloat) -> [CGFloat] {
+        guard !appModel.tabs.isEmpty else { return [] }
+
+        let idealWidths = appModel.tabs.map(idealWidth(for:))
+        let totalIdealWidth = idealWidths.reduce(0, +)
+        guard totalIdealWidth > availableWidth else { return idealWidths }
+
+        let minimumTotalWidth = CGFloat(appModel.tabs.count) * Layout.minTabWidth
+        guard minimumTotalWidth < totalIdealWidth else {
+            return Array(repeating: Layout.minTabWidth, count: appModel.tabs.count)
+        }
+
+        let compressionRatio = max(0, min(1, (availableWidth - minimumTotalWidth) / (totalIdealWidth - minimumTotalWidth)))
+        return idealWidths.map { width in
+            let compressed = Layout.minTabWidth + (width - Layout.minTabWidth) * compressionRatio
+            return floor(compressed)
+        }
+    }
+
+    private func idealWidth(for tab: RepoTab) -> CGFloat {
+        let visibleCount = min(tab.name.count, Layout.maxVisibleCharacters)
+        let estimated = Layout.tabBaseWidth + CGFloat(visibleCount) * Layout.characterWidth
+        return min(Layout.maxTabWidth, max(Layout.minTabWidth, ceil(estimated)))
     }
 }
 
-/// 通过 NSViewRepresentable 拿到当前 SwiftUI 视图的宿主 NSWindow
 private struct HostingWindowAccessor: NSViewRepresentable {
     let onWindow: (NSWindow?) -> Void
 
@@ -70,6 +111,14 @@ private struct HostingWindowAccessor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async { onWindow(nsView.window) }
+    }
+}
+
+private struct TabDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(ChromePalette.divider)
+            .frame(width: 1)
     }
 }
 
@@ -115,46 +164,95 @@ struct FeaturesView: View {
             }
         }
         .frame(minWidth: 680, minHeight: 500)
-        .preferredColorScheme(theme.isDark ? .dark : .light)
+        .preferredColorScheme(theme.preferredColorScheme)
     }
 }
 
 // MARK: -
 
 struct TabItemView: View {
+    private static let tabCornerRadius: CGFloat = 7
+    private static let topInset: CGFloat = 5
+    private static let innerHeight: CGFloat = 42
+    private static let maxVisibleCharacters = 20
+
     let tab: RepoTab
     let isSelected: Bool
+    let maxWidth: CGFloat
     let onSelect: () -> Void
     let onClose: () -> Void
 
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.caption2)
-                .foregroundStyle(isSelected ? .primary : .secondary)
-
-            Text(tab.name)
-                .font(.caption)
-                .lineLimit(1)
-                .foregroundStyle(isSelected ? .primary : .secondary)
-
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.secondary)
+        ZStack(alignment: .leading) {
+            if !isSelected {
+                TabDivider()
+                    .padding(.vertical, 7)
             }
-            .buttonStyle(.plain)
-            .opacity(isHovering || isSelected ? 1 : 0)
+
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+
+                Text(displayTitle)
+                    .font(.system(size: 12, weight: .regular))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+
+                Spacer(minLength: 0)
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(closeIconColor)
+                        .frame(width: 16, height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill((isHovering || isSelected) ? Color.primary.opacity(0.08) : .clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .opacity(isHovering || isSelected ? 1 : 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: Self.innerHeight)
+            .background(tabShape.fill(backgroundColor))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.3) : Color.clear)
-        )
+        .padding(.top, Self.topInset)
+        .frame(width: maxWidth, height: 47, alignment: .top)
+        .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            return ChromePalette.selectedTabBackground
+        }
+        if isHovering {
+            return ChromePalette.tabHoverBackground
+        }
+        return ChromePalette.navigationBackground
+    }
+
+    private var closeIconColor: Color {
+        isSelected ? Color.primary.opacity(0.8) : Color.secondary
+    }
+
+    private var displayTitle: String {
+        if tab.name.count <= Self.maxVisibleCharacters { return tab.name }
+        return String(tab.name.prefix(Self.maxVisibleCharacters))
+    }
+
+    private var tabShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: Self.tabCornerRadius,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: Self.tabCornerRadius
+        )
     }
 }

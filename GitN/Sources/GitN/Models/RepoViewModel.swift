@@ -3087,20 +3087,50 @@ final class RepoViewModel {
     }
 
     func performEditCommitMessage(hash: String, newMessage: String) async {
-        if hash == headCommitHash {
-            await performRemoteOperation { try await $0.git.amendCommitMessage(newMessage) }
-        } else {
-            // Non-HEAD commit: use interactive rebase to reword
-            operationInProgress = true
-            operationError = nil
-            do {
+        let selectedCommitIndex = commits.firstIndex(where: { $0.hash == hash })
+        let previouslySelectedFilePath = selectedDiffFile?.path
+        let previousDiffContext = currentDiffContext
+
+        operationInProgress = true
+        operationError = nil
+        defer { operationInProgress = false }
+
+        do {
+            if hash == headCommitHash {
+                try await git.amendCommitMessage(newMessage)
+            } else {
+                // Non-HEAD commit: use interactive rebase to reword.
                 try await git.rewordCommitMessage(hash: hash, newMessage: newMessage)
-                await loadAll()
-                showToast(title: "Message Updated", style: .success)
-            } catch {
-                await checkForRebaseConflict(errorMessage: error.localizedDescription)
             }
-            operationInProgress = false
+
+            await loadAll()
+
+            let rewrittenCommit: CommitInfo? = {
+                if let selectedCommitIndex, commits.indices.contains(selectedCommitIndex) {
+                    let commit = commits[selectedCommitIndex]
+                    if !commit.isUncommitted {
+                        return commit
+                    }
+                }
+                if let hash = headCommitHash {
+                    return commits.first(where: { $0.hash == hash })
+                }
+                return nil
+            }()
+
+            if let rewrittenCommit {
+                scrollToCommitHash = rewrittenCommit.hash
+                await selectCommit(rewrittenCommit)
+                if previousDiffContext == .committed,
+                   let previouslySelectedFilePath,
+                   let file = diffFiles.first(where: { $0.path == previouslySelectedFilePath }) {
+                    await selectDiffFile(file, context: .committed)
+                }
+            }
+
+            showToast(title: "Message Updated", style: .success)
+        } catch {
+            await checkForRebaseConflict(errorMessage: error.localizedDescription)
         }
     }
 

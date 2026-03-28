@@ -1,45 +1,46 @@
 import SwiftUI
 
 struct ContentView: View {
+    private enum ChromeLayout {
+        static let tabRowHeight: CGFloat = 47
+        static let leadingTrafficLightInset: CGFloat = 86
+    }
+
     @Environment(AppModel.self) private var appModel
     /// 已经加载过的 tab ID 集合（懒加载：点击才加载，加载后不销毁）
     @State private var loadedTabIDs: Set<UUID> = []
     @State private var showFeatures = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                // 仅渲染已加载过的 tab（懒加载），加载后通过 opacity 缓存不销毁
-                ForEach(appModel.tabs.filter { shouldRender($0) }) { tab in
-                    let isActive = !appModel.showNewTab && appModel.selectedTabID == tab.id
-                    RepoContainerView(tab: tab, isActive: isActive)
-                        .opacity(isActive ? 1 : 0)
-                        .allowsHitTesting(isActive)
-                        .zIndex(isActive ? 1 : 0)
-                }
+        GeometryReader { proxy in
+            let topInset = proxy.safeAreaInsets.top
+            let contentOffset = max(0, ChromeLayout.tabRowHeight - topInset)
 
-                if appModel.showNewTab || appModel.selectedTab == nil {
-                    NewTabView()
+            ZStack(alignment: .top) {
+                ZStack {
+                    // 仅渲染已加载过的 tab（懒加载），加载后通过 opacity 缓存不销毁
+                    ForEach(appModel.tabs.filter { shouldRender($0) }) { tab in
+                        let isActive = !appModel.showNewTab && appModel.selectedTabID == tab.id
+                        RepoContainerView(tab: tab, isActive: isActive)
+                            .opacity(isActive ? 1 : 0)
+                            .allowsHitTesting(isActive)
+                            .zIndex(isActive ? 1 : 0)
+                    }
+
+                    if appModel.showNewTab || appModel.selectedTab == nil {
+                        NewTabView()
+                    }
                 }
+                .padding(.top, contentOffset)
+
+                topChromeBar
+                    .ignoresSafeArea(.container, edges: .top)
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
         .background(Color(.windowBackgroundColor))
         .navigationTitle("")
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                TabBarView()
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showFeatures = true
-                } label: {
-                    Image(systemName: "sparkles.rectangle.stack")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .help("Features")
-            }
-        }
+        .background(WindowChromeConfigurator())
         .sheet(isPresented: $showFeatures) {
             if let url = Bundle.module.url(forResource: "FEATURES", withExtension: "md"),
                let content = try? String(contentsOf: url, encoding: .utf8) {
@@ -64,5 +65,55 @@ struct ContentView: View {
     private func shouldRender(_ tab: RepoTab) -> Bool {
         loadedTabIDs.contains(tab.id)
             || (!appModel.showNewTab && tab.id == appModel.selectedTabID)
+    }
+
+    private var topChromeBar: some View {
+        HStack(spacing: 0) {
+            Color.clear
+                .frame(width: ChromeLayout.leadingTrafficLightInset, height: ChromeLayout.tabRowHeight)
+
+            TabBarView()
+
+            Spacer(minLength: 0)
+
+            Button {
+                showFeatures = true
+            } label: {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .help("Features")
+            .padding(.trailing, 10)
+        }
+        .frame(height: ChromeLayout.tabRowHeight)
+        .background(ChromePalette.navigationBackground)
+    }
+}
+
+private struct WindowChromeConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            configure(window: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            configure(window: nsView.window)
+        }
+    }
+
+    private func configure(window: NSWindow?) {
+        guard let window else { return }
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.toolbar = nil
     }
 }

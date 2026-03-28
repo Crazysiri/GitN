@@ -199,14 +199,12 @@ body {
    Mirrors Swift's FileInspectorInlineHighlight .addition — systemGreen @0.30 alpha. */
 .gitn-inline-addition {
   background: rgba(46, 160, 67, 0.55);
-  border-radius: 2px;
 }
 
 /* Inline character-level highlight within a deletion line rendered in the content overlay.
    Mirrors Swift's FileInspectorInlineHighlight .deletion — systemRed @0.28 alpha. */
 .gitn-inline-deletion {
-  background: rgba(255, 80, 70, 0.42);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .gitn-deletion-spacer {
@@ -218,8 +216,8 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  background: rgba(86, 27, 24, 0.92);
-  border-top: 1px solid rgba(248, 81, 73, 0.18);
+  background: rgba(10, 10, 11, 0.94);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
   color: inherit;
   font-size: var(--gitn-font-size);
   line-height: var(--gitn-line-height);
@@ -243,9 +241,35 @@ body {
   display: block;
   padding: 0;
   white-space: pre;
-  color: rgba(248, 81, 73, 0.98);
+  color: rgba(255, 255, 255, 0.78);
   user-select: text;
   -webkit-user-select: text;
   tab-size: var(--gitn-tab-size, 4);
   -moz-tab-size: var(--gitn-tab-size, 4);
+}
+
+body.theme-light .gitn-inline-deletion {
+  background: rgba(255, 146, 146, 0.52);
+}
+
+body.theme-light .gitn-deletion-content-block {
+  background: rgba(255, 205, 205, 0.5);
+  border-top: 1px solid rgba(204, 70, 70, 0.16);
+}
+
+body.theme-light .gitn-deletion-line-content {
+  color: rgba(38, 12, 12, 0.92);
+}
+
+body.theme-dark .gitn-inline-deletion {
+  background: rgba(255, 128, 128, 0.32);
+}
+
+body.theme-dark .gitn-deletion-content-block {
+  background: rgba(88, 34, 31, 0.52);
+  border-top: 1px solid rgba(255, 120, 120, 0.12);
+}
+
+body.theme-dark .gitn-deletion-line-content {
+  color: rgba(255, 244, 244, 0.92);
 }

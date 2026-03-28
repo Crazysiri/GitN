@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 enum AppTheme: String, CaseIterable {
     case dark, light, system
@@ -40,12 +41,20 @@ final class ThemeManager {
         }
     }
 
+    var preferredColorScheme: ColorScheme? {
+        switch currentTheme {
+        case .dark: .dark
+        case .light: .light
+        case .system: nil
+        }
+    }
+
     init() {
         if let saved = UserDefaults.standard.string(forKey: Self.key),
            let theme = AppTheme(rawValue: saved) {
             currentTheme = theme
         } else {
-            currentTheme = .dark
+            currentTheme = .system
         }
     }
 
@@ -55,8 +64,8 @@ final class ThemeManager {
 
     /// Apply saved theme before any window is created (call from AppDelegate).
     static func applyInitialTheme() {
-        let rawValue = UserDefaults.standard.string(forKey: key) ?? AppTheme.dark.rawValue
-        let theme = AppTheme(rawValue: rawValue) ?? .dark
+        let rawValue = UserDefaults.standard.string(forKey: key) ?? AppTheme.system.rawValue
+        let theme = AppTheme(rawValue: rawValue) ?? .system
         NSApp.appearance = theme.nsAppearance
     }
 }

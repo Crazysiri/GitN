@@ -1,12 +1,6 @@
 import SwiftUI
 import WebKit
 
-private enum MonacoPayloadDebugLog {
-    static func emit(_ message: @autoclosure () -> String) {
-        print("[MonacoPayload] \(message())")
-    }
-}
-
 struct MonacoPreviewPayload: Encodable, Equatable {
     let path: String
     let language: String
@@ -243,14 +237,6 @@ extension MonacoInspectorView {
 
             guard data != lastPayloadData else { return }
             lastPayloadData = data
-            if payload.mode == "diff", let item = payload.items.first {
-                MonacoPayloadDebugLog.emit(
-                    "send path=\(item.path) originalLines=\(item.originalText.components(separatedBy: "\n").count) modifiedLines=\(item.modifiedText.components(separatedBy: "\n").count) originalBytes=\(item.originalText.utf8.count) modifiedBytes=\(item.modifiedText.utf8.count) editable=\(item.isEditable)"
-                )
-                MonacoPayloadDebugLog.emit(
-                    "preview original=\(item.originalText.prefix(120).replacingOccurrences(of: "\n", with: "\\n")) | modified=\(item.modifiedText.prefix(120).replacingOccurrences(of: "\n", with: "\\n"))"
-                )
-            }
             let encodedPayload = data.base64EncodedString()
             let script = "window.gitnMonaco && window.gitnMonaco.loadPayload('\(encodedPayload)');"
             webView.evaluateJavaScript(script, completionHandler: nil)

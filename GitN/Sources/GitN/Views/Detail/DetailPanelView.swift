@@ -274,9 +274,11 @@ struct DetailPanelView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     // Title field with char count
                     HStack(spacing: 0) {
-                        TextField("Title", text: $editedTitle)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11, weight: .semibold))
+                        CommitTitleField(
+                            text: $editedTitle,
+                            placeholder: "Title",
+                            font: .systemFont(ofSize: 11, weight: .semibold)
+                        )
                             .padding(.horizontal, 6)
                             .padding(.vertical, 4)
 
@@ -285,6 +287,7 @@ struct DetailPanelView: View {
                             .foregroundStyle(editedTitle.count > 72 ? .red : .secondary)
                             .padding(.trailing, 6)
                     }
+                    .frame(height: 24)
                     .background(Color(.textBackgroundColor).opacity(0.5))
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
@@ -292,18 +295,13 @@ struct DetailPanelView: View {
                     )
 
                     // Description field
-                    CommitMessageEditor(
+                    commitDescriptionField(
                         text: Binding(
                             get: { editedDescription },
                             set: { editedDescription = $0 }
                         ),
-                        placeholder: "Description (optional)"
-                    )
-                    .frame(minHeight: 80, maxHeight: .infinity)
-                    .background(Color(.textBackgroundColor).opacity(0.5))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+                        placeholder: "Description (optional)",
+                        cornerRadius: 4
                     )
 
                     // Update / Cancel buttons
@@ -1554,12 +1552,14 @@ struct DetailPanelView: View {
 
             // Summary field with char count
             HStack(spacing: 0) {
-                TextField("Summary", text: Binding(
-                    get: { viewModel.commitSummary },
-                    set: { viewModel.commitSummary = $0 }
-                ))
-                .textFieldStyle(.plain)
-                .font(.system(size: 11))
+                CommitTitleField(
+                    text: Binding(
+                        get: { viewModel.commitSummary },
+                        set: { viewModel.commitSummary = $0 }
+                    ),
+                    placeholder: "Summary",
+                    font: .systemFont(ofSize: 11)
+                )
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
 
@@ -1568,6 +1568,7 @@ struct DetailPanelView: View {
                     .foregroundStyle(viewModel.commitSummary.count > 72 ? .red : .secondary)
                     .padding(.trailing, 6)
             }
+            .frame(height: 24)
             .background(Color(.textBackgroundColor).opacity(0.5))
             .overlay(
                 RoundedRectangle(cornerRadius: 3)
@@ -1576,18 +1577,13 @@ struct DetailPanelView: View {
             .padding(.horizontal, 8)
 
             // Description field
-            CommitMessageEditor(
+            commitDescriptionField(
                 text: Binding(
                     get: { viewModel.commitDescription },
                     set: { viewModel.commitDescription = $0 }
                 ),
-                placeholder: "Description"
-            )
-            .frame(minHeight: 80, maxHeight: .infinity)
-            .background(Color(.textBackgroundColor).opacity(0.5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+                placeholder: "Description",
+                cornerRadius: 3
             )
             .padding(.horizontal, 8)
             .padding(.top, 4)
@@ -1623,6 +1619,26 @@ struct DetailPanelView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func commitDescriptionField(text: Binding<String>, placeholder: String, cornerRadius: CGFloat) -> some View {
+        CommitMessageEditor(text: text)
+            .frame(minHeight: 80, maxHeight: .infinity)
+            .background(Color(.textBackgroundColor).opacity(0.5))
+            .overlay(alignment: .topLeading) {
+                if text.wrappedValue.isEmpty {
+                    Text(placeholder)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, CommitMessageEditor.horizontalInset)
+                        .padding(.top, CommitMessageEditor.verticalInset + 1)
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+            )
     }
 
     // MARK: - Conflict Panel (Rebase / Merge / Stash)
@@ -1943,11 +1959,13 @@ struct DetailPanelView: View {
 
     @ViewBuilder
     private func fileListContainer<Content: View>(maxHeight: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+        let shape = FileListContainerShape()
         let base = content()
             .frame(maxHeight: maxHeight)
+            .clipShape(shape)
             .contentShape(Rectangle())
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
+                shape
                     .inset(by: 1)
                     .stroke(
                         focusedTarget == .fileList
@@ -2074,11 +2092,6 @@ struct DetailPanelView: View {
 
     private func handleFileListSelectionChange(_ rowID: String?, with proxy: ScrollViewProxy) {
         guard !isResizingPane else { return }
-        if focusedTarget != .fileList {
-            DispatchQueue.main.async {
-                focusedTarget = .fileList
-            }
-        }
         if suppressNextFileListAutoScroll {
             suppressNextFileListAutoScroll = false
             return
@@ -2141,6 +2154,65 @@ struct DetailPanelView: View {
         let parts = dateStr.split(separator: " ")
         guard parts.count >= 2 else { return dateStr }
         return "\(parts[0]) \(parts[1])"
+    }
+}
+
+private struct FileListContainerShape: InsettableShape {
+    private let topLeadingRadius: CGFloat = 6
+    private let topTrailingRadius: CGFloat = 6
+    private let bottomLeadingRadius: CGFloat = 6
+    private let bottomTrailingRadius: CGFloat = 16
+    private var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let rect = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        return Path { path in
+            let tl = min(min(topLeadingRadius, rect.width / 2), rect.height / 2)
+            let tr = min(min(topTrailingRadius, rect.width / 2), rect.height / 2)
+            let bl = min(min(bottomLeadingRadius, rect.width / 2), rect.height / 2)
+            let br = min(min(bottomTrailingRadius, rect.width / 2), rect.height / 2)
+
+            path.move(to: CGPoint(x: rect.minX + tl, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX - tr, y: rect.minY))
+            path.addArc(
+                center: CGPoint(x: rect.maxX - tr, y: rect.minY + tr),
+                radius: tr,
+                startAngle: .degrees(-90),
+                endAngle: .degrees(0),
+                clockwise: false
+            )
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - br))
+            path.addArc(
+                center: CGPoint(x: rect.maxX - br, y: rect.maxY - br),
+                radius: br,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+            path.addLine(to: CGPoint(x: rect.minX + bl, y: rect.maxY))
+            path.addArc(
+                center: CGPoint(x: rect.minX + bl, y: rect.maxY - bl),
+                radius: bl,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + tl))
+            path.addArc(
+                center: CGPoint(x: rect.minX + tl, y: rect.minY + tl),
+                radius: tl,
+                startAngle: .degrees(180),
+                endAngle: .degrees(270),
+                clockwise: false
+            )
+            path.closeSubpath()
+        }
+    }
+
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
     }
 }
 
@@ -2443,8 +2515,10 @@ struct StagingFileRow: View, Equatable {
 // MARK: - Commit Message Editor (NSTextView wrapper for reliable keyboard focus)
 
 struct CommitMessageEditor: NSViewRepresentable {
+    static let horizontalInset: CGFloat = 4
+    static let verticalInset: CGFloat = 4
+
     @Binding var text: String
-    var placeholder: String
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = ActivatingTextView()
@@ -2458,7 +2532,8 @@ struct CommitMessageEditor: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
-        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.textContainerInset = NSSize(width: Self.horizontalInset, height: Self.verticalInset)
+        textView.textContainer?.lineFragmentPadding = 0
         textView.delegate = context.coordinator
 
         textView.autoresizingMask = [.width, .height]
@@ -2481,7 +2556,6 @@ struct CommitMessageEditor: NSViewRepresentable {
         if textView.string != text {
             textView.string = text
         }
-        context.coordinator.updatePlaceholder(textView: textView, text: text, placeholder: placeholder)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -2490,7 +2564,6 @@ struct CommitMessageEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CommitMessageEditor
-        private var placeholderLayer: CATextLayer?
 
         init(_ parent: CommitMessageEditor) {
             self.parent = parent
@@ -2499,27 +2572,59 @@ struct CommitMessageEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
-            updatePlaceholder(textView: textView, text: textView.string, placeholder: parent.placeholder)
+        }
+    }
+}
+
+struct CommitTitleField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let font: NSFont
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = ActivatingTextField(string: text)
+        textField.delegate = context.coordinator
+        textField.placeholderString = placeholder
+        textField.font = font
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.isEditable = true
+        textField.isSelectable = true
+        textField.drawsBackground = false
+        textField.focusRingType = .none
+        textField.lineBreakMode = .byClipping
+        textField.usesSingleLineMode = true
+        textField.cell?.wraps = false
+        textField.cell?.isScrollable = true
+        return textField
+    }
+
+    func updateNSView(_ textField: NSTextField, context: Context) {
+        if textField.stringValue != text {
+            textField.stringValue = text
+        }
+        if textField.placeholderString != placeholder {
+            textField.placeholderString = placeholder
+        }
+        if textField.font != font {
+            textField.font = font
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: CommitTitleField
+
+        init(_ parent: CommitTitleField) {
+            self.parent = parent
         }
 
-        func updatePlaceholder(textView: NSTextView, text: String, placeholder: String) {
-            if text.isEmpty {
-                if placeholderLayer == nil {
-                    let layer = CATextLayer()
-                    layer.string = placeholder
-                    layer.font = NSFont.systemFont(ofSize: 11)
-                    layer.fontSize = 11
-                    layer.foregroundColor = NSColor.tertiaryLabelColor.cgColor
-                    layer.contentsScale = textView.window?.backingScaleFactor ?? 2.0
-                    placeholderLayer = layer
-                }
-                if let layer = placeholderLayer, layer.superlayer == nil {
-                    textView.layer?.addSublayer(layer)
-                    layer.frame = CGRect(x: 5, y: 0, width: textView.bounds.width - 10, height: 16)
-                }
-            } else {
-                placeholderLayer?.removeFromSuperlayer()
-            }
+        func controlTextDidChange(_ notification: Notification) {
+            guard let textField = notification.object as? NSTextField else { return }
+            parent.text = textField.stringValue
         }
     }
 }
@@ -2527,6 +2632,18 @@ struct CommitMessageEditor: NSViewRepresentable {
 /// NSTextView subclass that forces app activation on mouseDown,
 /// ensuring keyboard events go to this window immediately.
 final class ActivatingTextView: NSTextView {
+    override func mouseDown(with event: NSEvent) {
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        super.mouseDown(with: event)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
+final class ActivatingTextField: NSTextField {
     override func mouseDown(with event: NSEvent) {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)

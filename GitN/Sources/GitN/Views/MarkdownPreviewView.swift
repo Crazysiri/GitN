@@ -192,7 +192,7 @@ struct MarkdownPreviewView: View {
             }
         }
         .frame(minWidth: 680, minHeight: 500)
-        .preferredColorScheme(theme.isDark ? .dark : .light)
+        .preferredColorScheme(theme.preferredColorScheme)
     }
 
     private var toolbar: some View {
@@ -248,7 +248,7 @@ struct MarkdownInspectorContentView: View {
                 isEditing = false
             }
         }
-        .preferredColorScheme(theme.isDark ? .dark : .light)
+        .preferredColorScheme(theme.preferredColorScheme)
     }
 
     private var toolbar: some View {
