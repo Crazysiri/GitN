@@ -16,6 +16,12 @@ struct RepoContainerView: View {
     @State private var newBranchName = ""
     @State private var showIgnoreEditor = false
 
+    private enum TopBarLayout {
+        static let height: CGFloat = 38
+        static let horizontalPadding: CGFloat = 10
+        static let syncButtonWidth: CGFloat = 46
+    }
+
     init(tab: RepoTab, isActive: Bool) {
         self.tab = tab
         self.isActive = isActive
@@ -27,14 +33,19 @@ struct RepoContainerView: View {
             if viewModel.showConflictMergeView {
                 ConflictMergeView(viewModel: viewModel)
             } else {
-                HSplitView {
-                    SidebarView(viewModel: viewModel)
-                        .frame(minWidth: 180, idealWidth: sidebarWidth, maxWidth: 350)
+                VStack(spacing: 0) {
+                    unifiedTopBar
+                    Divider()
 
-                    centerPanel
+                    HSplitView {
+                        SidebarView(viewModel: viewModel)
+                            .frame(minWidth: 180, idealWidth: sidebarWidth, maxWidth: 350)
 
-                    DetailPanelView(viewModel: viewModel)
-                        .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 800)
+                        centerPanel
+
+                        DetailPanelView(viewModel: viewModel)
+                            .frame(minWidth: 260, idealWidth: detailWidth, maxWidth: 800)
+                    }
                 }
             }
 
@@ -172,9 +183,6 @@ struct RepoContainerView: View {
     private var centerPanel: some View {
         ZStack {
             VStack(spacing: 0) {
-                repoToolbar
-                Divider()
-
                 if viewModel.showHostKeyPrompt {
                     hostKeyBanner
                     Divider()
@@ -233,6 +241,53 @@ struct RepoContainerView: View {
         }
     }
 
+    private var unifiedTopBar: some View {
+        HStack(spacing: 12) {
+            repoSummary
+
+            Divider()
+                .frame(height: 18)
+
+            repoToolbar
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, TopBarLayout.horizontalPadding)
+        .frame(height: TopBarLayout.height)
+        .background(Color(.controlBackgroundColor).opacity(0.58))
+    }
+
+    private var repoSummary: some View {
+        HStack(spacing: 8) {
+            Image(systemName: viewModel.isDetachedHead
+                  ? "point.topleft.filled.down.to.point.bottomright.curvepath"
+                  : "arrow.triangle.branch")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(viewModel.isDetachedHead ? .orange : .blue)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(viewModel.repoName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+
+                if !viewModel.currentBranch.isEmpty {
+                    HStack(spacing: 4) {
+                        Text(viewModel.currentBranch)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+
+                        if viewModel.isDetachedHead {
+                            Text("detached")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 180, idealWidth: sidebarWidth, maxWidth: 350, alignment: .leading)
+    }
+
     // MARK: - Repo Toolbar (Pull / Push / Fetch / Stash / Pop)
 
     private var repoToolbar: some View {
@@ -282,11 +337,11 @@ struct RepoContainerView: View {
             Button(action: { viewModel.showTerminal.toggle() }) {
                 VStack(spacing: 1) {
                     Image(systemName: viewModel.showTerminal ? "terminal.fill" : "terminal")
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                     Text("Terminal")
-                        .font(.system(size: 9))
+                        .font(.system(size: 8))
                 }
-                .frame(width: 52, height: 34)
+                .frame(width: 52, height: TopBarLayout.height)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -297,9 +352,7 @@ struct RepoContainerView: View {
                 Task { await viewModel.refreshWithSync() }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color(.controlBackgroundColor).opacity(0.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Pull Toolbar Button (main button + dropdown triangle)
@@ -312,13 +365,13 @@ struct RepoContainerView: View {
             Button {
                 Task { await viewModel.performPull() }
             } label: {
-                VStack(spacing: 1) {
-                    Image(systemName: "arrow.down.to.line")
-                        .font(.system(size: 13))
-                    Text("Pull")
-                        .font(.system(size: 9))
-                }
-                .frame(width: 38, height: 34)
+                animatedTransferLabel(
+                    title: "Pull",
+                    systemImage: "arrow.down.to.line",
+                    direction: .down,
+                    isActive: viewModel.activeToolbarOperation == .pull
+                )
+                .frame(width: TopBarLayout.syncButtonWidth, height: TopBarLayout.height)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -354,12 +407,12 @@ struct RepoContainerView: View {
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 4, weight: .semibold))
-                    .frame(width: 10, height: 34)
+                    .frame(width: 10, height: TopBarLayout.height)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .frame(width: 12, height: 34)
+            .frame(width: 12, height: TopBarLayout.height)
             .disabled(viewModel.operationInProgress)
         }
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
@@ -382,14 +435,9 @@ struct RepoContainerView: View {
         Button {
             Task { await viewModel.performFetch() }
         } label: {
-            VStack(spacing: 1) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 13))
-                Text("Fetch")
-                    .font(.system(size: 9))
-            }
-            .frame(width: 38, height: 34)
-            .contentShape(Rectangle())
+            animatedFetchLabel(isActive: viewModel.activeToolbarOperation == .fetch)
+                .frame(width: TopBarLayout.syncButtonWidth, height: TopBarLayout.height)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(viewModel.operationInProgress)
@@ -404,13 +452,13 @@ struct RepoContainerView: View {
             Button {
                 Task { await viewModel.performPush() }
             } label: {
-                VStack(spacing: 1) {
-                    Image(systemName: "arrow.up.to.line")
-                        .font(.system(size: 13))
-                    Text("Push")
-                        .font(.system(size: 9))
-                }
-                .frame(width: 38, height: 34)
+                animatedTransferLabel(
+                    title: "Push",
+                    systemImage: "arrow.up.to.line",
+                    direction: .up,
+                    isActive: viewModel.activeToolbarOperation == .push
+                )
+                .frame(width: TopBarLayout.syncButtonWidth, height: TopBarLayout.height)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -426,12 +474,12 @@ struct RepoContainerView: View {
             } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 4, weight: .semibold))
-                    .frame(width: 10, height: 34)
+                    .frame(width: 10, height: TopBarLayout.height)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .frame(width: 12, height: 34)
+            .frame(width: 12, height: TopBarLayout.height)
             .disabled(viewModel.operationInProgress)
         }
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
@@ -452,16 +500,39 @@ struct RepoContainerView: View {
         Button(action: action) {
             VStack(spacing: 1) {
                 Image(systemName: icon)
-                    .font(.system(size: 13))
+                    .font(.system(size: 12))
                 Text(label)
-                    .font(.system(size: 9))
+                    .font(.system(size: 8))
             }
-            .frame(width: 44, height: 34)
+            .frame(width: 44, height: TopBarLayout.height)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
         .foregroundStyle(disabled ? .tertiary : .secondary)
+    }
+
+    fileprivate enum TransferDirection {
+        case up
+        case down
+    }
+
+    private func animatedTransferLabel(
+        title: String,
+        systemImage: String,
+        direction: TransferDirection,
+        isActive: Bool
+    ) -> some View {
+        ToolbarTransferAnimationView(
+            title: title,
+            systemImage: systemImage,
+            direction: direction,
+            isActive: isActive
+        )
+    }
+
+    private func animatedFetchLabel(isActive: Bool) -> some View {
+        ToolbarFetchAnimationView(isActive: isActive)
     }
 
     // MARK: - More Menu
@@ -478,8 +549,8 @@ struct RepoContainerView: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .frame(width: 28, height: 34)
+                    .font(.system(size: 12))
+                    .frame(width: 28, height: TopBarLayout.height)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
@@ -635,4 +706,132 @@ struct RepoContainerView: View {
         }
         .padding(20)
     }
+}
+
+private struct ToolbarTransferAnimationView: View {
+    let title: String
+    let systemImage: String
+    let direction: RepoContainerView.TransferDirection
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: isActive ? 1.0 / 30.0 : 0.5, paused: !isActive)) { context in
+            let progress = animationProgress(at: context.date)
+            let shimmer = shimmerProgress(at: context.date)
+
+            let ghostTravel: CGFloat = direction == .down ? 5 : -5
+            let drift: CGFloat = direction == .down ? 1.2 : -1.2
+            let ghostOpacity = isActive ? max(0, sin(progress * .pi)) * 0.28 : 0
+            let iconOffset = isActive ? drift * CGFloat(sin(progress * .pi * 2)) : 0
+            let iconScale = isActive ? 1 + 0.025 * sin(progress * .pi * 2) : 1
+            let glowOpacity = isActive ? 0.18 + 0.08 * sin(progress * .pi * 2) : 0
+
+            toolbarAnimatedContainer(
+                shimmerProgress: shimmer,
+                glowOpacity: glowOpacity,
+                icon: {
+                    ZStack {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .offset(y: ghostTravel * CGFloat(progress))
+                            .opacity(ghostOpacity)
+                            .blur(radius: 0.2)
+
+                        Image(systemName: systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .offset(y: iconOffset)
+                            .scaleEffect(iconScale)
+                    }
+                }
+            ) {
+                Text(title)
+                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+            }
+        }
+    }
+}
+
+private struct ToolbarFetchAnimationView: View {
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: isActive ? 1.0 / 30.0 : 0.5, paused: !isActive)) { context in
+            let progress = animationProgress(at: context.date)
+            let rotation = isActive ? progress * 360 : 0
+            let iconScale = isActive ? 1 + 0.025 * sin(progress * .pi * 2) : 1
+            let glowOpacity = isActive ? 0.18 + 0.08 * sin(progress * .pi * 2) : 0
+
+            toolbarAnimatedContainer(
+                shimmerProgress: 0,
+                glowOpacity: glowOpacity,
+                showsShimmer: false,
+                icon: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .rotationEffect(.degrees(rotation))
+                        .scaleEffect(iconScale)
+                        .drawingGroup()
+                }
+            ) {
+                Text("Fetch")
+                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+            }
+        }
+    }
+}
+
+@ViewBuilder
+private func toolbarAnimatedContainer<Icon: View, Label: View>(
+    shimmerProgress: Double,
+    glowOpacity: Double,
+    showsShimmer: Bool = true,
+    @ViewBuilder icon: () -> Icon,
+    @ViewBuilder label: () -> Label
+) -> some View {
+    VStack(spacing: 1) {
+        icon()
+            .frame(height: 14)
+
+        label()
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .foregroundStyle(
+        glowOpacity > 0
+            ? AnyShapeStyle(Color.accentColor.opacity(0.88))
+            : AnyShapeStyle(Color.secondary)
+    )
+    .overlay {
+        if showsShimmer {
+            LinearGradient(
+                colors: [
+                    .clear,
+                    Color.white.opacity(glowOpacity > 0 ? 0.14 + glowOpacity * 0.22 : 0),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 18)
+            .offset(x: (shimmerProgress - 0.5) * 24)
+            .blendMode(.plusLighter)
+            .mask {
+                VStack(spacing: 1) {
+                    icon()
+                        .frame(height: 14)
+                    label()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+private func animationProgress(at date: Date) -> Double {
+    let cycle = 1.45
+    return date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle) / cycle
+}
+
+private func shimmerProgress(at date: Date) -> Double {
+    let cycle = 1.9
+    return date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle) / cycle
 }

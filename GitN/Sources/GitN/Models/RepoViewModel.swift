@@ -2579,6 +2579,14 @@ final class RepoViewModel {
     var operationInProgress = false
     var operationError: String?
 
+    enum ToolbarOperation {
+        case fetch
+        case pull
+        case push
+    }
+
+    var activeToolbarOperation: ToolbarOperation?
+
     /// The default pull mode persisted across sessions.
     /// These are the selectable modes shown in the Pull dropdown menu.
     enum PullMode: String, CaseIterable, Identifiable {
@@ -2609,7 +2617,7 @@ final class RepoViewModel {
     var showForcePushConfirm = false
 
     func performFetch() async {
-        await performRemoteOperation { try await $0.git.fetch() }
+        await performRemoteOperation(toolbarOperation: .fetch) { try await $0.git.fetch() }
     }
 
     /// Execute pull using the current default mode.
@@ -2618,8 +2626,15 @@ final class RepoViewModel {
     }
 
     func performPull(mode: PullMode) async {
+        activeToolbarOperation = .pull
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .pull {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             switch mode {
             case .pull:
@@ -2645,12 +2660,18 @@ final class RepoViewModel {
                 showToast(title: "Pull Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     func performForcePull() async {
+        activeToolbarOperation = .pull
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .pull {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await git.pullForce()
             await loadAll()
@@ -2669,7 +2690,6 @@ final class RepoViewModel {
                 showToast(title: "Pull Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     /// Execute normal push.
@@ -2681,8 +2701,15 @@ final class RepoViewModel {
             showPushUpstreamPrompt = true
             return
         }
+        activeToolbarOperation = .push
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .push {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await git.push()
             await loadAll()
@@ -2701,12 +2728,18 @@ final class RepoViewModel {
                 showToast(title: "Push Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     func performForcePush() async {
+        activeToolbarOperation = .push
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .push {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await git.pushForce()
             await loadAll()
@@ -2725,13 +2758,19 @@ final class RepoViewModel {
                 showToast(title: "Push Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     func performPushWithUpstream(remote: String, branch: String) async {
         showPushUpstreamPrompt = false
+        activeToolbarOperation = .push
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .push {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await git.push(remoteName: remote, branchName: branch, setUpstream: true)
             await loadAll()
@@ -2750,7 +2789,6 @@ final class RepoViewModel {
                 showToast(title: "Push Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     func cancelPushUpstreamPrompt() {
@@ -2762,8 +2800,15 @@ final class RepoViewModel {
     }
 
     func performStashPop() async {
+        activeToolbarOperation = .pull
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == .pull {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await git.stashPop()
             await loadAll()
@@ -2850,7 +2895,6 @@ final class RepoViewModel {
             try await git.fetchBranchFastForward(remoteName: remoteName, branchName: branch.name)
             await loadAll()
             showToast(title: "Pull Complete", detail: "\(branch.name) updated (fast-forward)", style: .success)
-            operationInProgress = false
             return
         } catch {
             // Fast-forward not possible, fall back to stash/checkout/pull flow
@@ -2890,7 +2934,6 @@ final class RepoViewModel {
             }
             showToast(title: "Pull Failed", detail: "Pull \(branch.name) failed: \(error.localizedDescription)", style: .error)
         }
-        operationInProgress = false
     }
 
     func performCreateBranch(name: String) async {
@@ -3198,9 +3241,19 @@ final class RepoViewModel {
         }
     }
 
-    private func performRemoteOperation(_ op: @escaping (RepoViewModel) async throws -> Void) async {
+    private func performRemoteOperation(
+        toolbarOperation: ToolbarOperation? = nil,
+        _ op: @escaping (RepoViewModel) async throws -> Void
+    ) async {
+        activeToolbarOperation = toolbarOperation
         operationInProgress = true
         operationError = nil
+        defer {
+            operationInProgress = false
+            if activeToolbarOperation == toolbarOperation {
+                activeToolbarOperation = nil
+            }
+        }
         do {
             try await op(self)
             await loadAll()
@@ -3218,7 +3271,6 @@ final class RepoViewModel {
                 showToast(title: "Operation Failed", detail: msg, style: .error)
             }
         }
-        operationInProgress = false
     }
 
     private func extractHostFromError(_ msg: String) -> String {

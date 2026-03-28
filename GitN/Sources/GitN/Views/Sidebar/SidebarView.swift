@@ -46,8 +46,6 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            repoHeader
-            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     localBranchesSection
@@ -450,37 +448,6 @@ struct SidebarView: View {
             }
         }
         .padding(20)
-    }
-
-    // MARK: - Header
-
-    private var repoHeader: some View {
-        HStack {
-            Image(systemName: viewModel.isDetachedHead
-                  ? "point.topleft.filled.down.to.point.bottomright.curvepath"
-                  : "arrow.triangle.branch")
-                .foregroundStyle(viewModel.isDetachedHead ? .orange : .blue)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(viewModel.repoName)
-                    .font(.headline)
-                    .lineLimit(1)
-                if !viewModel.currentBranch.isEmpty {
-                    HStack(spacing: 4) {
-                        Text(viewModel.currentBranch)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if viewModel.isDetachedHead {
-                            Text("(detached)")
-                                .font(.caption2)
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                }
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 14)
     }
 
     // MARK: - Local Branches
