@@ -9,3 +9,4 @@
 - Default theme behavior should follow the macOS system appearance unless the user explicitly chooses a fixed light/dark mode.
 - Avoid adding new `isDark` branches for general SwiftUI surfaces when a system-driven color or dynamic palette can be used.
 - Keep tab width content-driven first, then compress only when horizontal space is insufficient.
+- Top chrome buttons and the primary action buttons on the New Tab page should have a visible hover state; keep that feedback consistent with the shared button/chrome language.

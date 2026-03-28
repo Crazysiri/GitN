@@ -10,6 +10,7 @@ struct ContentView: View {
     /// 已经加载过的 tab ID 集合（懒加载：点击才加载，加载后不销毁）
     @State private var loadedTabIDs: Set<UUID> = []
     @State private var showFeatures = false
+    @State private var isHoveringFeaturesButton = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -82,9 +83,23 @@ struct ContentView: View {
                 Image(systemName: "sparkles.rectangle.stack")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 24, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isHoveringFeaturesButton ? ChromePalette.chromeButtonHoverFill : ChromePalette.chromeButtonFill)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(
+                                isHoveringFeaturesButton ? ChromePalette.chromeButtonHoverBorder : ChromePalette.chromeButtonBorder,
+                                lineWidth: 1
+                            )
+                    )
             }
             .buttonStyle(.plain)
+            .frame(width: 34, height: 34)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { isHoveringFeaturesButton = $0 }
             .help("Features")
             .padding(.trailing, 10)
         }

@@ -117,6 +117,12 @@ final class AppModel {
         selectedTabID = nil
     }
 
+    func closeNewTabView() {
+        guard showNewTab else { return }
+        showNewTab = false
+        selectedTabID = tabs.first?.id
+    }
+
     func closeTab(_ id: UUID) {
         tabs.removeAll { $0.id == id }
         if selectedTabID == id {

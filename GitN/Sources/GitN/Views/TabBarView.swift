@@ -6,11 +6,13 @@ struct TabBarView: View {
     @Environment(AppModel.self) private var appModel
     @State private var windowWidth: CGFloat = 1100
     @State private var hostingWindow: NSWindow? = nil
+    @State private var isHoveringAddButton = false
 
     private enum Layout {
         static let barHeight: CGFloat = 47
         static let trailingControlsWidth: CGFloat = 30
         static let trailingGap: CGFloat = 10
+        static let addButtonSize = CGSize(width: 24, height: 24)
         static let minTabWidth: CGFloat = 110
         static let maxTabWidth: CGFloat = 200
         static let contentHorizontalPadding: CGFloat = 10
@@ -53,10 +55,23 @@ struct TabBarView: View {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: Layout.trailingControlsWidth, height: Layout.barHeight)
-                    .contentShape(Rectangle())
+                    .frame(width: Layout.addButtonSize.width, height: Layout.addButtonSize.height)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isHoveringAddButton ? ChromePalette.chromeButtonHoverFill : ChromePalette.chromeButtonFill)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(
+                                isHoveringAddButton ? ChromePalette.chromeButtonHoverBorder : ChromePalette.chromeButtonBorder,
+                                lineWidth: 1
+                            )
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
             .buttonStyle(.plain)
+            .frame(width: Layout.trailingControlsWidth, height: Layout.barHeight)
+            .onHover { isHoveringAddButton = $0 }
         }
         .frame(width: toolbarWidth, height: Layout.barHeight, alignment: .leading)
         .background(ChromePalette.navigationBackground)

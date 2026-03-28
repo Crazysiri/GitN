@@ -8,34 +8,58 @@ struct NewTabView: View {
         HStack(spacing: 0) {
             // 左侧：Repositories 区域
             VStack(alignment: .leading, spacing: 20) {
-                Text("Repositories")
-                    .font(.system(size: 32, weight: .bold))
-                    .padding(.top, 40)
-                    .padding(.leading, 40)
+                HStack(alignment: .top) {
+                    Text("Repositories")
+                        .font(.system(size: 32, weight: .bold))
+
+                    Spacer()
+
+                    if !appModel.tabs.isEmpty {
+                        Button {
+                            appModel.closeNewTabView()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24, height: 24)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(ChromePalette.chromeButtonFill)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(ChromePalette.chromeButtonBorder, lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help("Close")
+                    }
+                }
+                .padding(.top, 40)
+                .padding(.leading, 40)
+                .padding(.trailing, 40)
 
                 // Open, Clone 按钮
                 HStack(spacing: 16) {
                     Button(action: {
                         appModel.openRepository()
                     }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "folder")
-                            Text("Open")
-                        }
-                        .frame(width: 120, height: 36)
+                        NewTabActionButtonLabel(
+                            title: "Open",
+                            systemImage: "folder",
+                            role: .prominent
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(.plain)
 
                     Button(action: { showClone = true }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.to.line")
-                            Text("Clone")
-                        }
-                        .frame(width: 120, height: 36)
+                        NewTabActionButtonLabel(
+                            title: "Clone",
+                            systemImage: "arrow.down.to.line",
+                            role: .secondary
+                        )
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
+                    .buttonStyle(.plain)
                 }
                 .padding(.leading, 40)
                 .sheet(isPresented: $showClone) {
@@ -96,6 +120,66 @@ struct NewTabView: View {
             }
         } message: { pending in
             Text("\"\(pending.name)\" is not a Git repository. Would you like to initialize it with `git init`?")
+        }
+    }
+}
+
+private struct NewTabActionButtonLabel: View {
+    enum Role {
+        case prominent
+        case secondary
+    }
+
+    let title: String
+    let systemImage: String
+    let role: Role
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+            Text(title)
+        }
+        .font(.system(size: 14, weight: .semibold))
+        .foregroundStyle(foregroundColor)
+        .frame(width: 120, height: 36)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(backgroundColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(borderColor, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .onHover { isHovering = $0 }
+    }
+
+    private var foregroundColor: Color {
+        switch role {
+        case .prominent:
+            return .white
+        case .secondary:
+            return .primary
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch role {
+        case .prominent:
+            return isHovering ? Color.accentColor.opacity(0.88) : Color.accentColor
+        case .secondary:
+            return isHovering ? Color(.controlBackgroundColor) : Color(.windowBackgroundColor)
+        }
+    }
+
+    private var borderColor: Color {
+        switch role {
+        case .prominent:
+            return isHovering ? Color.accentColor.opacity(0.95) : Color.accentColor.opacity(0.82)
+        case .secondary:
+            return isHovering ? Color.primary.opacity(0.20) : Color.primary.opacity(0.12)
         }
     }
 }

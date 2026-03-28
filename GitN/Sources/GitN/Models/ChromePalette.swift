@@ -8,6 +8,10 @@ enum ChromePalette {
     static var tabHoverBackground: Color { Color(nsColor: tabHoverBackgroundNS) }
     static var toolbarHoverBackground: Color { tabHoverBackground }
     static var divider: Color { Color(nsColor: dividerNS) }
+    static var chromeButtonBorder: Color { Color(nsColor: chromeButtonBorderNS) }
+    static var chromeButtonFill: Color { Color(nsColor: chromeButtonFillNS) }
+    static var chromeButtonHoverBorder: Color { Color(nsColor: chromeButtonHoverBorderNS) }
+    static var chromeButtonHoverFill: Color { Color(nsColor: chromeButtonHoverFillNS) }
 
     private static var navigationBackgroundNS: NSColor {
         NSColor(name: nil) { appearance in
@@ -47,6 +51,50 @@ enum ChromePalette {
             switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
             case .aqua:
                 return NSColor.black.withAlphaComponent(0.08)
+            default:
+                return NSColor.white.withAlphaComponent(0.10)
+            }
+        }
+    }
+
+    private static var chromeButtonBorderNS: NSColor {
+        NSColor(name: nil) { appearance in
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return NSColor.black.withAlphaComponent(0.14)
+            default:
+                return NSColor.white.withAlphaComponent(0.18)
+            }
+        }
+    }
+
+    private static var chromeButtonFillNS: NSColor {
+        NSColor(name: nil) { appearance in
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return NSColor.white.withAlphaComponent(0.42)
+            default:
+                return NSColor.white.withAlphaComponent(0.05)
+            }
+        }
+    }
+
+    private static var chromeButtonHoverBorderNS: NSColor {
+        NSColor(name: nil) { appearance in
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return NSColor.black.withAlphaComponent(0.20)
+            default:
+                return NSColor.white.withAlphaComponent(0.28)
+            }
+        }
+    }
+
+    private static var chromeButtonHoverFillNS: NSColor {
+        NSColor(name: nil) { appearance in
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return NSColor.white.withAlphaComponent(0.68)
             default:
                 return NSColor.white.withAlphaComponent(0.10)
             }
