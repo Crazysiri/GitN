@@ -11,6 +11,117 @@ private final class SubmoduleCallbackData {
     var items: [(name: String, hash: String)] = []
 }
 
+    private final class DiffFileCollection {
+        struct Entry {
+            let deltaIndex: UInt32
+            let path: String
+            let oldPath: String?
+            let changeKind: DiffChangeKind
+            var additions: Int
+            var deletions: Int
+        }
+
+    private(set) var entries: [Entry] = []
+    private var currentEntryIndex: Int?
+
+        func beginFile(delta: UnsafePointer<git_diff_delta>) {
+            let newPath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
+            let oldPath: String?
+            if delta.pointee.status == GIT_DELTA_RENAMED {
+                let originalPath = delta.pointee.old_file.path.map(String.init(cString:)) ?? ""
+                oldPath = originalPath != newPath ? originalPath : nil
+            } else {
+                oldPath = nil
+            }
+            let changeKind = Self.changeKind(for: delta.pointee.status)
+
+            entries.append(
+                Entry(
+                    deltaIndex: UInt32(entries.count),
+                    path: newPath,
+                    oldPath: oldPath,
+                    changeKind: changeKind,
+                    additions: 0,
+                    deletions: 0
+                )
+            )
+            currentEntryIndex = entries.count - 1
+        }
+
+    func recordLine(_ line: UnsafePointer<git_diff_line>) {
+        guard let currentEntryIndex else { return }
+        switch line.pointee.origin {
+        case 43:
+            entries[currentEntryIndex].additions += 1
+        case 45:
+            entries[currentEntryIndex].deletions += 1
+        default:
+            break
+        }
+    }
+
+    var diffFiles: [DiffFile] {
+        entries.map { entry in
+            DiffFile(
+                additions: entry.additions,
+                deletions: entry.deletions,
+                path: entry.path,
+                oldPath: entry.oldPath,
+                changeKind: entry.changeKind
+            )
+        }
+    }
+
+        var deltaIndexByPath: [String: UInt32] {
+            Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0.deltaIndex) })
+        }
+
+        private static func changeKind(for status: git_delta_t) -> DiffChangeKind {
+            switch status {
+            case GIT_DELTA_ADDED:
+                return .added
+            case GIT_DELTA_DELETED:
+                return .deleted
+            case GIT_DELTA_RENAMED:
+                return .renamed
+            case GIT_DELTA_COPIED:
+                return .copied
+            case GIT_DELTA_UNTRACKED:
+                return .untracked
+            case GIT_DELTA_MODIFIED:
+                return .modified
+            default:
+                return .unknown
+            }
+        }
+    }
+
+private final class CommittedDiffSession {
+    let hash: String
+    let diff: OpaquePointer
+    var files: [DiffFile]
+    var hasComputedLineStats: Bool
+    let deltaIndexByPath: [String: UInt32]
+
+    init(
+        hash: String,
+        diff: OpaquePointer,
+        files: [DiffFile],
+        hasComputedLineStats: Bool,
+        deltaIndexByPath: [String: UInt32]
+    ) {
+        self.hash = hash
+        self.diff = diff
+        self.files = files
+        self.hasComputedLineStats = hasComputedLineStats
+        self.deltaIndexByPath = deltaIndexByPath
+    }
+
+    deinit {
+        git_diff_free(diff)
+    }
+}
+
 // MARK: - Error
 
 enum GitError: LocalizedError {
@@ -232,6 +343,7 @@ actor GitService {
     let repoPath: String
     private let cli: GitCLI
     private var repo: OpaquePointer?
+    private var committedDiffSession: CommittedDiffSession?
 
     init(repoPath: String) {
         self.repoPath = repoPath
@@ -244,6 +356,7 @@ actor GitService {
     }
 
     deinit {
+        committedDiffSession = nil
         if let repo { git_repository_free(repo) }
         git_libgit2_shutdown()
     }
@@ -943,6 +1056,76 @@ actor GitService {
 
     // MARK: - Diff Helpers
 
+    private func committedDiffSession(for hash: String) -> CommittedDiffSession? {
+        if let committedDiffSession, committedDiffSession.hash == hash {
+            return committedDiffSession
+        }
+
+        guard let diff = treeDiff(hash: hash) else {
+            committedDiffSession = nil
+            return nil
+        }
+
+        let metadata = diffMetadata(from: diff)
+        let session = CommittedDiffSession(
+            hash: hash,
+            diff: diff,
+            files: metadata.files,
+            hasComputedLineStats: false,
+            deltaIndexByPath: metadata.deltaIndexByPath
+        )
+        committedDiffSession = session
+        return session
+    }
+
+    private func diffMetadata(from diff: OpaquePointer) -> (files: [DiffFile], deltaIndexByPath: [String: UInt32]) {
+        var files: [DiffFile] = []
+        var result: [String: UInt32] = [:]
+        let numDeltas = git_diff_num_deltas(diff)
+        for i in 0..<numDeltas {
+            guard let delta = git_diff_get_delta(diff, i) else { continue }
+            let path = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
+            let oldPath: String?
+            if delta.pointee.status == GIT_DELTA_RENAMED {
+                let originalPath = delta.pointee.old_file.path.map(String.init(cString:)) ?? ""
+                oldPath = originalPath != path ? originalPath : nil
+            } else {
+                oldPath = nil
+            }
+            let changeKind: DiffChangeKind
+            switch delta.pointee.status {
+            case GIT_DELTA_ADDED:
+                changeKind = .added
+            case GIT_DELTA_DELETED:
+                changeKind = .deleted
+            case GIT_DELTA_RENAMED:
+                changeKind = .renamed
+            case GIT_DELTA_COPIED:
+                changeKind = .copied
+            case GIT_DELTA_UNTRACKED:
+                changeKind = .untracked
+            case GIT_DELTA_MODIFIED:
+                changeKind = .modified
+            default:
+                changeKind = .unknown
+            }
+            files.append(DiffFile(additions: 0, deletions: 0, path: path, oldPath: oldPath, changeKind: changeKind))
+            result[path] = UInt32(i)
+        }
+        return (files, result)
+    }
+
+    private func patchText(from diff: OpaquePointer, deltaIndex: Int) -> String {
+        var patch: OpaquePointer?
+        guard git_patch_from_diff(&patch, diff, deltaIndex) == 0, let patch else { return "" }
+        defer { git_patch_free(patch) }
+
+        var buf = git_buf()
+        guard git_patch_to_buf(&buf, patch) == 0 else { return "" }
+        defer { git_buf_dispose(&buf) }
+        return String(cString: buf.ptr)
+    }
+
     private func treeDiff(hash: String) -> OpaquePointer? {
         guard let repo else { return nil }
         var oid = git_oid()
@@ -956,8 +1139,9 @@ actor GitService {
         guard git_commit_tree(&tree, commit) == 0, let tree else { return nil }
         defer { git_tree_free(tree) }
 
+        let hasParentCommit = git_commit_parentcount(commit) > 0
         var parentTree: OpaquePointer?
-        if git_commit_parentcount(commit) > 0 {
+        if hasParentCommit {
             var parent: OpaquePointer?
             if git_commit_parent(&parent, commit, 0) == 0, let parent {
                 defer { git_commit_free(parent) }
@@ -969,10 +1153,12 @@ actor GitService {
         var diff: OpaquePointer?
         guard git_diff_tree_to_tree(&diff, repo, parentTree, tree, nil) == 0, let diff else { return nil }
 
-        var findOpts = git_diff_find_options()
-        git_diff_find_options_init(&findOpts, UInt32(GIT_DIFF_FIND_OPTIONS_VERSION))
-        findOpts.flags = GIT_DIFF_FIND_RENAMES.rawValue
-        git_diff_find_similar(diff, &findOpts)
+        if hasParentCommit {
+            var findOpts = git_diff_find_options()
+            git_diff_find_options_init(&findOpts, UInt32(GIT_DIFF_FIND_OPTIONS_VERSION))
+            findOpts.flags = GIT_DIFF_FIND_RENAMES.rawValue
+            git_diff_find_similar(diff, &findOpts)
+        }
 
         return diff
     }
@@ -980,6 +1166,13 @@ actor GitService {
     // MARK: - Diff
 
     func diffForCommit(hash: String) throws -> String {
+        if let committedDiffSession = committedDiffSession, committedDiffSession.hash == hash {
+            var buf = git_buf()
+            guard git_diff_to_buf(&buf, committedDiffSession.diff, GIT_DIFF_FORMAT_PATCH) == 0 else { return "" }
+            defer { git_buf_dispose(&buf) }
+            return String(cString: buf.ptr)
+        }
+
         guard let diff = treeDiff(hash: hash) else { return "" }
         defer { git_diff_free(diff) }
 
@@ -1031,43 +1224,17 @@ actor GitService {
         return String(cString: buf.ptr)
     }
 
+    func committedDiffPreview(hash: String) throws -> [DiffFile] {
+        committedDiffSession(for: hash)?.files ?? []
+    }
+
     func diffDetail(hash: String) throws -> [DiffFile] {
-        guard let diff = treeDiff(hash: hash) else { return [] }
-        defer { git_diff_free(diff) }
-
-        var result: [DiffFile] = []
-        let numDeltas = git_diff_num_deltas(diff)
-
-        for i in 0..<numDeltas {
-            var patch: OpaquePointer?
-            guard git_patch_from_diff(&patch, diff, i) == 0, let patch else { continue }
-            defer { git_patch_free(patch) }
-
-            var adds = 0, dels = 0
-            let numHunks = git_patch_num_hunks(patch)
-            for h in 0..<numHunks {
-                let numLines = git_patch_num_lines_in_hunk(patch, h)
-                for l in 0..<Int(numLines) {
-                    var line: UnsafePointer<git_diff_line>?
-                    if git_patch_get_line_in_hunk(&line, patch, h, l) == 0, let line {
-                        if line.pointee.origin == 43 { adds += 1 }      // '+'
-                        else if line.pointee.origin == 45 { dels += 1 } // '-'
-                    }
-                }
-            }
-
-            guard let delta = git_patch_get_delta(patch) else { continue }
-            let newPath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
-            let oldPath: String?
-            if delta.pointee.status == GIT_DELTA_RENAMED {
-                let op = delta.pointee.old_file.path.map(String.init(cString:)) ?? ""
-                oldPath = op != newPath ? op : nil
-            } else {
-                oldPath = nil
-            }
-            result.append(DiffFile(additions: adds, deletions: dels, path: newPath, oldPath: oldPath))
+        guard let committedDiffSession = committedDiffSession(for: hash) else { return [] }
+        if !committedDiffSession.hasComputedLineStats {
+            committedDiffSession.files = diffFilesFromDiff(committedDiffSession.diff)
+            committedDiffSession.hasComputedLineStats = true
         }
-        return result
+        return committedDiffSession.files
     }
 
     func uncommittedDiffFiles() throws -> [DiffFile] {
@@ -1117,6 +1284,41 @@ actor GitService {
     }
 
     private func diffFilesFromDiff(_ diff: OpaquePointer) -> [DiffFile] {
+        if let collected = collectDiffFiles(from: diff) {
+            return collected.diffFiles
+        }
+
+        return slowDiffFilesFromDiff(diff)
+    }
+
+    private func collectDiffFiles(from diff: OpaquePointer) -> DiffFileCollection? {
+        let collection = DiffFileCollection()
+        let payload = Unmanaged.passRetained(collection).toOpaque()
+        defer { Unmanaged<DiffFileCollection>.fromOpaque(payload).release() }
+
+        let rc = git_diff_foreach(
+            diff,
+            { delta, _, payload in
+                guard let delta, let payload else { return 0 }
+                let collection = Unmanaged<DiffFileCollection>.fromOpaque(payload).takeUnretainedValue()
+                collection.beginFile(delta: delta)
+                return 0
+            },
+            nil,
+            nil,
+            { _, _, line, payload in
+                guard let line, let payload else { return 0 }
+                let collection = Unmanaged<DiffFileCollection>.fromOpaque(payload).takeUnretainedValue()
+                collection.recordLine(line)
+                return 0
+            },
+            payload
+        )
+
+        return rc == 0 ? collection : nil
+    }
+
+    private func slowDiffFilesFromDiff(_ diff: OpaquePointer) -> [DiffFile] {
         var result: [DiffFile] = []
         let numDeltas = git_diff_num_deltas(diff)
         for i in 0..<numDeltas {
@@ -1145,7 +1347,24 @@ actor GitService {
             } else {
                 oldPath = nil
             }
-            result.append(DiffFile(additions: adds, deletions: dels, path: newPath, oldPath: oldPath))
+            let changeKind: DiffChangeKind
+            switch delta.pointee.status {
+            case GIT_DELTA_ADDED:
+                changeKind = .added
+            case GIT_DELTA_DELETED:
+                changeKind = .deleted
+            case GIT_DELTA_RENAMED:
+                changeKind = .renamed
+            case GIT_DELTA_COPIED:
+                changeKind = .copied
+            case GIT_DELTA_UNTRACKED:
+                changeKind = .untracked
+            case GIT_DELTA_MODIFIED:
+                changeKind = .modified
+            default:
+                changeKind = .unknown
+            }
+            result.append(DiffFile(additions: adds, deletions: dels, path: newPath, oldPath: oldPath, changeKind: changeKind))
         }
         return result
     }
@@ -1194,54 +1413,72 @@ actor GitService {
     }
 
     func workingTreeFileContent(path: String) throws -> String {
-        let fullPath = (repoPath as NSString).appendingPathComponent(path)
-        guard let data = FileManager.default.contents(atPath: fullPath),
+        guard let data = try workingTreeFileData(path: path),
               let content = String(data: data, encoding: .utf8)
         else { return "" }
         return content
     }
 
     func headFileContent(path: String) throws -> String {
-        guard let repo else { throw GitError.repoNotOpen }
-
-        var headRef: OpaquePointer?
-        guard git_repository_head(&headRef, repo) == 0, let headRef else { return "" }
-        defer { git_reference_free(headRef) }
-
-        var commitObj: OpaquePointer?
-        guard git_reference_peel(&commitObj, headRef, GIT_OBJECT_COMMIT) == 0, let commitObj else { return "" }
-        defer { git_object_free(commitObj) }
-
-        var tree: OpaquePointer?
-        guard git_commit_tree(&tree, commitObj) == 0, let tree else { return "" }
-        defer { git_tree_free(tree) }
-
-        var entry: OpaquePointer?
-        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else { return "" }
-        defer { git_tree_entry_free(entry) }
-
-        var object: OpaquePointer?
-        guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else { return "" }
-        defer { git_object_free(object) }
-
-        return Self.stringContent(forBlobObject: object)
+        guard let data = try headFileData(path: path),
+              let content = String(data: data, encoding: .utf8)
+        else { return "" }
+        return content
     }
 
     func stagedFileContent(path: String) throws -> String {
+        guard let data = try stagedFileData(path: path),
+              let content = String(data: data, encoding: .utf8)
+        else { return "" }
+        return content
+    }
+
+    func workingTreeFileData(path: String) throws -> Data? {
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        return FileManager.default.contents(atPath: fullPath)
+    }
+
+    func headFileData(path: String) throws -> Data? {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var headRef: OpaquePointer?
+        guard git_repository_head(&headRef, repo) == 0, let headRef else { return nil }
+        defer { git_reference_free(headRef) }
+
+        var commitObj: OpaquePointer?
+        guard git_reference_peel(&commitObj, headRef, GIT_OBJECT_COMMIT) == 0, let commitObj else { return nil }
+        defer { git_object_free(commitObj) }
+
+        var tree: OpaquePointer?
+        guard git_commit_tree(&tree, commitObj) == 0, let tree else { return nil }
+        defer { git_tree_free(tree) }
+
+        var entry: OpaquePointer?
+        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else { return nil }
+        defer { git_tree_entry_free(entry) }
+
+        var object: OpaquePointer?
+        guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else { return nil }
+        defer { git_object_free(object) }
+
+        return Self.blobData(forBlobObject: object)
+    }
+
+    func stagedFileData(path: String) throws -> Data? {
         guard let repo else { throw GitError.repoNotOpen }
 
         var index: OpaquePointer?
-        guard git_repository_index(&index, repo) == 0, let index else { return "" }
+        guard git_repository_index(&index, repo) == 0, let index else { return nil }
         defer { git_index_free(index) }
 
-        guard let entry = git_index_get_bypath(index, path, 0) else { return "" }
+        guard let entry = git_index_get_bypath(index, path, 0) else { return nil }
 
         var blob: OpaquePointer?
         var oid = entry.pointee.id
-        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return "" }
+        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return nil }
         defer { git_blob_free(blob) }
 
-        return Self.stringContent(forBlobObject: blob)
+        return Self.blobData(forBlobObject: blob)
     }
 
     func decodedWorkingTreeFileContent(path: String) throws -> DecodedFileContent {
@@ -1253,31 +1490,7 @@ actor GitService {
     }
 
     func decodedStagedFileContent(path: String) throws -> DecodedFileContent {
-        guard let repo else { throw GitError.repoNotOpen }
-
-        var index: OpaquePointer?
-        guard git_repository_index(&index, repo) == 0, let index else {
-            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
-        }
-        defer { git_index_free(index) }
-
-        guard let entry = git_index_get_bypath(index, path, 0) else {
-            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
-        }
-
-        var blob: OpaquePointer?
-        var oid = entry.pointee.id
-        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else {
-            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
-        }
-        defer { git_blob_free(blob) }
-
-        guard let rawContent = git_blob_rawcontent(blob) else {
-            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
-        }
-
-        let size = Int(git_blob_rawsize(blob))
-        let data = size > 0 ? Data(bytes: rawContent, count: size) : Data()
+        let data = try stagedFileData(path: path) ?? Data()
         return Self.decodeFileData(data)
     }
 
@@ -1370,24 +1583,20 @@ actor GitService {
     }
 
     func fileDiff(hash: String, path: String) throws -> String {
-        guard let diff = treeDiff(hash: hash) else { return "" }
-        defer { git_diff_free(diff) }
+        if let committedDiffSession = committedDiffSession(for: hash) {
+            if let deltaIndex = committedDiffSession.deltaIndexByPath[path] {
+                return patchText(from: committedDiffSession.diff, deltaIndex: Int(deltaIndex))
+            }
 
-        let numDeltas = git_diff_num_deltas(diff)
-        for i in 0..<numDeltas {
-            guard let delta = git_diff_get_delta(diff, i) else { continue }
-            let filePath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
-            guard filePath == path else { continue }
-
-            var patch: OpaquePointer?
-            guard git_patch_from_diff(&patch, diff, i) == 0, let patch else { return "" }
-            defer { git_patch_free(patch) }
-
-            var buf = git_buf()
-            guard git_patch_to_buf(&buf, patch) == 0 else { return "" }
-            defer { git_buf_dispose(&buf) }
-            return String(cString: buf.ptr)
+            let numDeltas = git_diff_num_deltas(committedDiffSession.diff)
+            for i in 0..<numDeltas {
+                guard let delta = git_diff_get_delta(committedDiffSession.diff, i) else { continue }
+                let filePath = delta.pointee.new_file.path.map(String.init(cString:)) ?? ""
+                guard filePath == path else { continue }
+                return patchText(from: committedDiffSession.diff, deltaIndex: Int(i))
+            }
         }
+
         return ""
     }
 
@@ -3172,6 +3381,11 @@ actor GitService {
     }
 
     func decodedFileContent(atCommit hash: String, path: String) throws -> DecodedFileContent {
+        let data = try fileData(atCommit: hash, path: path) ?? Data()
+        return Self.decodeFileData(data)
+    }
+
+    func fileData(atCommit hash: String, path: String) throws -> Data? {
         guard let repo else { throw GitError.repoNotOpen }
         var oid = git_oid()
         guard git_oid_fromstr(&oid, hash) == 0 else {
@@ -3190,9 +3404,7 @@ actor GitService {
         defer { git_tree_free(tree) }
 
         var entry: OpaquePointer?
-        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else {
-            throw GitError.operationFailed("File not found in commit")
-        }
+        guard git_tree_entry_bypath(&entry, tree, path) == 0, let entry else { return nil }
         defer { git_tree_entry_free(entry) }
 
         var object: OpaquePointer?
@@ -3201,12 +3413,7 @@ actor GitService {
         }
         defer { git_object_free(object) }
 
-        guard let rawContent = git_blob_rawcontent(object) else {
-            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
-        }
-        let size = Int(git_blob_rawsize(object))
-        let data = size > 0 ? Data(bytes: rawContent, count: size) : Data()
-        return Self.decodeFileData(data)
+        return Self.blobData(forBlobObject: object)
     }
 
     private nonisolated static func decodeFileData(_ data: Data) -> DecodedFileContent {
@@ -3235,10 +3442,14 @@ actor GitService {
         return DecodedFileContent(text: nil, encodingName: nil, isBinary: true)
     }
 
-    private nonisolated static func stringContent(forBlobObject object: OpaquePointer) -> String {
-        guard let rawContent = git_blob_rawcontent(object) else { return "" }
+    private nonisolated static func blobData(forBlobObject object: OpaquePointer) -> Data? {
+        guard let rawContent = git_blob_rawcontent(object) else { return Data() }
         let size = Int(git_blob_rawsize(object))
-        guard size > 0 else { return "" }
-        return String(bytes: Data(bytes: rawContent, count: size), encoding: .utf8) ?? ""
+        return size > 0 ? Data(bytes: rawContent, count: size) : Data()
+    }
+
+    private nonisolated static func stringContent(forBlobObject object: OpaquePointer) -> String {
+        guard let data = blobData(forBlobObject: object), !data.isEmpty else { return "" }
+        return String(bytes: data, encoding: .utf8) ?? ""
     }
 }

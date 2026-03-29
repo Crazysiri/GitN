@@ -43,9 +43,12 @@ struct ContentView: View {
         .navigationTitle("")
         .background(WindowChromeConfigurator())
         .sheet(isPresented: $showFeatures) {
-            if let url = Bundle.module.url(forResource: "FEATURES", withExtension: "md"),
+            if let url = GitNResources.featuresURL,
                let content = try? String(contentsOf: url, encoding: .utf8) {
                 FeaturesView(content: content, isPresented: $showFeatures)
+            } else {
+                Text("FEATURES.md not found.")
+                    .padding(24)
             }
         }
         .onAppear {

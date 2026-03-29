@@ -3,6 +3,8 @@ import XCTest
 
 @MainActor
 final class RepoViewModelBehaviorTests: XCTestCase {
+    private let onePixelPNGData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII=")!
+
     func testReflogEntriesMergeVisibleAndRecoveredEntriesWithoutDuplicates() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         let hash = String(repeating: "a", count: 40)
@@ -212,6 +214,58 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.fileStatuses.first?.statusCode, "MM")
         XCTAssertEqual(viewModel.commits.first?.hash, CommitInfo.uncommittedHash)
         XCTAssertEqual(viewModel.commits.first?.message, "1 staged, 1 unstaged")
+    }
+
+    func testSelectDiffFileUsesImagePresentationForBinaryImages() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+
+        let imageURL = URL(fileURLWithPath: repo.path).appendingPathComponent("diagram.png")
+        try onePixelPNGData.write(to: imageURL)
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        viewModel.selectedCommit = viewModel.commits.first
+        let file = DiffFile(additions: 0, deletions: 0, path: "diagram.png")
+        await viewModel.selectDiffFile(file, context: .committed)
+
+        XCTAssertEqual(viewModel.selectedDiffVisualContent?.kind, .image)
+        XCTAssertNil(viewModel.parsedDiff)
+    }
+
+    func testSelectDiffFileUsesBinaryPlaceholderForUnreadableNonImages() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+
+        let binaryURL = URL(fileURLWithPath: repo.path).appendingPathComponent("archive.bin")
+        try Data([0x00, 0xFF, 0x7F, 0x10]).write(to: binaryURL)
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        viewModel.selectedCommit = viewModel.commits.first
+        let file = DiffFile(additions: 0, deletions: 0, path: "archive.bin")
+        await viewModel.selectDiffFile(file, context: .committed)
+
+        XCTAssertEqual(viewModel.selectedDiffVisualContent?.kind, .binary)
+        XCTAssertNil(viewModel.parsedDiff)
+    }
+
+    func testOpenFilePreviewUsesImagePresentationForBinaryImages() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+
+        let imageURL = URL(fileURLWithPath: repo.path).appendingPathComponent("preview.png")
+        try onePixelPNGData.write(to: imageURL)
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        await viewModel.openFilePreview(path: "preview.png", context: .committed)
+
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+        XCTAssertEqual(viewModel.fileInspectorVisualContent?.kind, .image)
     }
 
     func testReflogSourceOptionsIncludeCurrentBranchAfterHeadOption() {

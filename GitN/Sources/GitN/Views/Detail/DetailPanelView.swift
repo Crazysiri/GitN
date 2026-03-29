@@ -1423,7 +1423,7 @@ struct DetailPanelView: View {
 
     private func matchingDiffFile(for status: FileStatus) -> DiffFile {
         viewModel.diffFiles.first(where: { $0.path == status.path })
-            ?? DiffFile(additions: 0, deletions: 0, path: status.path)
+            ?? DiffFile(additions: 0, deletions: 0, path: status.path, changeKind: status.diffChangeKind)
     }
 
     /// Build the drag payload for a file row.
@@ -1555,6 +1555,13 @@ struct DetailPanelView: View {
                         focusedTarget = .fileList
                         handleFileListStep(step)
                     }
+                )
+            } else if let visualContent = viewModel.selectedDiffVisualContent,
+                      viewModel.selectedDiffFile != nil {
+                VisualFileContentView(
+                    content: visualContent,
+                    path: viewModel.selectedDiffFile?.path ?? "",
+                    mode: .diff
                 )
             } else if viewModel.selectedDiffFile != nil {
                 if viewModel.isLoadingDiff {
@@ -2541,11 +2548,29 @@ struct DiffFileRow: View {
     let file: DiffFile
     let isSelected: Bool
 
+    private var imageStatusLabel: String? {
+        guard file.path.isImageFile else { return nil }
+        switch file.changeKind {
+        case .added, .untracked:
+            return "+ image"
+        case .deleted:
+            return "- image"
+        case .renamed:
+            return "renamed image"
+        case .modified:
+            return "~ image"
+        case .copied:
+            return "copied image"
+        case .unknown:
+            return nil
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: file.isRenamed ? "arrow.triangle.2.circlepath" : "doc")
+            Image(systemName: rowIconName)
                 .font(.caption2)
-                .foregroundStyle(file.isRenamed ? Color.accentColor.opacity(0.8) : .secondary)
+                .foregroundStyle(iconColor)
 
             if file.isRenamed, let oldPath = file.oldPath {
                 let oldName = (oldPath as NSString).lastPathComponent
@@ -2593,12 +2618,16 @@ struct DiffFileRow: View {
             Spacer()
 
             HStack(spacing: 3) {
-                if file.additions > 0 {
+                if let imageStatusLabel {
+                    Text(imageStatusLabel)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(imageStatusColor)
+                } else if file.additions > 0 {
                     Text("+\(file.additions)")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.green)
                 }
-                if file.deletions > 0 {
+                if imageStatusLabel == nil && file.deletions > 0 {
                     Text("-\(file.deletions)")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.red)
@@ -2613,6 +2642,29 @@ struct DiffFileRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.2) : Color.clear)
+    }
+
+    private var rowIconName: String {
+        if file.isRenamed { return "arrow.triangle.2.circlepath" }
+        if file.path.isImageFile { return "photo" }
+        return "doc"
+    }
+
+    private var iconColor: Color {
+        if file.isRenamed { return Color.accentColor.opacity(0.8) }
+        if file.path.isImageFile { return .secondary }
+        return .secondary
+    }
+
+    private var imageStatusColor: Color {
+        switch file.changeKind {
+        case .added, .untracked:
+            return .green
+        case .deleted:
+            return .red
+        default:
+            return .secondary
+        }
     }
 }
 

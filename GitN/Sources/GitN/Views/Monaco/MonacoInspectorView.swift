@@ -91,9 +91,11 @@ struct MonacoInspectorView: NSViewRepresentable {
         context.coordinator.webView = webView
         commandBridge?.webView = webView
 
-        if let resourceURL = Bundle.module.resourceURL?.appendingPathComponent("Monaco"),
-           let indexURL = Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "Monaco") {
+        if let resourceURL = GitNResources.monacoDirectoryURL,
+           let indexURL = GitNResources.monacoIndexURL {
             webView.loadFileURL(indexURL, allowingReadAccessTo: resourceURL)
+        } else {
+            print("[Monaco] editor resources not found")
         }
 
         return webView

@@ -359,11 +359,23 @@ struct FileInspectorOverlayView: View {
         case .diff:
             if viewModel.isFileTooLarge {
                 fileTooLargeState
+            } else if let visualContent = viewModel.fileInspectorVisualContent {
+                VisualFileContentView(
+                    content: visualContent,
+                    path: viewModel.fileInspectorPath,
+                    mode: .diff
+                )
             } else {
                 monacoDiffContent
             }
         case .preview:
-            if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
+            if let visualContent = viewModel.fileInspectorVisualContent {
+                VisualFileContentView(
+                    content: visualContent,
+                    path: viewModel.fileInspectorPath,
+                    mode: .preview
+                )
+            } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
                 unsupportedContentState
             } else {
                 MonacoInspectorView(
@@ -459,6 +471,156 @@ struct FileInspectorOverlayView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)
             }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+enum VisualFileContentMode {
+    case preview
+    case diff
+}
+
+struct VisualFileContentView: View {
+    let content: VisualFileContent
+    let path: String
+    let mode: VisualFileContentMode
+
+    var body: some View {
+        Group {
+            if content.isImage {
+                ImageDiffContentView(content: content, path: path, mode: mode)
+            } else {
+                BinaryFilePlaceholderView(
+                    title: mode == .diff ? "Binary diff is not readable" : "Binary file preview is not readable",
+                    message: content.message ?? "This file can't be displayed as text."
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ChromePalette.panelBackground)
+    }
+}
+
+struct ImageDiffContentView: View {
+    let content: VisualFileContent
+    let path: String
+    let mode: VisualFileContentMode
+
+    var body: some View {
+        ScrollView([.vertical, .horizontal]) {
+            VStack(spacing: 18) {
+                if mode == .preview {
+                    ImageCardView(
+                        title: previewTitle,
+                        subtitle: path,
+                        data: content.currentData
+                    )
+                } else if content.oldData != nil && content.newData != nil {
+                    HStack(alignment: .top, spacing: 18) {
+                        ImageCardView(title: "Before", subtitle: path, data: content.oldData)
+                        VStack(spacing: 8) {
+                            Spacer(minLength: 80)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Text("to")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .frame(width: 40)
+                        ImageCardView(title: "After", subtitle: path, data: content.newData)
+                    }
+                } else if content.newData != nil {
+                    ImageCardView(title: "+ Added", subtitle: path, data: content.newData)
+                } else {
+                    ImageCardView(title: "- Deleted", subtitle: path, data: content.oldData)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var previewTitle: String {
+        if content.newData != nil && content.oldData == nil {
+            return "+ Added"
+        }
+        if content.newData == nil && content.oldData != nil {
+            return "- Deleted"
+        }
+        return "Current"
+    }
+}
+
+struct ImageCardView: View {
+    let title: String
+    let subtitle: String
+    let data: Data?
+
+    private var image: NSImage? {
+        guard let data else { return nil }
+        return NSImage(data: data)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+            Text(subtitle)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    VStack(spacing: 10) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                        Text("Image unavailable")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 520)
+            .padding(12)
+            .background(ChromePalette.panelMutedBackground, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(ChromePalette.panelBorder, lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct BinaryFilePlaceholderView: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "doc.zipper")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

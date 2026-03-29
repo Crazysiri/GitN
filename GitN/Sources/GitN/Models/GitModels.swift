@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct BranchInfo: Identifiable, Equatable {
     var id: String { name }
@@ -130,6 +131,16 @@ struct ReflogSourceOption: Identifiable, Equatable {
     var id: String { refName }
 }
 
+enum DiffChangeKind: Sendable, Equatable {
+    case added
+    case deleted
+    case modified
+    case renamed
+    case copied
+    case untracked
+    case unknown
+}
+
 struct DiffFile: Identifiable, Equatable {
     var id: String { path }
     let additions: Int
@@ -137,15 +148,42 @@ struct DiffFile: Identifiable, Equatable {
     let path: String
     /// Non-nil when the file was renamed; contains the original path.
     let oldPath: String?
+    let changeKind: DiffChangeKind
 
     var isRenamed: Bool { oldPath != nil }
     var isPureRename: Bool { isRenamed && additions == 0 && deletions == 0 }
 
-    init(additions: Int, deletions: Int, path: String, oldPath: String? = nil) {
+    init(additions: Int, deletions: Int, path: String, oldPath: String? = nil, changeKind: DiffChangeKind = .modified) {
         self.additions = additions
         self.deletions = deletions
         self.path = path
         self.oldPath = oldPath
+        self.changeKind = changeKind
+    }
+}
+
+enum FileRenderableKind: Sendable, Equatable {
+    case text
+    case image
+    case binary
+}
+
+struct VisualFileContent: Sendable, Equatable {
+    let kind: FileRenderableKind
+    let oldData: Data?
+    let newData: Data?
+    let message: String?
+
+    var currentData: Data? { newData ?? oldData }
+    var isImage: Bool { kind == .image }
+    var isBinary: Bool { kind == .binary }
+}
+
+extension String {
+    var isImageFile: Bool {
+        let ext = (self as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return false }
+        return type.conforms(to: .image)
     }
 }
 
@@ -194,6 +232,35 @@ struct FileStatus: Identifiable, Equatable {
     var statusDescription: String {
         if hasStagedChanges { return stagedDescription }
         return unstagedDescription
+    }
+
+    var diffChangeKind: DiffChangeKind {
+        if statusCode == "??" { return .untracked }
+        switch statusCode.first {
+        case "A":
+            return .added
+        case "D":
+            return .deleted
+        case "R":
+            return .renamed
+        case "C":
+            return .copied
+        case "M":
+            return .modified
+        default:
+            switch statusCode.dropFirst().first {
+            case "D":
+                return .deleted
+            case "R":
+                return .renamed
+            case "M":
+                return .modified
+            case "?":
+                return .untracked
+            default:
+                return .unknown
+            }
+        }
     }
 }
 

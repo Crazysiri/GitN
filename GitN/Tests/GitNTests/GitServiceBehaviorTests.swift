@@ -240,4 +240,70 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertEqual(diffFiles.map(\.path), ["tracked.txt"])
         XCTAssertTrue(diff.contains("+two"))
     }
+
+    func testDiffDetailAndFileDiffHandleRootCommit() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("alpha.txt", contents: "one\ntwo\n")
+        try repo.writeFile("beta.txt", contents: "three\n")
+        let rootHash = try repo.commitAll(message: "initial import")
+
+        let service = GitService(repoPath: repo.path)
+        let diffFiles = try await service.diffDetail(hash: rootHash)
+        let alphaDiff = try await service.fileDiff(hash: rootHash, path: "alpha.txt")
+
+        XCTAssertEqual(diffFiles.count, 2)
+        XCTAssertEqual(diffFiles.first(where: { $0.path == "alpha.txt" })?.additions, 2)
+        XCTAssertEqual(diffFiles.first(where: { $0.path == "alpha.txt" })?.deletions, 0)
+        XCTAssertNil(diffFiles.first(where: { $0.path == "alpha.txt" })?.oldPath)
+        XCTAssertEqual(diffFiles.first(where: { $0.path == "beta.txt" })?.additions, 1)
+        XCTAssertNil(diffFiles.first(where: { $0.path == "beta.txt" })?.oldPath)
+        XCTAssertTrue(alphaDiff.contains("+++ b/alpha.txt"))
+        XCTAssertTrue(alphaDiff.contains("+one"))
+        XCTAssertTrue(alphaDiff.contains("+two"))
+    }
+
+    func testDiffDetailPreservesPureRenameMetadataAndPatch() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("old-name.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.run(["mv", "old-name.txt", "new-name.txt"])
+        let renameHash = try repo.commitAll(message: "rename file")
+
+        let service = GitService(repoPath: repo.path)
+        let diffFiles = try await service.diffDetail(hash: renameHash)
+        let renameDiff = try await service.fileDiff(hash: renameHash, path: "new-name.txt")
+
+        XCTAssertEqual(diffFiles.count, 1)
+        XCTAssertEqual(diffFiles[0].path, "new-name.txt")
+        XCTAssertEqual(diffFiles[0].oldPath, "old-name.txt")
+        XCTAssertEqual(diffFiles[0].additions, 0)
+        XCTAssertEqual(diffFiles[0].deletions, 0)
+        XCTAssertTrue(renameDiff.contains("rename from old-name.txt"))
+        XCTAssertTrue(renameDiff.contains("rename to new-name.txt"))
+    }
+
+    func testCommittedDiffPreviewReturnsMetadataBeforeLineStats() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("old-name.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.run(["mv", "old-name.txt", "new-name.txt"])
+        try repo.appendFile("new-name.txt", contents: "two\n")
+        let commitHash = try repo.commitAll(message: "rename and update")
+
+        let service = GitService(repoPath: repo.path)
+        let previewFiles = try await service.committedDiffPreview(hash: commitHash)
+        let detailedFiles = try await service.diffDetail(hash: commitHash)
+
+        XCTAssertEqual(previewFiles.count, 1)
+        XCTAssertEqual(previewFiles[0].path, "new-name.txt")
+        XCTAssertEqual(previewFiles[0].oldPath, "old-name.txt")
+        XCTAssertEqual(previewFiles[0].additions, 0)
+        XCTAssertEqual(previewFiles[0].deletions, 0)
+
+        XCTAssertEqual(detailedFiles.count, 1)
+        XCTAssertEqual(detailedFiles[0].path, "new-name.txt")
+        XCTAssertEqual(detailedFiles[0].oldPath, "old-name.txt")
+        XCTAssertEqual(detailedFiles[0].additions, 1)
+        XCTAssertEqual(detailedFiles[0].deletions, 0)
+    }
 }

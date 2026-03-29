@@ -92,6 +92,25 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 cp "$BINARY" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 cp "$ICNS_FILE" "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns"
 
+python3 - <<'PY' | while IFS= read -r bundle; do
+import glob
+import os
+
+seen = set()
+for pattern in ('.build/release/*.bundle', '.build/*/release/*.bundle'):
+    for path in sorted(glob.glob(pattern)):
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        print(path)
+PY
+    [ -n "$bundle" ] || continue
+    dest="${BUNDLE_DIR}/Contents/Resources/$(basename "$bundle")"
+    rm -rf "$dest"
+    cp -R "$bundle" "$dest"
+done
+
 YEAR=$(date +%Y)
 cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>

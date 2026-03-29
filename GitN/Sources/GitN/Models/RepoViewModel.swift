@@ -19,6 +19,7 @@ final class RepoViewModel {
         let fileDiffContent: String
         let baseText: String
         let parsedDiff: ParsedDiff?
+        let visualContent: VisualFileContent?
     }
 
     enum FileInspectorMode: String, CaseIterable {
@@ -175,6 +176,7 @@ final class RepoViewModel {
     var fileDiffContent: String = ""
     var diffBaseText: String = ""
     var parsedDiff: ParsedDiff?
+    var selectedDiffVisualContent: VisualFileContent?
     var selectedDiffFile: DiffFile?
     var isLoadingDiff = false
     /// True when the selected file exceeds maxDiffFileSize.
@@ -188,6 +190,7 @@ final class RepoViewModel {
     var fileInspectorInitialContent: String = ""
     var fileInspectorDisplayContent: String = ""
     var fileInspectorDiffBaseText: String = ""
+    var fileInspectorVisualContent: VisualFileContent?
     var isSavingFileInspector = false
     var isFileInspectorEditable = true
     var fileInspectorEncodingName: String?
@@ -208,6 +211,7 @@ final class RepoViewModel {
     private var fileInspectorEditSession: FileInspectorEditSession?
     private var fileInspectorRebuildTask: Task<Void, Never>?
     private var fileInspectorBlameTask: Task<Void, Never>?
+    private var committedDiffStatsTask: Task<Void, Never>?
     private var fileInspectorPreparedEditKeepsRenderedDiff = false
     private var fileInspectorBlameCache: [String: [Int: FileInspectorBlameInfo]] = [:]
     private static let fileInspectorEditGroupingInterval: TimeInterval = 0.8
@@ -349,6 +353,7 @@ final class RepoViewModel {
             fileInspectorInitialContent = loadedText
             fileInspectorDiffBaseText = inspectorBaseText
             fileInspectorDisplayContent = inspectorDisplayContent
+            fileInspectorVisualContent = preferredMode == .diff ? payloadVisualContent(for: inspectorParsedDiff) : loaded.visualContent
             fileInspectorSelectedRange = NSRange(location: 0, length: 0)
             isFileInspectorDiffEditing = false
             fileInspectorUndoStack.removeAll(keepingCapacity: false)
@@ -374,13 +379,14 @@ final class RepoViewModel {
     }
 
     func openFilePreview(path: String, context: DiffContext = .committed) async {
-        let file = diffFiles.first(where: { $0.path == path }) ?? DiffFile(additions: 0, deletions: 0, path: path)
+        let file = diffFiles.first(where: { $0.path == path }) ?? DiffFile(additions: 0, deletions: 0, path: path, changeKind: .unknown)
         await openFileInspector(file, context: context, preferredMode: .preview)
     }
 
     func closeFileInspector() {
         isFileInspectorPresented = false
         isFileInspectorDiffEditing = false
+        fileInspectorVisualContent = nil
         fileInspectorUndoStack.removeAll(keepingCapacity: false)
         fileInspectorRedoStack.removeAll(keepingCapacity: false)
         fileInspectorEditSession = nil
@@ -393,6 +399,7 @@ final class RepoViewModel {
     }
 
     private func clearDetailSelection() {
+        invalidateCommittedDiffLoading()
         closeFileInspector()
         selectedCommit = nil
         selectedStash = nil
@@ -400,6 +407,7 @@ final class RepoViewModel {
         fileDiffContent = ""
         diffBaseText = ""
         parsedDiff = nil
+        selectedDiffVisualContent = nil
         selectedFilePaths = []
         selectedFileListContext = nil
     }
@@ -413,7 +421,7 @@ final class RepoViewModel {
         }
         if fileInspectorMode == .history {
             let file = diffFiles.first(where: { $0.path == fileInspectorPath })
-                ?? DiffFile(additions: 0, deletions: 0, path: fileInspectorPath)
+                ?? DiffFile(additions: 0, deletions: 0, path: fileInspectorPath, changeKind: .unknown)
             await openFileInspector(file, context: fileInspectorContext, preferredMode: mode)
             return
         }
@@ -421,6 +429,7 @@ final class RepoViewModel {
         if mode != .diff {
             isFileInspectorDiffEditing = false
         }
+        fileInspectorVisualContent = mode == .diff ? selectedDiffVisualContent : fileInspectorVisualContent
         rebuildFileInspectorArtifacts(
             diffBaseText: fileInspectorDiffBaseText,
             currentText: fileInspectorContent,
@@ -455,6 +464,7 @@ final class RepoViewModel {
         let content: GitService.DecodedFileContent
         let isEditable: Bool
         let message: String?
+        let visualContent: VisualFileContent?
     }
 
     static func monacoLanguage(for language: SourceLanguage) -> String {
@@ -479,11 +489,18 @@ final class RepoViewModel {
                 return LoadedInspectableContent(
                     content: .init(text: text, encodingName: "Submodule", isBinary: false),
                     isEditable: false,
-                    message: "Submodule pointers are shown as commit values and can't be edited here."
+                    message: "Submodule pointers are shown as commit values and can't be edited here.",
+                    visualContent: nil
                 )
             }
             let decoded = try await git.decodedFileContent(atCommit: commit.hash, path: path)
-            return LoadedInspectableContent(content: decoded, isEditable: decoded.text != nil, message: nil)
+            let data = try await loadPreviewData(path: path, context: context)
+            return LoadedInspectableContent(
+                content: decoded,
+                isEditable: decoded.text != nil,
+                message: decoded.isBinary ? "Binary files can't be edited here." : nil,
+                visualContent: visualContent(for: path, decoded: decoded, currentData: data)
+            )
         }
         if FileManager.default.fileExists(atPath: fullPath) {
             if await git.isDirectory(path: path) {
@@ -491,7 +508,8 @@ final class RepoViewModel {
                 return LoadedInspectableContent(
                     content: .init(text: text, encodingName: "Submodule", isBinary: false),
                     isEditable: false,
-                    message: "Submodule pointers are shown as commit values and can't be edited here."
+                    message: "Submodule pointers are shown as commit values and can't be edited here.",
+                    visualContent: nil
                 )
             }
             let decoded: GitService.DecodedFileContent
@@ -501,12 +519,19 @@ final class RepoViewModel {
             case .unstaged, .committed:
                 decoded = try await git.decodedWorkingTreeFileContent(path: path)
             }
-            return LoadedInspectableContent(content: decoded, isEditable: decoded.text != nil, message: nil)
+            let data = try await loadPreviewData(path: path, context: context)
+            return LoadedInspectableContent(
+                content: decoded,
+                isEditable: decoded.text != nil,
+                message: decoded.isBinary ? "Binary files can't be edited here." : nil,
+                visualContent: visualContent(for: path, decoded: decoded, currentData: data)
+            )
         }
         return LoadedInspectableContent(
             content: .init(text: "", encodingName: "UTF-8", isBinary: false),
             isEditable: true,
-            message: nil
+            message: nil,
+            visualContent: nil
         )
     }
 
@@ -572,6 +597,70 @@ final class RepoViewModel {
 """
         let baseText = keptLines.last.map { String($0.dropFirst()) } ?? ""
         return (baseText, DiffParserEngine.parse(compactPatch))
+    }
+
+    private func visualContent(
+        for path: String,
+        decoded: GitService.DecodedFileContent,
+        currentData: Data?
+    ) -> VisualFileContent? {
+        guard decoded.text == nil else { return nil }
+        if path.isImageFile, let currentData, NSImage(data: currentData) != nil {
+            return VisualFileContent(kind: .image, oldData: nil, newData: currentData, message: nil)
+        }
+        if decoded.isBinary {
+            return VisualFileContent(
+                kind: .binary,
+                oldData: nil,
+                newData: currentData,
+                message: "This binary file can't be rendered as text."
+            )
+        }
+        return nil
+    }
+
+    private func loadPreviewData(path: String, context: DiffContext) async throws -> Data? {
+        if let commit = selectedCommit, !commit.isUncommitted, context == .committed {
+            return try await git.fileData(atCommit: commit.hash, path: path)
+        }
+
+        switch context {
+        case .staged:
+            return try await git.stagedFileData(path: path)
+        case .unstaged, .committed:
+            return try await git.workingTreeFileData(path: path)
+        }
+    }
+
+    private nonisolated static func makeVisualDiffContent(
+        path: String,
+        oldData: Data?,
+        newData: Data?
+    ) -> VisualFileContent? {
+        let hasRenderableImage = path.isImageFile && [oldData, newData].contains { data in
+            guard let data else { return false }
+            return NSImage(data: data) != nil
+        }
+
+        if hasRenderableImage {
+            return VisualFileContent(kind: .image, oldData: oldData, newData: newData, message: nil)
+        }
+
+        if oldData != nil || newData != nil {
+            return VisualFileContent(
+                kind: .binary,
+                oldData: oldData,
+                newData: newData,
+                message: "This binary file can't be rendered as text."
+            )
+        }
+
+        return nil
+    }
+
+    private func payloadVisualContent(for parsedDiff: ParsedDiff?) -> VisualFileContent? {
+        guard parsedDiff == nil else { return nil }
+        return selectedDiffVisualContent
     }
 
     private func rebuildFileInspectorArtifacts(
@@ -1520,7 +1609,7 @@ final class RepoViewModel {
         guard selectedCommit?.isUncommitted == true || isInConflict else { return }
         guard let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges) else { return }
         let diffFile = diffFiles.first(where: { $0.path == firstStatus.path })
-            ?? DiffFile(additions: 0, deletions: 0, path: firstStatus.path)
+            ?? DiffFile(additions: 0, deletions: 0, path: firstStatus.path, changeKind: firstStatus.diffChangeKind)
         selectedFilePaths = [firstStatus.path]
         selectedFileListContext = .unstaged
         await selectDiffFile(diffFile, context: .unstaged)
@@ -2140,6 +2229,8 @@ final class RepoViewModel {
 
     func selectCommit(_ commit: CommitInfo) async {
         if isCompareMode { exitCompareMode() }
+        invalidateCommittedDiffLoading()
+        let committedDiffGeneration = committedDiffGeneration
         selectedCommit = commit
         selectedStash = nil
         selectedDiffFile = nil
@@ -2156,16 +2247,17 @@ final class RepoViewModel {
                 if let status = firstStatus {
                     let context: DiffContext = status.hasUnstagedChanges ? .unstaged : .staged
                     let diffFile = diffFiles.first(where: { $0.path == status.path })
-                        ?? DiffFile(additions: 0, deletions: 0, path: status.path)
+                        ?? DiffFile(additions: 0, deletions: 0, path: status.path, changeKind: status.diffChangeKind)
                     selectedFilePaths = [status.path]
                     selectedFileListContext = context
                     await selectDiffFile(diffFile, context: context)
                 }
             } else {
-                diffFiles = try await git.diffDetail(hash: commit.hash)
+                diffFiles = try await git.committedDiffPreview(hash: commit.hash)
                 if let first = diffFiles.first {
                     await selectDiffFile(first, context: .committed)
                 }
+                scheduleCommittedDiffStatsLoad(hash: commit.hash, generation: committedDiffGeneration)
             }
         } catch {
             diffFiles = []
@@ -2174,13 +2266,48 @@ final class RepoViewModel {
 
     private func refreshUncommittedDiffFiles() {
         diffFiles = fileStatuses.map { status in
-            DiffFile(additions: 0, deletions: 0, path: status.path)
+            DiffFile(additions: 0, deletions: 0, path: status.path, changeKind: status.diffChangeKind)
         }
     }
 
     enum DiffContext { case staged, unstaged, committed }
     var currentDiffContext: DiffContext = .committed
     private var diffLoadGeneration = 0
+    private var committedDiffGeneration = 0
+
+    private func invalidateCommittedDiffLoading() {
+        committedDiffGeneration += 1
+        committedDiffStatsTask?.cancel()
+        committedDiffStatsTask = nil
+    }
+
+    private func scheduleCommittedDiffStatsLoad(hash: String, generation: Int) {
+        committedDiffStatsTask?.cancel()
+        committedDiffStatsTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let files: [DiffFile]
+            do {
+                files = try await self.git.diffDetail(hash: hash)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled,
+                  generation == self.committedDiffGeneration,
+                  self.selectedCommit?.hash == hash,
+                  self.selectedStash == nil,
+                  !self.isCompareMode
+            else { return }
+
+            self.diffFiles = files
+            if let selectedPath = self.selectedDiffFile?.path,
+               let updatedSelection = files.first(where: { $0.path == selectedPath }) {
+                self.selectedDiffFile = updatedSelection
+            }
+            self.committedDiffStatsTask = nil
+        }
+    }
 
     /// Max file size (in bytes) for which we compute a full diff.
     /// Files larger than this get a placeholder to avoid OOM on huge files
@@ -2209,6 +2336,7 @@ final class RepoViewModel {
         fileTooLargeSizeMB = ""
         fileDiffContent = ""
         parsedDiff = nil
+        selectedDiffVisualContent = nil
         do {
             if isUncommitted {
                 // Guard against huge files that would blow up memory
@@ -2229,15 +2357,19 @@ final class RepoViewModel {
             let statusCode = fileStatuses.first(where: { $0.path == path })?.statusCode ?? "M "
             let stashIndex = selectedStash?.index
             let commitHash = selectedCommit?.hash
+            let parentCommitHash = selectedCommit?.parentHashes.first
+            let oldPath = file.oldPath
             let git = self.git
             let payloadTask = Task.detached(priority: .userInitiated) { () throws -> DiffLoadPayload in
                 try await Self.loadDiffPayload(
                     git: git,
                     path: path,
+                    oldPath: oldPath,
                     context: context,
                     isUncommitted: isUncommitted,
                     stashIndex: stashIndex,
                     commitHash: commitHash,
+                    parentCommitHash: parentCommitHash,
                     statusCode: statusCode
                 )
             }
@@ -2251,11 +2383,13 @@ final class RepoViewModel {
             fileDiffContent = payload.fileDiffContent
             diffBaseText = payload.baseText
             parsedDiff = payload.parsedDiff
+            selectedDiffVisualContent = payload.visualContent
             MonacoDebugLog.emit(
                 "selectDiffFile path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(Self.lineCount(for: payload.baseText)) modifiedLines=\(Self.lineCount(for: fileInspectorPath == path && isFileInspectorPresented ? fileInspectorContent : "")) parsedHunks=\(payload.parsedDiff?.hunks.count ?? 0) diffBytes=\(payload.fileDiffContent.utf8.count)"
             )
             if isFileInspectorPresented, fileInspectorPath == path {
                 fileInspectorDiffBaseText = payload.parsedDiff != nil ? payload.baseText : fileInspectorContent
+                fileInspectorVisualContent = fileInspectorMode == .diff ? payload.visualContent : fileInspectorVisualContent
                 rebuildFileInspectorArtifacts(
                     diffBaseText: fileInspectorDiffBaseText,
                     currentText: fileInspectorContent,
@@ -2269,6 +2403,7 @@ final class RepoViewModel {
             fileDiffContent = "Failed to load diff"
             diffBaseText = ""
             parsedDiff = nil
+            selectedDiffVisualContent = nil
         }
         if generation == diffLoadGeneration {
             isLoadingDiff = false
@@ -2278,31 +2413,40 @@ final class RepoViewModel {
     private static func loadDiffPayload(
         git: GitService,
         path: String,
+        oldPath: String?,
         context: DiffContext,
         isUncommitted: Bool,
         stashIndex: String?,
         commitHash: String?,
+        parentCommitHash: String?,
         statusCode: String
     ) async throws -> DiffLoadPayload {
         let content: String
         let baseText: String
         let newTextForFallback: String?
+        let oldBinaryData: Data?
+        let newBinaryData: Data?
 
         let isStaged = {
             let idx = statusCode.first ?? " "
             return idx != " " && idx != "?"
         }()
+        let priorPath = oldPath ?? path
 
         if let stashIndex {
             content = try await git.stashFileDiff(stashIndex, path: path)
             baseText = ""
             newTextForFallback = nil
+            oldBinaryData = nil
+            newBinaryData = nil
         } else if isUncommitted {
             switch context {
             case .staged:
                 content = try await git.stagedFileDiff(path: path)
                 baseText = try await git.headFileContent(path: path)
                 newTextForFallback = try await git.stagedFileContent(path: path)
+                oldBinaryData = try await git.headFileData(path: priorPath)
+                newBinaryData = try await git.stagedFileData(path: path)
             case .unstaged:
                 if statusCode == "??" {
                     content = try await git.readFullFileContent(path: path)
@@ -2312,6 +2456,8 @@ final class RepoViewModel {
                     baseText = try await git.stagedFileContent(path: path)
                 }
                 newTextForFallback = try await git.workingTreeFileContent(path: path)
+                oldBinaryData = statusCode == "??" ? nil : try await git.stagedFileData(path: priorPath)
+                newBinaryData = try await git.workingTreeFileData(path: path)
             case .committed:
                 content = try await git.uncommittedFileDiff(path: path, statusCode: statusCode)
                 if statusCode == "??" {
@@ -2326,23 +2472,50 @@ final class RepoViewModel {
                 } else {
                     newTextForFallback = try await git.workingTreeFileContent(path: path)
                 }
+                oldBinaryData = statusCode == "??" ? nil : try await git.headFileData(path: priorPath)
+                newBinaryData = try await git.workingTreeFileData(path: path)
             }
         } else if let commitHash {
             content = try await git.fileDiff(hash: commitHash, path: path)
             baseText = ""
             newTextForFallback = nil
+            newBinaryData = try await git.fileData(atCommit: commitHash, path: path)
+            oldBinaryData = if let parentCommitHash {
+                try await git.fileData(atCommit: parentCommitHash, path: priorPath)
+            } else {
+                nil
+            }
         } else {
-            return DiffLoadPayload(fileDiffContent: "", baseText: "", parsedDiff: nil)
+            return DiffLoadPayload(fileDiffContent: "", baseText: "", parsedDiff: nil, visualContent: nil)
         }
 
         if content.isEmpty {
+            let visualContent = Self.makeVisualDiffContent(path: path, oldData: oldBinaryData, newData: newBinaryData)
+            if visualContent != nil {
+                return DiffLoadPayload(
+                    fileDiffContent: "No changes in this file",
+                    baseText: baseText,
+                    parsedDiff: nil,
+                    visualContent: visualContent
+                )
+            }
             if let newTextForFallback, !baseText.isEmpty || !newTextForFallback.isEmpty {
                 let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
                 if !synthetic.hunks.isEmpty {
-                    return DiffLoadPayload(fileDiffContent: "No changes in this file", baseText: baseText, parsedDiff: synthetic)
+                    return DiffLoadPayload(
+                        fileDiffContent: "No changes in this file",
+                        baseText: baseText,
+                        parsedDiff: synthetic,
+                        visualContent: nil
+                    )
                 }
             }
-            return DiffLoadPayload(fileDiffContent: "No changes in this file", baseText: baseText, parsedDiff: nil)
+            return DiffLoadPayload(
+                fileDiffContent: "No changes in this file",
+                baseText: baseText,
+                parsedDiff: nil,
+                visualContent: nil
+            )
         }
 
         let parsed = DiffParserEngine.parse(content)
@@ -2352,13 +2525,15 @@ final class RepoViewModel {
                 MonacoDebugLog.emit(
                     "synthetic diff path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(lineCount(for: baseText)) modifiedLines=\(lineCount(for: newTextForFallback)) hunks=\(synthetic.hunks.count)"
                 )
-                return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic)
+                return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic, visualContent: nil)
             }
         }
+        let visualContent = parsed.hunks.isEmpty ? Self.makeVisualDiffContent(path: path, oldData: oldBinaryData, newData: newBinaryData) : nil
         return DiffLoadPayload(
             fileDiffContent: content,
             baseText: baseText,
-            parsedDiff: parsed.hunks.isEmpty ? nil : parsed
+            parsedDiff: parsed.hunks.isEmpty ? nil : parsed,
+            visualContent: visualContent
         )
     }
 
@@ -3279,6 +3454,7 @@ final class RepoViewModel {
     var scrollToCommitHash: String?
 
     func performCompareWithWorkingDirectory(_ commit: CommitInfo) async {
+        invalidateCommittedDiffLoading()
         isCompareMode = true
         compareBaseHash = commit.hash
         selectedCommit = commit
@@ -3307,6 +3483,7 @@ final class RepoViewModel {
     }
 
     func exitCompareMode() {
+        invalidateCommittedDiffLoading()
         isCompareMode = false
         compareBaseHash = nil
         diffFiles = []
@@ -3368,6 +3545,7 @@ final class RepoViewModel {
     
     func selectStash(_ stash: StashInfo) async {
         if isCompareMode { exitCompareMode() }
+        invalidateCommittedDiffLoading()
         selectedStash = stash
         selectedCommit = nil
         selectedDiffFile = nil
