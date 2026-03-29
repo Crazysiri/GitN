@@ -2,13 +2,18 @@ import SwiftUI
 
 struct DetailPanelView: View {
     private enum LayoutDefaults {
-        static let committedHeaderHeight: CGFloat = 220
-        static let committedHeaderEditingHeight: CGFloat = 280
-        static let committedHeaderMinHeight: CGFloat = 170
-        static let committedHeaderEditingMinHeight: CGFloat = 240
         static let uncommittedInputHeight: CGFloat = 240
         static let uncommittedInputMinHeight: CGFloat = 170
-        static let splitHandleHeight: CGFloat = 8
+        static let splitHandleHeight: CGFloat = 12
+
+        enum CommittedMessage {
+            static let readOnlyDefaultHeight: CGFloat = 100
+            static let editingDefaultHeight: CGFloat = 94
+            static let readOnlyMinHeight: CGFloat = 84
+            static let editingMinHeight: CGFloat = 116
+            static let readOnlyContentMinHeight: CGFloat = 84
+            static let editingDescriptionMinHeight: CGFloat = 56
+        }
     }
 
     let viewModel: RepoViewModel
@@ -26,8 +31,10 @@ struct DetailPanelView: View {
     @State private var isHoveringMessage = false
     @State private var discardConfirmPaths: [String] = []
     @State private var showDiscardConfirm = false
-    @State private var committedHeaderHeight: CGFloat = LayoutDefaults.committedHeaderHeight
+    @State private var committedHeaderHeight: CGFloat = LayoutDefaults.CommittedMessage.readOnlyDefaultHeight
+    @State private var measuredCommittedMetadataHeight: CGFloat = 0
     @State private var uncommittedInputHeight: CGFloat = LayoutDefaults.uncommittedInputHeight
+    @State private var hoveredReflogLinkID: String?
 
     // MARK: - Rubber-band selection (unstaged area)
     @State private var isRubberBanding = false
@@ -37,6 +44,7 @@ struct DetailPanelView: View {
     @State private var unstagedSectionMinY: CGFloat?
     @State private var suppressNextFileListAutoScroll = false
     @State private var isResizingPane = false
+    @State private var splitDragStartHeight: CGFloat?
     @FocusState private var focusedTarget: FocusTarget?
 
     private var supportsUnstagedRubberBandSelection: Bool {
@@ -84,7 +92,7 @@ struct DetailPanelView: View {
                 if commit.isUncommitted {
                     uncommittedInputHeight = LayoutDefaults.uncommittedInputHeight
                 } else {
-                    committedHeaderHeight = LayoutDefaults.committedHeaderHeight
+                    committedHeaderHeight = LayoutDefaults.CommittedMessage.readOnlyDefaultHeight
                 }
             }
             // Load full commit message when commit changes
@@ -109,9 +117,9 @@ struct DetailPanelView: View {
         .onChange(of: isEditingMessage) { oldValue, newValue in
             guard oldValue != newValue else { return }
             if newValue {
-                committedHeaderHeight = max(committedHeaderHeight, LayoutDefaults.committedHeaderEditingHeight)
+                committedHeaderHeight = max(committedHeaderHeight, LayoutDefaults.CommittedMessage.editingDefaultHeight)
             } else {
-                committedHeaderHeight = max(committedHeaderHeight, LayoutDefaults.committedHeaderHeight)
+                committedHeaderHeight = max(committedHeaderHeight, LayoutDefaults.CommittedMessage.readOnlyDefaultHeight)
             }
         }
         .alert(
@@ -154,7 +162,9 @@ struct DetailPanelView: View {
     }
 
     private var committedHeaderMinHeight: CGFloat {
-        isEditingMessage ? LayoutDefaults.committedHeaderEditingMinHeight : LayoutDefaults.committedHeaderMinHeight
+        isEditingMessage
+            ? LayoutDefaults.CommittedMessage.editingMinHeight
+            : LayoutDefaults.CommittedMessage.readOnlyMinHeight
     }
 
     private var uncommittedInputMinHeight: CGFloat {
@@ -168,21 +178,30 @@ struct DetailPanelView: View {
     private func committedDetailLayout(_ commit: CommitInfo) -> some View {
         GeometryReader { geo in
             let totalHeight = geo.size.height
-            let maxHeaderHeight = max(committedHeaderMinHeight, totalHeight - 140)
+            let staticTopHeight: CGFloat = 42
+            let metadataHeight = max(measuredCommittedMetadataHeight, 56)
+            let maxHeaderHeight = max(committedHeaderMinHeight, totalHeight - metadataHeight - splitHandleHeight - 80 - staticTopHeight)
             let headerHeight = min(max(committedHeaderHeight, committedHeaderMinHeight), maxHeaderHeight)
-            let bottomHeight = max(80, totalHeight - headerHeight - splitHandleHeight)
+            let bottomHeight = max(60, totalHeight - staticTopHeight - headerHeight - splitHandleHeight - metadataHeight)
 
             VStack(spacing: 0) {
-                commitInfoHeader(commit)
-                    .frame(height: headerHeight, alignment: .top)
-                    .clipped()
+                VStack(alignment: .leading, spacing: 6) {
+                    commitTitleBar(commit)
+                    commitMessageSection(commit)
+                        .frame(height: headerHeight, alignment: .top)
 
-                splitResizeHandle(
-                    height: $committedHeaderHeight,
-                    range: committedHeaderMinHeight...maxHeaderHeight,
-                    axis: .top,
-                    totalHeight: totalHeight
-                )
+                    splitResizeHandle(
+                        height: $committedHeaderHeight,
+                        range: committedHeaderMinHeight...maxHeaderHeight,
+                        axis: .top,
+                        totalHeight: totalHeight
+                    )
+
+                    commitMetadataSection(commit)
+                }
+                .padding(10)
+
+                Divider()
 
                 diffFileList
                     .frame(height: bottomHeight, alignment: .top)
@@ -195,9 +214,9 @@ struct DetailPanelView: View {
     private var uncommittedDetailLayout: some View {
         GeometryReader { geo in
             let totalHeight = geo.size.height
-            let maxInputHeight = max(uncommittedInputMinHeight, totalHeight - 140)
+            let maxInputHeight = max(uncommittedInputMinHeight, totalHeight - 80)
             let inputHeight = min(max(uncommittedInputHeight, uncommittedInputMinHeight), maxInputHeight)
-            let listHeight = max(80, totalHeight - inputHeight - splitHandleHeight)
+            let listHeight = max(60, totalHeight - inputHeight - splitHandleHeight)
 
             VStack(spacing: 0) {
                 diffFileList
@@ -219,171 +238,173 @@ struct DetailPanelView: View {
         }
     }
 
-    private func commitInfoHeader(_ commit: CommitInfo) -> some View {
+    private func commitTitleBar(_ commit: CommitInfo) -> some View {
         let _ = loadFullMessageIfNeeded(commit: commit)
-        return VStack(alignment: .leading, spacing: 6) {
-            // Commit hash + label + AI button 
-            HStack(spacing: 6) {
-                Text("commit:")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                Text(commit.shortHash)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                Spacer()
-                if isEditableCommit && isEditingMessage {
-                    Button(action: {
-                        Task {
-                            if let result = await viewModel.generateAICommitMessageForCommit(hash: commit.hash) {
-                                editedTitle = result.title
-                                editedDescription = result.description
-                            }
+        return HStack(spacing: 6) {
+            Text("commit:")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Text(commit.shortHash)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            Spacer()
+            if isEditableCommit && isEditingMessage {
+                Button(action: {
+                    Task {
+                        if let result = await viewModel.generateAICommitMessageForCommit(hash: commit.hash) {
+                            editedTitle = result.title
+                            editedDescription = result.description
                         }
-                    }) {
-                        HStack(spacing: 3) {
-                            if viewModel.isGeneratingAICommit {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .scaleEffect(0.7)
-                            } else {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 9))
-                            }
-                            Text("AI")
-                                .font(.system(size: 9, weight: .semibold))
+                    }
+                }) {
+                    HStack(spacing: 3) {
+                        if viewModel.isGeneratingAICommit {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .scaleEffect(0.7)
+                        } else {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 9))
                         }
-                        .foregroundStyle(.purple)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.purple.opacity(0.12))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .strokeBorder(Color.purple.opacity(0.3), lineWidth: 0.5)
-                        )
+                        Text("AI")
+                            .font(.system(size: 9, weight: .semibold))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isGeneratingAICommit)
-                    .help("Regenerate commit message with AI")
-                }
-            }
-
-            if isEditingMessage {
-                // Editable message area with separate title and description
-                VStack(alignment: .leading, spacing: 6) {
-                    // Title field with char count
-                    HStack(spacing: 0) {
-                        CommitTitleField(
-                            text: $editedTitle,
-                            placeholder: "Title",
-                            font: .systemFont(ofSize: 11, weight: .semibold)
-                        )
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 4)
-
-                        Text("\(72 - editedTitle.count)")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(editedTitle.count > 72 ? .red : .secondary)
-                            .padding(.trailing, 6)
-                    }
-                    .frame(height: 24)
-                    .background(Color(.textBackgroundColor).opacity(0.5))
+                    .foregroundStyle(.purple)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.purple.opacity(0.12))
+                    )
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+                            .strokeBorder(Color.purple.opacity(0.3), lineWidth: 0.5)
                     )
-
-                    // Description field
-                    commitDescriptionField(
-                        text: Binding(
-                            get: { editedDescription },
-                            set: { editedDescription = $0 }
-                        ),
-                        placeholder: "Description (optional)",
-                        cornerRadius: 4
-                    )
-
-                    // Update / Cancel buttons
-                    HStack(spacing: 8) {
-                        Button(action: {
-                            let title = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !title.isEmpty else { return }
-                            let description = editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let fullMessage = description.isEmpty ? title : title + "\n\n" + description
-                            isEditingMessage = false
-                            Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: fullMessage) }
-                        }) {
-                            Text("Update Message")
-                                .font(.system(size: 11, weight: .medium))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .tint(.green)
-                        .disabled(
-                            editedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || (editedTitle == originalTitle && editedDescription == originalDescription)
-                        )
-
-                        Button(action: {
-                            isEditingMessage = false
-                            editedTitle = originalTitle
-                            editedDescription = originalDescription
-                        }) {
-                            Text("Cancel")
-                                .font(.system(size: 11, weight: .medium))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .tint(.red)
-                    }
                 }
-            } else {
-                // Read-only message with hover border - show full message, max 3 lines, scrollable
-                ScrollView(.vertical, showsIndicators: true) {
-                    Text(fullCommitMessage.isEmpty ? commit.message : fullCommitMessage)
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(6)
-                }
-                .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity, alignment: .top)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(
-                            isHoveringMessage && isEditableCommit
-                                ? Color.accentColor.opacity(0.5)
-                                : Color.clear,
-                            lineWidth: 1
-                        )
-                )
-                .onHover { hovering in
-                    isHoveringMessage = hovering
-                }
-                .onTapGesture {
-                    guard isEditableCommit else { return }
-                    // Parse title and description from full message
-                    let message = fullCommitMessage.isEmpty ? commit.message : fullCommitMessage
-                    let lines = message.components(separatedBy: .newlines)
-                    let title = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    let description = lines.dropFirst()
-                        .drop(while: { $0.trimmingCharacters(in: .whitespaces).isEmpty })
-                        .joined(separator: "\n")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    
-                    originalTitle = title
-                    originalDescription = description
-                    editedTitle = title
-                    editedDescription = description
-                    isEditingMessage = true
-                }
-                .help(isEditableCommit ? "Click to edit commit message" : "")
+                .buttonStyle(.plain)
+                .disabled(viewModel.isGeneratingAICommit)
+                .help("Regenerate commit message with AI")
             }
+        }
+    }
 
-            // Author info and parent hash
+    @ViewBuilder
+    private func commitMessageSection(_ commit: CommitInfo) -> some View {
+        if isEditingMessage {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 0) {
+                    CommitTitleField(
+                        text: $editedTitle,
+                        placeholder: "Title",
+                        font: .systemFont(ofSize: 11, weight: .semibold)
+                    )
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+
+                    Text("\(72 - editedTitle.count)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(editedTitle.count > 72 ? .red : .secondary)
+                        .padding(.trailing, 6)
+                }
+                .frame(height: 24)
+                .background(Color(.textBackgroundColor).opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
+                )
+
+                commitDescriptionField(
+                    text: Binding(
+                        get: { editedDescription },
+                        set: { editedDescription = $0 }
+                    ),
+                    placeholder: "Description (optional)",
+                    cornerRadius: 4
+                )
+
+                HStack(spacing: 8) {
+                    Button(action: {
+                        let title = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !title.isEmpty else { return }
+                        let description = editedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let fullMessage = description.isEmpty ? title : title + "\n\n" + description
+                        isEditingMessage = false
+                        Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: fullMessage) }
+                    }) {
+                        Text("Update Message")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.green)
+                    .disabled(
+                        editedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (editedTitle == originalTitle && editedDescription == originalDescription)
+                    )
+
+                    Button(action: {
+                        isEditingMessage = false
+                        editedTitle = originalTitle
+                        editedDescription = originalDescription
+                    }) {
+                        Text("Cancel")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.red)
+                }
+            }
+        } else {
+            ScrollView(.vertical, showsIndicators: true) {
+                Text(fullCommitMessage.isEmpty ? commit.message : fullCommitMessage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+            }
+            .frame(
+                maxWidth: .infinity,
+                minHeight: LayoutDefaults.CommittedMessage.readOnlyContentMinHeight,
+                maxHeight: .infinity,
+                alignment: .top
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(
+                        isHoveringMessage && isEditableCommit
+                            ? Color.accentColor.opacity(0.5)
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            )
+            .onHover { hovering in
+                isHoveringMessage = hovering
+            }
+            .onTapGesture {
+                guard isEditableCommit else { return }
+                let message = fullCommitMessage.isEmpty ? commit.message : fullCommitMessage
+                let lines = message.components(separatedBy: .newlines)
+                let title = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let description = lines.dropFirst()
+                    .drop(while: { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+                    .joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                originalTitle = title
+                originalDescription = description
+                editedTitle = title
+                editedDescription = description
+                isEditingMessage = true
+            }
+            .help(isEditableCommit ? "Click to edit commit message" : "")
+        }
+    }
+
+    private func commitMetadataSection(_ commit: CommitInfo) -> some View {
+        let reflogEntries = viewModel.reflogEntries(for: commit.hash)
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 0) {
-                // Avatar
                 ZStack {
                     Circle()
                         .fill(avatarColor(for: commit.authorName))
@@ -411,7 +432,10 @@ struct DetailPanelView: View {
                 }
             }
 
-            // Merge badge
+            if viewModel.showReflogOverlay, !reflogEntries.isEmpty {
+                commitReflogSection(reflogEntries)
+            }
+
             if commit.isMerge {
                 HStack(spacing: 4) {
                     Text("Merge")
@@ -427,8 +451,15 @@ struct DetailPanelView: View {
                 }
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: CommittedMetadataHeightKey.self, value: geo.size.height)
+            }
+        )
+        .onPreferenceChange(CommittedMetadataHeightKey.self) { height in
+            guard height > 0 else { return }
+            measuredCommittedMetadataHeight = height
+        }
     }
     
     private func stashInfoHeader(_ stash: StashInfo) -> some View {
@@ -453,6 +484,129 @@ struct DetailPanelView: View {
             }
         }
         .padding(10)
+    }
+
+    @ViewBuilder
+    private func commitReflogSection(_ entries: [ReflogEntryInfo]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text("Reflog")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(viewModel.selectedReflogRef == "HEAD" ? "HEAD" : RefBadgeHelper.displayName(viewModel.selectedReflogRef))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
+            ForEach(entries.prefix(4)) { entry in
+                HStack(alignment: .top, spacing: 6) {
+                    Text(entry.kind.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color(nsColor: ReflogBadgeHelper.badgeColor(for: entry.kind)))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color(nsColor: ReflogBadgeHelper.badgeColor(for: entry.kind)).opacity(0.14))
+                        )
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.message)
+                            .font(.system(size: 10, weight: .medium))
+                            .lineLimit(2)
+                        reflogCommitLinkRow(entry)
+                        if !entry.date.isEmpty {
+                            Text(entry.date)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private func reflogCommitLinkRow(_ entry: ReflogEntryInfo) -> some View {
+        HStack(spacing: 4) {
+            reflogCommitLink(
+                hash: entry.oldOID,
+                shortHash: entry.shortOldOID,
+                isPrimary: false
+            )
+
+            Text("->")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+
+            reflogCommitLink(
+                hash: entry.newOID,
+                shortHash: entry.shortNewOID,
+                isPrimary: true
+            )
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func reflogCommitLink(hash: String?, shortHash: String, isPrimary: Bool) -> some View {
+        let canNavigate = viewModel.canNavigateToCommit(hash: hash)
+        let linkID = "\(isPrimary ? "new" : "old"):\(hash ?? shortHash)"
+        let isHovered = hoveredReflogLinkID == linkID
+
+        if let hash, canNavigate {
+            Button {
+                Task { await viewModel.navigateToCommit(hash: hash) }
+            } label: {
+                Text(shortHash)
+                    .font(.system(size: 9, weight: isPrimary ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(reflogLinkColor(isPrimary: isPrimary, isHovered: isHovered))
+                    .underline(isHovered)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(reflogLinkBackgroundColor(isPrimary: isPrimary, isHovered: isHovered))
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(RoundedRectangle(cornerRadius: 3))
+            .hoverTooltip("Jump to \(shortHash)")
+            .onHover { hovering in
+                hoveredReflogLinkID = hovering ? linkID : nil
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+        } else {
+            Text(shortHash)
+                .font(.system(size: 9, weight: isPrimary ? .semibold : .regular, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func reflogLinkColor(isPrimary: Bool, isHovered: Bool) -> Color {
+        if isPrimary {
+            return isHovered ? Color.accentColor : Color.accentColor.opacity(0.92)
+        }
+        return isHovered ? .primary : .secondary
+    }
+
+    private func reflogLinkBackgroundColor(isPrimary: Bool, isHovered: Bool) -> Color {
+        guard isHovered else { return .clear }
+        if isPrimary {
+            return Color.accentColor.opacity(0.12)
+        }
+        return Color.secondary.opacity(0.12)
     }
 
     // MARK: - Avatar Helpers
@@ -1623,7 +1777,7 @@ struct DetailPanelView: View {
 
     private func commitDescriptionField(text: Binding<String>, placeholder: String, cornerRadius: CGFloat) -> some View {
         CommitMessageEditor(text: text)
-            .frame(minHeight: 80, maxHeight: .infinity)
+            .frame(minHeight: LayoutDefaults.CommittedMessage.editingDescriptionMinHeight, maxHeight: .infinity)
             .background(Color(.textBackgroundColor).opacity(0.5))
             .overlay(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
@@ -2112,6 +2266,7 @@ struct DetailPanelView: View {
     ) -> some View {
         Rectangle()
             .fill(Color(.separatorColor).opacity(0.55))
+            .frame(maxWidth: .infinity)
             .frame(height: splitHandleHeight)
             .overlay {
                 Capsule()
@@ -2121,23 +2276,28 @@ struct DetailPanelView: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(
-                    minimumDistance: 1,
+                    minimumDistance: 0,
                     coordinateSpace: .named(axis == .top ? "detailCommittedSplit" : "detailUncommittedSplit")
                 )
                     .onChanged { value in
                         isResizingPane = true
-                        let pointerHeight: CGFloat
+                        if splitDragStartHeight == nil {
+                            splitDragStartHeight = height.wrappedValue
+                        }
+                        let baseHeight = splitDragStartHeight ?? height.wrappedValue
+                        let delta: CGFloat
                         switch axis {
                         case .top:
-                            pointerHeight = value.location.y - (splitHandleHeight / 2)
+                            delta = value.translation.height
                         case .bottom:
-                            pointerHeight = totalHeight - value.location.y - (splitHandleHeight / 2)
+                            delta = -value.translation.height
                         }
-                        let nextHeight = pointerHeight
+                        let nextHeight = baseHeight + delta
                         height.wrappedValue = min(max(nextHeight, range.lowerBound), range.upperBound)
                     }
                     .onEnded { _ in
                         isResizingPane = false
+                        splitDragStartHeight = nil
                     }
             )
             .onHover { inside in
@@ -2222,6 +2382,13 @@ private struct UnstagedRowFrameKey: PreferenceKey {
     static var defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue()) { _, new in new }
+    }
+}
+
+private struct CommittedMetadataHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -15,6 +15,7 @@
     tooltipElement: null,
     activeTooltipKey: null,
     currentHunkIndex: -1,
+    currentDiffIdentity: null,
   };
   
 
@@ -100,6 +101,7 @@
     state.diffZoneIds = [];
     state.gutterOverlay = null;
     state.contentOverlay = null;
+    state.currentDiffIdentity = null;
 
     const models = window.monaco && window.monaco.editor ? window.monaco.editor.getModels() : [];
     for (const model of models) {
@@ -113,6 +115,16 @@
 
   function modelUri(path, side) {
     return window.monaco.Uri.parse(`gitn://${side}/${encodeURIComponent(path)}`);
+  }
+
+  function buildDiffIdentity(item) {
+    return JSON.stringify({
+      path: item && item.path ? item.path : "",
+      language: item && item.language ? item.language : "",
+      isEditable: !!(item && item.isEditable),
+      originalText: item && typeof item.originalText === "string" ? item.originalText : "",
+      modifiedText: item && typeof item.modifiedText === "string" ? item.modifiedText : "",
+    });
   }
 
   function createModel(text, language, path, side) {
@@ -309,6 +321,7 @@
         applyEditorMetrics(shellNode, editor);
         renderDeletionGutter(editor);
       });
+      state.currentDiffIdentity = buildDiffIdentity(item);
       state.editors.push(editor, originalModel);
     } catch (error) {
       reportError(
@@ -1152,6 +1165,25 @@
     }
   }
 
+  function updateDiffMetadata(item) {
+    if (!state.diffEditor || !state.diffModel) {
+      return false;
+    }
+
+    state.diffModel = Object.assign({}, state.diffModel, buildHunkControlMaps({
+      path: item.path,
+      primaryHunkAction: item.primaryHunkAction || null,
+      showsDiscardAction: !!item.showsDiscardAction,
+      hunkControls: Array.isArray(item.hunkControls) ? item.hunkControls : [],
+    }), {
+      lineBlames: buildLineBlameMaps({
+        lineBlames: Array.isArray(item.lineBlames) ? item.lineBlames : [],
+      }),
+    });
+    renderDeletionGutter(state.diffEditor);
+    return true;
+  }
+
   function applyTheme(isDark) {
     document.body.classList.toggle("theme-dark", !!isDark);
     document.body.classList.toggle("theme-light", !isDark);
@@ -1237,14 +1269,23 @@
           return;
         }
         if (payload.mode === "diff" && payload.items && payload.items.length > 0) {
+          const item = payload.items[0];
           state.pendingHunkActions = {
-            path: payload.items[0].path,
-            primaryHunkAction: payload.items[0].primaryHunkAction || null,
-            showsDiscardAction: !!payload.items[0].showsDiscardAction,
-            hunkControls: Array.isArray(payload.items[0].hunkControls) ? payload.items[0].hunkControls : [],
+            path: item.path,
+            primaryHunkAction: item.primaryHunkAction || null,
+            showsDiscardAction: !!item.showsDiscardAction,
+            hunkControls: Array.isArray(item.hunkControls) ? item.hunkControls : [],
           };
-          state.pendingLineBlames = Array.isArray(payload.items[0].lineBlames) ? payload.items[0].lineBlames : [];
-          renderSingleDiff(payload.items[0]);
+          state.pendingLineBlames = Array.isArray(item.lineBlames) ? item.lineBlames : [];
+
+          const nextIdentity = buildDiffIdentity(item);
+          if (state.currentMode === "diff" &&
+              state.currentDiffIdentity === nextIdentity &&
+              updateDiffMetadata(item)) {
+            return;
+          }
+
+          renderSingleDiff(item);
           return;
         }
       } catch (error) {

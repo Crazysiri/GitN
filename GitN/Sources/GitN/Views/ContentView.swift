@@ -127,7 +127,7 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         window.styleMask.insert(.fullSizeContentView)
         window.toolbar = nil
     }

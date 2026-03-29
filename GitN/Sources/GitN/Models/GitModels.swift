@@ -73,6 +73,63 @@ struct CommitInfo: Identifiable, Equatable {
     }
 }
 
+enum ReflogEntryKind: String, Equatable, CaseIterable {
+    case checkout
+    case reset
+    case rebase
+    case amend
+    case commit
+    case merge
+    case branchMove
+    case fetch
+    case unknown
+
+    var label: String {
+        switch self {
+        case .checkout: return "checkout"
+        case .reset: return "reset"
+        case .rebase: return "rebase"
+        case .amend: return "amend"
+        case .commit: return "commit"
+        case .merge: return "merge"
+        case .branchMove: return "branch"
+        case .fetch: return "fetch"
+        case .unknown: return "reflog"
+        }
+    }
+}
+
+struct ReflogEntryInfo: Identifiable, Equatable {
+    let refName: String
+    let index: Int
+    let oldOID: String?
+    let newOID: String?
+    let message: String
+    let kind: ReflogEntryKind
+    let committerName: String
+    let committerEmail: String
+    let date: String
+
+    var id: String {
+        "\(refName)#\(index):\(oldOID ?? "nil")->\(newOID ?? "nil")"
+    }
+
+    var shortOldOID: String {
+        oldOID.map { String($0.prefix(7)) } ?? "0000000"
+    }
+
+    var shortNewOID: String {
+        newOID.map { String($0.prefix(7)) } ?? "0000000"
+    }
+}
+
+struct ReflogSourceOption: Identifiable, Equatable {
+    let refName: String
+    let title: String
+
+    var id: String { refName }
+}
+
 struct DiffFile: Identifiable, Equatable {
     var id: String { path }
     let additions: Int

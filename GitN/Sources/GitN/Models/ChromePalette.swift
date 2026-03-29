@@ -12,6 +12,9 @@ enum ChromePalette {
     static var chromeButtonFill: Color { Color(nsColor: chromeButtonFillNS) }
     static var chromeButtonHoverBorder: Color { Color(nsColor: chromeButtonHoverBorderNS) }
     static var chromeButtonHoverFill: Color { Color(nsColor: chromeButtonHoverFillNS) }
+    static var reflogAccent: Color { Color(nsColor: reflogAccentNS) }
+    static var reflogToggleBorder: Color { Color(nsColor: reflogToggleBorderNS) }
+    static var reflogToggleFill: Color { Color(nsColor: reflogToggleFillNS) }
 
     private static var navigationBackgroundNS: NSColor {
         NSColor(name: nil) { appearance in
@@ -97,6 +100,42 @@ enum ChromePalette {
                 return NSColor.white.withAlphaComponent(0.68)
             default:
                 return NSColor.white.withAlphaComponent(0.10)
+            }
+        }
+    }
+
+    private static var reflogAccentNS: NSColor {
+        NSColor(name: nil) { appearance in
+            let accent = NSColor.controlAccentColor
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return accent.highlight(withLevel: 0.04) ?? accent
+            default:
+                return accent.shadow(withLevel: 0.04) ?? accent
+            }
+        }
+    }
+
+    private static var reflogToggleBorderNS: NSColor {
+        NSColor(name: nil) { appearance in
+            let accent = NSColor.controlAccentColor
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return accent.withAlphaComponent(0.36)
+            default:
+                return accent.withAlphaComponent(0.46)
+            }
+        }
+    }
+
+    private static var reflogToggleFillNS: NSColor {
+        NSColor(name: nil) { appearance in
+            let accent = NSColor.controlAccentColor
+            switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
+            case .aqua:
+                return accent.withAlphaComponent(0.12)
+            default:
+                return accent.withAlphaComponent(0.18)
             }
         }
     }

@@ -136,6 +136,102 @@ final class RepoViewModel {
     var commits: [CommitInfo] = []
     private(set) var headCommitHash: String?
     private(set) var currentBranchHashes: Set<String> = []
+    var showReflogOverlay = false {
+        didSet {
+            UserDefaults.standard.set(showReflogOverlay, forKey: "GitN.showReflogOverlay.\(repoPath)")
+            guard !showReflogOverlay,
+                  let selectedCommit,
+                  !selectedCommit.isUncommitted,
+                  !commits.contains(where: { $0.hash == selectedCommit.hash }) else { return }
+            clearDetailSelection()
+        }
+    }
+    var selectedReflogRef = "HEAD" {
+        didSet {
+            guard oldValue != selectedReflogRef else { return }
+            UserDefaults.standard.set(selectedReflogRef, forKey: "GitN.selectedReflogRef.\(repoPath)")
+            Task { await loadReflog() }
+        }
+    }
+    var reflogEntries: [ReflogEntryInfo] = []
+    var reflogEntriesByCommitHash: [String: [ReflogEntryInfo]] = [:]
+    var reflogRecoveredCommits: [CommitInfo] = []
+    var reflogRecoveryEntriesByCommitHash: [String: [ReflogEntryInfo]] = [:]
+
+    var graphDisplayCommits: [CommitInfo] {
+        guard showReflogOverlay, !reflogRecoveredCommits.isEmpty else { return commits }
+
+        let pinnedPrefix: [CommitInfo]
+        let baseCommits: [CommitInfo]
+        if let first = commits.first, first.isUncommitted {
+            pinnedPrefix = [first]
+            baseCommits = Array(commits.dropFirst())
+        } else {
+            pinnedPrefix = []
+            baseCommits = commits
+        }
+
+        let recoveredByHash = Dictionary(uniqueKeysWithValues: reflogRecoveredCommits.map { ($0.hash, $0) })
+        let recoveredHashes = Set(recoveredByHash.keys)
+        let childHashes = Set(reflogRecoveredCommits.compactMap(\.parentHashes.first).filter { recoveredHashes.contains($0) })
+
+        func reflogRank(for commit: CommitInfo) -> Int {
+            reflogRecoveryEntriesByCommitHash[commit.hash]?.map(\.index).min() ?? .max
+        }
+
+        var visited: Set<String> = []
+        var chainsByAnchor: [String: [[CommitInfo]]] = [:]
+
+        func storeChain(startingAt tip: CommitInfo) {
+            guard !visited.contains(tip.hash) else { return }
+
+            var chain: [CommitInfo] = []
+            var current: CommitInfo? = tip
+            var anchorHash: String?
+
+            while let commit = current, !visited.contains(commit.hash) {
+                chain.append(commit)
+                visited.insert(commit.hash)
+                let parentHash = commit.parentHashes.first
+                if let parentHash, let recoveredParent = recoveredByHash[parentHash] {
+                    current = recoveredParent
+                } else {
+                    anchorHash = parentHash
+                    current = nil
+                }
+            }
+
+            guard !chain.isEmpty else { return }
+            chainsByAnchor[anchorHash ?? "__root__", default: []].append(chain)
+        }
+
+        for commit in reflogRecoveredCommits where !childHashes.contains(commit.hash) {
+            storeChain(startingAt: commit)
+        }
+        for commit in reflogRecoveredCommits where !visited.contains(commit.hash) {
+            storeChain(startingAt: commit)
+        }
+
+        for key in chainsByAnchor.keys {
+            chainsByAnchor[key]?.sort { lhs, rhs in
+                let left = reflogRank(for: lhs.first ?? lhs[0])
+                let right = reflogRank(for: rhs.first ?? rhs[0])
+                return left < right
+            }
+        }
+
+        var result: [CommitInfo] = []
+        if let rootChains = chainsByAnchor["__root__"] {
+            result.append(contentsOf: rootChains.flatMap { $0 })
+        }
+        for commit in baseCommits {
+            if let anchoredChains = chainsByAnchor[commit.hash] {
+                result.append(contentsOf: anchoredChains.flatMap { $0 })
+            }
+            result.append(commit)
+        }
+        return pinnedPrefix + result
+    }
 
     // MARK: - Pagination (pull-based via CommitWalker)
     private var commitWalker: CommitWalker?
@@ -1698,7 +1794,132 @@ final class RepoViewModel {
         self.git = GitService(repoPath: path)
         // 恢复上次 terminal 的打开状态
         self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
+        self.showReflogOverlay = UserDefaults.standard.bool(forKey: "GitN.showReflogOverlay.\(path)")
+        self.selectedReflogRef = UserDefaults.standard.string(forKey: "GitN.selectedReflogRef.\(path)") ?? "HEAD"
         loadCollapsedSections()
+    }
+
+    var reflogSourceOptions: [ReflogSourceOption] {
+        var options = [ReflogSourceOption(refName: "HEAD", title: "HEAD")]
+        if !currentBranch.isEmpty {
+            options.append(ReflogSourceOption(refName: "refs/heads/\(currentBranch)", title: currentBranch))
+        }
+        return options
+    }
+
+    var reflogMergedEntriesByCommitHash: [String: [ReflogEntryInfo]] {
+        let hashes = Set(reflogEntriesByCommitHash.keys).union(reflogRecoveryEntriesByCommitHash.keys)
+        return Dictionary(uniqueKeysWithValues: hashes.map { ($0, reflogEntries(for: $0)) })
+    }
+
+    var reflogBadgeEntriesByCommitHash: [String: [ReflogEntryInfo]] {
+        Dictionary(uniqueKeysWithValues: reflogMergedEntriesByCommitHash.keys.map { ($0, reflogBadgeEntries(for: $0)) })
+    }
+
+    func reflogEntries(for commitHash: String) -> [ReflogEntryInfo] {
+        let visible = reflogEntriesByCommitHash[commitHash] ?? []
+        let recovered = reflogRecoveryEntriesByCommitHash[commitHash] ?? []
+        var merged: [String: ReflogEntryInfo] = [:]
+        for entry in visible + recovered {
+            merged[entry.id] = entry
+        }
+        return merged.values.sorted { $0.index < $1.index }
+    }
+
+    func reflogBadgeEntries(for commitHash: String) -> [ReflogEntryInfo] {
+        var seenKinds: Set<String> = []
+        return reflogEntries(for: commitHash).filter { entry in
+            seenKinds.insert(entry.kind.rawValue).inserted
+        }
+    }
+
+    func selectRecoveredCommit(_ commit: CommitInfo) async {
+        if let existing = commits.first(where: { $0.hash == commit.hash }) {
+            await revealCommit(hash: existing.hash)
+            return
+        }
+        await selectCommit(commit)
+        scrollToCommitHash = nil
+    }
+
+    func canNavigateToCommit(hash: String?) -> Bool {
+        guard let hash, !hash.isEmpty else { return false }
+        let matches: (CommitInfo) -> Bool = { commit in
+            commit.hash == hash || commit.hash.hasPrefix(hash) || hash.hasPrefix(commit.hash)
+        }
+        if commits.contains(where: matches) || reflogRecoveredCommits.contains(where: matches) {
+            return true
+        }
+        return !allCommitsLoaded
+    }
+
+    func navigateToCommit(hash: String) async {
+        guard !hash.isEmpty else { return }
+        let matches: (CommitInfo) -> Bool = { commit in
+            commit.hash == hash || commit.hash.hasPrefix(hash) || hash.hasPrefix(commit.hash)
+        }
+
+        if let commit = graphDisplayCommits.first(where: matches) {
+            if reflogRecoveredCommits.contains(where: { $0.hash == commit.hash }) {
+                await selectRecoveredCommit(commit)
+            } else {
+                await revealCommit(hash: commit.hash)
+            }
+            return
+        }
+
+        await revealCommit(hash: hash)
+    }
+
+    func loadReflog() async {
+        do {
+            let entries = try await git.reflog(refName: selectedReflogRef, maxCount: 250)
+            reflogEntries = entries
+            reflogEntriesByCommitHash = Dictionary(grouping: entries.compactMap { entry -> (String, ReflogEntryInfo)? in
+                guard let hash = entry.newOID else { return nil }
+                return (hash, entry)
+            }, by: \.0).mapValues { $0.map(\.1) }
+
+            let candidateHashes = Array(Set(entries.flatMap { entry in
+                [entry.oldOID, entry.newOID].compactMap { $0 }
+            }))
+            let reachable = try await git.reachableCommitHashes(matching: candidateHashes)
+
+            let orderedLostHashes = entries.flatMap { entry in
+                [entry.oldOID, entry.newOID].compactMap { hash -> String? in
+                    guard let hash, !reachable.contains(hash) else { return nil }
+                    return hash
+                }
+            }.reduce(into: [String]()) { result, hash in
+                if !result.contains(hash) {
+                    result.append(hash)
+                }
+            }
+
+            reflogRecoveryEntriesByCommitHash = Dictionary(grouping: entries.compactMap { entry -> (String, ReflogEntryInfo)? in
+                if let oldOID = entry.oldOID, orderedLostHashes.contains(oldOID) {
+                    return (oldOID, entry)
+                }
+                if let newOID = entry.newOID, orderedLostHashes.contains(newOID) {
+                    return (newOID, entry)
+                }
+                return nil
+            }, by: \.0).mapValues { $0.map(\.1) }
+
+            var recoveredCommits: [CommitInfo] = []
+            recoveredCommits.reserveCapacity(orderedLostHashes.count)
+            for hash in orderedLostHashes {
+                if let commit = try? await git.commitInfo(hash: hash) {
+                    recoveredCommits.append(commit)
+                }
+            }
+            reflogRecoveredCommits = recoveredCommits
+        } catch {
+            reflogEntries = []
+            reflogEntriesByCommitHash = [:]
+            reflogRecoveredCommits = []
+            reflogRecoveryEntriesByCommitHash = [:]
+        }
     }
 
     // MARK: - File System Watcher
@@ -1938,6 +2159,10 @@ final class RepoViewModel {
             headCommitHash = hc
             isDetachedHead = dh
             currentBranchHashes = await branchHashes
+            if selectedReflogRef != "HEAD", selectedReflogRef != "refs/heads/\(cb)" {
+                selectedReflogRef = "HEAD"
+            }
+            await loadReflog()
 
             // Refresh remote tags in background (best-effort, doesn't block UI load)
             Task { await refreshKnownRemoteTags() }

@@ -16,6 +16,7 @@ struct GraphView: View {
     @State private var upstreamBranch = ""
     @State private var pendingRemoteBranchDelete: (remote: String, branch: String)?
     @State private var uncommittedScrolledAway = false
+    @State private var isHoveringReflogToggle = false
 
     private let rowHeight: CGFloat = 24
     private let columnWidth: CGFloat = 18
@@ -23,21 +24,39 @@ struct GraphView: View {
     private let graphAreaWidth: CGFloat = 150
     private let refsColumnWidth: CGFloat = 86
 
+    private var reflogToggleFill: Color {
+        if viewModel.showReflogOverlay {
+            return ChromePalette.reflogToggleFill
+        }
+        return isHoveringReflogToggle ? ChromePalette.chromeButtonHoverFill : ChromePalette.chromeButtonFill
+    }
+
+    private var reflogToggleBorder: Color {
+        if viewModel.showReflogOverlay {
+            return ChromePalette.reflogToggleBorder
+        }
+        return isHoveringReflogToggle ? ChromePalette.chromeButtonHoverBorder : ChromePalette.chromeButtonBorder
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-
             graphHeader
             Divider()
 
-            if viewModel.commits.isEmpty && !viewModel.isLoading {
+            if viewModel.graphDisplayCommits.isEmpty && !viewModel.isLoading {
                 emptyState
             } else {
                 ZStack(alignment: .topTrailing) {
                     CommitTableView(
-                        commits: viewModel.commits,
+                        commits: viewModel.graphDisplayCommits,
+                        graphCommits: viewModel.graphDisplayCommits,
                         selectedCommitHash: viewModel.selectedCommit?.hash,
                         currentBranch: viewModel.currentBranch,
                         hasUnresolvedConflicts: viewModel.hasUnresolvedConflicts,
+                        showReflogOverlay: viewModel.showReflogOverlay,
+                        reflogEntries: viewModel.reflogEntries,
+                        reflogBadgeEntriesByCommitHash: viewModel.reflogBadgeEntriesByCommitHash,
+                        recoveredCommitHashes: Set(viewModel.reflogRecoveredCommits.map(\.hash)),
                         scrollToHash: viewModel.scrollToCommitHash,
                         allCommitsLoaded: viewModel.allCommitsLoaded,
                         rowHeight: rowHeight,
@@ -63,7 +82,7 @@ struct GraphView: View {
                         }
                     )
 
-                    if uncommittedScrolledAway, let uncommitted = viewModel.commits.first, uncommitted.isUncommitted {
+                    if uncommittedScrolledAway, let uncommitted = viewModel.commits.first(where: \.isUncommitted) {
                         Button {
                             viewModel.scrollToCommitHash = uncommitted.hash
                         } label: {
@@ -182,6 +201,46 @@ struct GraphView: View {
             Text("Commit Message")
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 6)
+
+            if viewModel.showReflogOverlay {
+                Picker("", selection: Binding(
+                    get: { viewModel.selectedReflogRef },
+                    set: { viewModel.selectedReflogRef = $0 }
+                )) {
+                    ForEach(viewModel.reflogSourceOptions) { option in
+                        Text(option.title).tag(option.refName)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 110)
+                .controlSize(.small)
+            }
+
+            Toggle(isOn: Binding(
+                get: { viewModel.showReflogOverlay },
+                set: { viewModel.showReflogOverlay = $0 }
+            )) {
+                Text("Reflog")
+                    .foregroundStyle(viewModel.showReflogOverlay ? ChromePalette.reflogAccent : .secondary)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(reflogToggleFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(reflogToggleBorder, lineWidth: 0.75)
+            )
+            .onHover { isHoveringReflogToggle = $0 }
+            .hoverTooltip(
+                "Use git reflog to show recent ref\nmoves and recovered commits",
+                placement: .below
+            )
+            .padding(.trailing, 8)
         }
         .font(.system(size: 10, weight: .medium))
         .foregroundStyle(.secondary)
@@ -349,9 +408,14 @@ enum CommitContextAction {
 
 struct CommitTableView: NSViewRepresentable {
     let commits: [CommitInfo]
+    let graphCommits: [CommitInfo]
     let selectedCommitHash: String?
     let currentBranch: String
     let hasUnresolvedConflicts: Bool
+    let showReflogOverlay: Bool
+    let reflogEntries: [ReflogEntryInfo]
+    let reflogBadgeEntriesByCommitHash: [String: [ReflogEntryInfo]]
+    let recoveredCommitHashes: Set<String>
     let scrollToHash: String?
     let allCommitsLoaded: Bool
     let rowHeight: CGFloat
@@ -437,9 +501,14 @@ struct CommitTableView: NSViewRepresentable {
         let dataChanged = oldCommitIDs != newCommitIDs
 
         coordinator.commits = commits
+        coordinator.graphCommits = graphCommits
         coordinator.selectedCommitHash = selectedCommitHash
         coordinator.currentBranch = currentBranch
         coordinator.hasUnresolvedConflicts = hasUnresolvedConflicts
+        coordinator.showReflogOverlay = showReflogOverlay
+        coordinator.reflogEntries = reflogEntries
+        coordinator.reflogBadgeEntriesByCommitHash = reflogBadgeEntriesByCommitHash
+        coordinator.recoveredCommitHashes = recoveredCommitHashes
         coordinator.allCommitsLoaded = allCommitsLoaded
         coordinator.remoteNames = remoteNames
         coordinator.onSelectCommit = onSelectCommit
@@ -462,11 +531,11 @@ struct CommitTableView: NSViewRepresentable {
 
             if isAppend {
                 // Streaming append — keep existing graph state, just extend commits
-                coordinator.lazyGraph.updateCommits(commits)
+                coordinator.lazyGraph.updateCommits(graphCommits)
             } else {
                 // Full change (reload, repo switch, etc.) — dismiss any stale tooltip
                 RefTooltipPanel.shared.cancelAndHide()
-                coordinator.lazyGraph.reset(commits: commits)
+                coordinator.lazyGraph.reset(commits: graphCommits)
             }
 
             // Reset multi-selection when data changes (commits reloaded)
@@ -538,11 +607,16 @@ struct CommitTableView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var commits: [CommitInfo] = []
+        var graphCommits: [CommitInfo] = []
         var commitIDs: [String] = []
         let lazyGraph = LazyGraphProcessor()
         var selectedCommitHash: String?
         var currentBranch: String = ""
         var hasUnresolvedConflicts: Bool = false
+        var showReflogOverlay: Bool = false
+        var reflogEntries: [ReflogEntryInfo] = []
+        var reflogBadgeEntriesByCommitHash: [String: [ReflogEntryInfo]] = [:]
+        var recoveredCommitHashes: Set<String> = []
         var allCommitsLoaded: Bool = false
         var remoteNames: [String] = []
         var onSelectCommit: ((CommitInfo) -> Void)?
@@ -564,10 +638,15 @@ struct CommitTableView: NSViewRepresentable {
 
         init(parent: CommitTableView) {
             self.commits = parent.commits
+            self.graphCommits = parent.graphCommits
             self.commitIDs = parent.commits.map(\.hash)
             self.selectedCommitHash = parent.selectedCommitHash
             self.currentBranch = parent.currentBranch
             self.hasUnresolvedConflicts = parent.hasUnresolvedConflicts
+            self.showReflogOverlay = parent.showReflogOverlay
+            self.reflogEntries = parent.reflogEntries
+            self.reflogBadgeEntriesByCommitHash = parent.reflogBadgeEntriesByCommitHash
+            self.recoveredCommitHashes = parent.recoveredCommitHashes
             self.allCommitsLoaded = parent.allCommitsLoaded
             self.remoteNames = parent.remoteNames
             self.onSelectCommit = parent.onSelectCommit
@@ -582,7 +661,7 @@ struct CommitTableView: NSViewRepresentable {
             if let hash = parent.selectedCommitHash {
                 self.selectedRowHashes = [hash]
             }
-            lazyGraph.reset(commits: parent.commits)
+            lazyGraph.reset(commits: parent.graphCommits)
         }
 
         deinit {
@@ -591,7 +670,7 @@ struct CommitTableView: NSViewRepresentable {
 
         @objc func scrollViewBoundsChanged(_ notification: Notification) {
             guard let tableView else { return }
-            guard commits.first?.isUncommitted == true else {
+            guard let uncommittedIndex = commits.firstIndex(where: \.isUncommitted) else {
                 if !uncommittedVisible {
                     uncommittedVisible = true
                     DispatchQueue.main.async { [weak self] in
@@ -601,7 +680,7 @@ struct CommitTableView: NSViewRepresentable {
                 return
             }
             let visibleRows = tableView.rows(in: tableView.visibleRect)
-            let isVisible = visibleRows.location != NSNotFound && visibleRows.contains(0)
+            let isVisible = visibleRows.location != NSNotFound && visibleRows.contains(uncommittedIndex)
             if isVisible != uncommittedVisible {
                 uncommittedVisible = isVisible
                 DispatchQueue.main.async { [weak self] in
@@ -625,7 +704,7 @@ struct CommitTableView: NSViewRepresentable {
             let visibleRowCount = tableView.rows(
                 in: tableView.enclosingScrollView?.contentView.bounds ?? tableView.bounds
             ).length
-            let targetRow = min(commits.count, row + visibleRowCount + 200) - 1
+            let targetRow = min(graphCommits.count, row + visibleRowCount + 200) - 1
             if targetRow >= lazyGraph.processedCount {
                 lazyGraph.ensureProcessed(through: targetRow)
                 // Update maxColumns for horizontal scroll
@@ -662,6 +741,9 @@ struct CommitTableView: NSViewRepresentable {
             cell.isSelectedRow = selectedRowHashes.contains(commit.hash)
             cell.currentBranch = currentBranch
             cell.isInConflict = commit.isUncommitted && hasUnresolvedConflicts
+            cell.isRecoveredRow = recoveredCommitHashes.contains(commit.hash)
+            cell.showReflogOverlay = showReflogOverlay
+            cell.reflogBadgeEntries = reflogBadgeEntriesByCommitHash[commit.hash] ?? []
             cell.rowHeight = rowHeight
             cell.columnWidth = columnWidth
             cell.avatarSize = avatarSize
@@ -1105,6 +1187,11 @@ final class CommitRowCellView: NSView {
     var isSelectedRow = false
     var currentBranch = ""
     var isInConflict = false
+    var isRecoveredRow = false
+    var showReflogOverlay = false
+    var reflogBadgeEntries: [ReflogEntryInfo] = [] {
+        didSet { needsDisplay = true }
+    }
     var rowHeight: CGFloat = 24
     var columnWidth: CGFloat = 18
     var avatarSize: CGFloat = 18
@@ -1127,6 +1214,9 @@ final class CommitRowCellView: NSView {
         // Background
         if isSelectedRow {
             NSColor.selectedContentBackgroundColor.withAlphaComponent(0.2).setFill()
+            bounds.fill()
+        } else if isRecoveredRow {
+            NSColor.systemOrange.withAlphaComponent(0.035).setFill()
             bounds.fill()
         } else if commit.isUncommitted {
             NSColor.orange.withAlphaComponent(0.04).setFill()
@@ -1188,7 +1278,7 @@ final class CommitRowCellView: NSView {
     private var overflowPillRect: NSRect?
 
     private func drawRefs(in rect: NSRect) {
-        guard let commit = commit, !commit.refs.isEmpty else {
+        guard let commit = commit else {
             overflowPillRect = nil
             return
         }
@@ -1198,6 +1288,16 @@ final class CommitRowCellView: NSView {
         var x = rect.minX
         let badgeHeight: CGFloat = 14
         let badgeY = (rect.height - badgeHeight) / 2
+
+        if isRecoveredRow {
+            let (badgeW, _) = drawRefBadge(ref: "Recovered", at: NSPoint(x: x, y: badgeY), height: badgeHeight, maxWidth: rect.width)
+            x += badgeW + 3
+        }
+
+        guard !commit.refs.isEmpty else {
+            overflowPillRect = nil
+            return
+        }
 
         if let firstRef = commit.refs.first {
             // When there are multiple refs, pre-reserve space for the "+N" pill
@@ -1311,17 +1411,17 @@ final class CommitRowCellView: NSView {
     // MARK: - Graph Column
 
     private func drawGraph(in rect: NSRect) {
-                guard let entry = graphEntry else { return }
+        guard let entry = graphEntry else { return }
         let clip = NSBezierPath(rect: rect)
         clip.addClip()
 
         let h = rect.height
         let midY = rect.minY + h / 2
-                let lineWidth: CGFloat = 1.5
+        let lineWidth: CGFloat = 1.5
         let scrollX = graphScrollOffset
 
         // Draw lines
-                for line in entry.lines {
+        for line in entry.lines {
             let nsColor = (entry.isUncommitted || line.isUncommittedLink)
                 ? NSColor.gray.withAlphaComponent(0.5)
                 : GraphColorsNS.color(for: line.colorIndex)
@@ -1335,7 +1435,7 @@ final class CommitRowCellView: NSView {
             path.line(to: NSPoint(x: toX, y: midY))
             path.lineCapStyle = .round
 
-                    if line.from != line.to {
+            if line.from != line.to {
                 NSColor.textBackgroundColor.setStroke()
                 path.lineWidth = lineWidth + 2
                 path.stroke()
@@ -1347,12 +1447,12 @@ final class CommitRowCellView: NSView {
 
         // Draw dot / avatar
         let dotX = rect.minX + CGFloat(entry.position) * columnWidth - scrollX
-                if entry.isUncommitted {
-                    let dotSize: CGFloat = 12
+        if entry.isUncommitted {
+            let dotSize: CGFloat = 12
             let dotRect = NSRect(
-                        x: dotX - dotSize / 2, y: midY - dotSize / 2,
-                        width: dotSize, height: dotSize
-                    )
+                x: dotX - dotSize / 2, y: midY - dotSize / 2,
+                width: dotSize, height: dotSize
+            )
             // Halo
             NSColor.textBackgroundColor.setFill()
             NSBezierPath(ovalIn: dotRect.insetBy(dx: -2, dy: -2)).fill()
@@ -1363,14 +1463,14 @@ final class CommitRowCellView: NSView {
             let pattern: [CGFloat] = [3, 2]
             dashPath.setLineDash(pattern, count: 2, phase: 0)
             dashPath.stroke()
-                } else {
+        } else {
             // Avatar circle
             let aSize = avatarSize
             let haloSize = aSize + 2
             let haloRect = NSRect(
-                        x: dotX - haloSize / 2, y: midY - haloSize / 2,
-                        width: haloSize, height: haloSize
-                    )
+                x: dotX - haloSize / 2, y: midY - haloSize / 2,
+                width: haloSize, height: haloSize
+            )
             NSColor.textBackgroundColor.setFill()
             NSBezierPath(ovalIn: haloRect).fill()
 
@@ -1447,6 +1547,12 @@ final class CommitRowCellView: NSView {
             let detailRect = NSRect(x: detailX, y: midY - 6, width: detailW, height: 12)
             commit.message.draw(with: detailRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: detailAttrs)
         } else {
+            var contentX = rect.minX + 6
+
+            if showReflogOverlay, !reflogBadgeEntries.isEmpty {
+                contentX = drawReflogBadges(in: rect, startX: contentX, midY: midY) + 6
+            }
+
             // Commit message
             let msgAttrs: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11),
@@ -1456,9 +1562,7 @@ final class CommitRowCellView: NSView {
 
             // Date (right-aligned)
             var dateWidth: CGFloat = 0
-            var dateStr: String?
             if let ds = BriefDateFormatter.format(commit.date) {
-                dateStr = ds
                 let dateAttrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 9),
                     .foregroundColor: NSColor.tertiaryLabelColor
@@ -1469,14 +1573,75 @@ final class CommitRowCellView: NSView {
                 ds.draw(at: dateOrigin, withAttributes: dateAttrs)
             }
 
-            let msgMaxW = max(0, rect.width - 14 - dateWidth)
-            let msgRect = NSRect(x: rect.minX + 6, y: midY - msgSize.height / 2,
+            let msgMaxW = max(0, rect.maxX - contentX - 8 - dateWidth)
+            let msgRect = NSRect(x: contentX, y: midY - msgSize.height / 2,
                                  width: msgMaxW, height: msgSize.height)
             commit.message.draw(with: msgRect,
                                 options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
                                 attributes: msgAttrs)
         }
     }
+
+    private func drawReflogBadges(in rect: NSRect, startX: CGFloat, midY: CGFloat) -> CGFloat {
+        var x = startX
+        let badgeHeight: CGFloat = 13
+        let badgeY = midY - badgeHeight / 2
+
+        for entry in reflogBadgeEntries.prefix(3) {
+            let color = ReflogBadgeHelper.badgeColor(for: entry.kind)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                .foregroundColor: color
+            ]
+            let label = entry.kind.label
+            let size = label.size(withAttributes: attrs)
+            let width = size.width + 8
+            let badgeRect = NSRect(x: x, y: badgeY, width: width, height: badgeHeight)
+            let path = NSBezierPath(roundedRect: badgeRect, xRadius: 3, yRadius: 3)
+            color.withAlphaComponent(0.14).setFill()
+            path.fill()
+            color.withAlphaComponent(0.28).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+
+            let textRect = NSRect(
+                x: badgeRect.minX + 4,
+                y: badgeRect.minY + (badgeHeight - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+            label.draw(in: textRect, withAttributes: attrs)
+            x += width + 4
+        }
+
+        if reflogBadgeEntries.count > 3 {
+            let more = "+\(reflogBadgeEntries.count - 3)"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+            let size = more.size(withAttributes: attrs)
+            let width = size.width + 8
+            let badgeRect = NSRect(x: x, y: badgeY, width: width, height: badgeHeight)
+            let path = NSBezierPath(roundedRect: badgeRect, xRadius: 3, yRadius: 3)
+            NSColor.controlBackgroundColor.setFill()
+            path.fill()
+            NSColor.separatorColor.withAlphaComponent(0.4).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+            let textRect = NSRect(
+                x: badgeRect.minX + 4,
+                y: badgeRect.minY + (badgeHeight - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+            more.draw(in: textRect, withAttributes: attrs)
+            x += width + 4
+        }
+
+        return x
+    }
+
 }
 
 // MARK: - Custom Ref Badge Tooltip
@@ -1645,6 +1810,31 @@ private enum GraphColorsNS {
 
     static func color(for index: Int) -> NSColor {
         colors[abs(index) % colors.count]
+    }
+}
+
+enum ReflogBadgeHelper {
+    static func badgeColor(for kind: ReflogEntryKind) -> NSColor {
+        switch kind {
+        case .checkout:
+            return .systemBlue
+        case .reset:
+            return .systemOrange
+        case .rebase:
+            return .systemPink
+        case .amend:
+            return .systemPurple
+        case .commit:
+            return .systemGreen
+        case .merge:
+            return .systemTeal
+        case .branchMove:
+            return .systemIndigo
+        case .fetch:
+            return .systemCyan
+        case .unknown:
+            return .secondaryLabelColor
+        }
     }
 }
 

@@ -291,6 +291,25 @@ actor GitService {
         return fmt.string(from: date) + " " + String(format: "%@%02d%02d", sign, abs / 60, abs % 60)
     }
 
+    private nonisolated func oidToOptionalHash(_ ptr: UnsafePointer<git_oid>?) -> String? {
+        guard let ptr else { return nil }
+        let hash = oidToHash(ptr)
+        return hash.allSatisfy { $0 == "0" } ? nil : hash
+    }
+
+    private nonisolated func reflogKind(for message: String) -> ReflogEntryKind {
+        let lowercased = message.lowercased()
+        if lowercased.hasPrefix("checkout:") { return .checkout }
+        if lowercased.hasPrefix("reset:") { return .reset }
+        if lowercased.contains("rebase") { return .rebase }
+        if lowercased.hasPrefix("commit (amend):") { return .amend }
+        if lowercased.hasPrefix("commit:") || lowercased.hasPrefix("commit (initial):") { return .commit }
+        if lowercased.contains("merge") { return .merge }
+        if lowercased.hasPrefix("branch:") { return .branchMove }
+        if lowercased.hasPrefix("fetch") { return .fetch }
+        return .unknown
+    }
+
     // MARK: - HEAD
 
     func headCommitHash() throws -> String? {
@@ -602,6 +621,145 @@ actor GitService {
         return data.items.map {
             SubmoduleInfo(name: $0.name, hash: $0.hash)
         }
+    }
+
+    // MARK: - Reflog
+
+    func reflog(refName: String = "HEAD", maxCount: Int = 200) throws -> [ReflogEntryInfo] {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var log: OpaquePointer?
+        guard git_reflog_read(&log, repo, refName) == 0, let log else {
+            throw GitError.operationFailed("Unable to read reflog for \(refName)")
+        }
+        defer { git_reflog_free(log) }
+
+        let totalCount = git_reflog_entrycount(log)
+        let limit = min(maxCount, totalCount)
+        guard limit > 0 else { return [] }
+
+        var result: [ReflogEntryInfo] = []
+        result.reserveCapacity(limit)
+
+        for idx in 0..<limit {
+            guard let entry = git_reflog_entry_byindex(log, idx) else { continue }
+
+            let message = git_reflog_entry_message(entry).map(String.init(cString:))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let signature = git_reflog_entry_committer(entry)
+            let committerName = signature.map { String(cString: $0.pointee.name) } ?? ""
+            let committerEmail = signature.map { String(cString: $0.pointee.email) } ?? ""
+            let date = signature.map { formatGitTime($0.pointee.when) } ?? ""
+
+            result.append(ReflogEntryInfo(
+                refName: refName,
+                index: idx,
+                oldOID: oidToOptionalHash(git_reflog_entry_id_old(entry)),
+                newOID: oidToOptionalHash(git_reflog_entry_id_new(entry)),
+                message: message,
+                kind: reflogKind(for: message),
+                committerName: committerName,
+                committerEmail: committerEmail,
+                date: date
+            ))
+        }
+
+        return result
+    }
+
+    func reachableCommitHashes(matching candidates: [String]) throws -> Set<String> {
+        guard let repo else { throw GitError.repoNotOpen }
+        let wanted = Set(candidates.filter { !$0.isEmpty })
+        guard !wanted.isEmpty else { return [] }
+
+        var walker: OpaquePointer?
+        guard git_revwalk_new(&walker, repo) == 0, let walker else {
+            throw GitError.operationFailed("Unable to create revwalk")
+        }
+        defer { git_revwalk_free(walker) }
+
+        git_revwalk_sorting(walker, GIT_SORT_TOPOLOGICAL.rawValue | GIT_SORT_TIME.rawValue)
+
+        var iter: OpaquePointer?
+        guard git_reference_iterator_new(&iter, repo) == 0, let iter else {
+            throw GitError.operationFailed("Unable to iterate references")
+        }
+        defer { git_reference_iterator_free(iter) }
+
+        var ref: OpaquePointer?
+        while git_reference_next(&ref, iter) == 0, let ref {
+            defer { git_reference_free(ref) }
+            guard let namePtr = git_reference_name(ref) else { continue }
+            // Reflog recovery should treat any live ref as reachable, not just
+            // branches/tags/remotes. This avoids false positives for refs like
+            // refs/stash and custom refs namespaces.
+            git_revwalk_push_ref(walker, namePtr)
+        }
+
+        // Detached HEAD can still point to a live commit even when no ref names it.
+        git_revwalk_push_head(walker)
+
+        var found: Set<String> = []
+        var oid = git_oid()
+        while found.count < wanted.count, git_revwalk_next(&oid, walker) == 0 {
+            let hash = oidToHash(&oid)
+            if wanted.contains(hash) {
+                found.insert(hash)
+            }
+        }
+        return found
+    }
+
+    func commitInfo(hash: String) throws -> CommitInfo {
+        guard let repo else { throw GitError.repoNotOpen }
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, hash) == 0 else {
+            throw GitError.operationFailed("Invalid commit hash")
+        }
+
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Commit not found")
+        }
+        defer { git_commit_free(commit) }
+
+        let refMap = buildRefMap()
+        let shortHash = oidToShortHash(&oid)
+        let parentCount = git_commit_parentcount(commit)
+        var parentHashes: [String] = []
+        for i in 0..<parentCount {
+            if let pid = git_commit_parent_id(commit, i) {
+                parentHashes.append(oidToHash(pid))
+            }
+        }
+
+        let authorName: String
+        let authorEmail: String
+        let date: String
+        if let sig = git_commit_author(commit) {
+            authorName = String(cString: sig.pointee.name)
+            authorEmail = String(cString: sig.pointee.email)
+            date = formatGitTime(sig.pointee.when)
+        } else {
+            authorName = ""
+            authorEmail = ""
+            date = ""
+        }
+
+        let message = git_commit_message(commit).map(String.init(cString:))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let firstLine = message.components(separatedBy: .newlines).first ?? message
+
+        return CommitInfo(
+            hash: hash,
+            shortHash: shortHash,
+            parentHashes: parentHashes,
+            authorName: authorName,
+            authorEmail: authorEmail,
+            date: date,
+            message: firstLine,
+            refs: refMap[hash] ?? []
+        )
     }
 
     // MARK: - Commit Walker (on-demand pagination)
