@@ -230,10 +230,12 @@ actor GitService {
     }
 
     let repoPath: String
+    private let cli: GitCLI
     private var repo: OpaquePointer?
 
     init(repoPath: String) {
         self.repoPath = repoPath
+        self.cli = GitCLI(repoPath: repoPath)
         git_libgit2_init()
         var r: OpaquePointer?
         if git_repository_open(&r, repoPath) == 0 {
@@ -2423,98 +2425,16 @@ actor GitService {
 
     // MARK: - Git CLI helper
 
-    /// Extend PATH so git hooks (e.g. git-lfs pre-push) can find tools installed
-    /// in locations not present in a GUI app's default environment.
-    private static func enrichedEnvironment(extra: [String: String]? = nil) -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let extraPaths = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-            NSHomeDirectory() + "/.local/bin",
-        ]
-        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let missing = extraPaths.filter { !currentPath.contains($0) }
-        if !missing.isEmpty {
-            env["PATH"] = (missing + [currentPath]).joined(separator: ":")
-        }
-        if let extra {
-            for (key, value) in extra { env[key] = value }
-        }
-        return env
-    }
-
     private func runGit(_ args: [String]) async throws {
-        try await runGitWithEnv(args, env: nil)
+        try await cli.run(args)
     }
 
     private func runGitWithEnv(_ args: [String], env: [String: String]?) async throws {
-        let path = repoPath
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment(extra: env)
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    // Drain stdout BEFORE waitUntilExit to prevent pipe buffer deadlock.
-                    // When output exceeds the ~64 KB pipe buffer the subprocess blocks
-                    // waiting for a reader, so we must read first.
-                    let _ = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume()
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        try await cli.run(args, env: env)
     }
 
     private func runGitOutput(_ args: [String]) async throws -> String {
-        let path = repoPath
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment()
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    // Read stdout BEFORE waitUntilExit to prevent pipe buffer deadlock.
-                    // For large repos, commands like `git rev-list HEAD` can produce output
-                    // exceeding the ~64 KB pipe buffer, causing the subprocess to block
-                    // if no one is reading.
-                    let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        try await cli.output(args)
     }
 
     // MARK: - Patch Application (for hunk/line staging & discarding)
@@ -2527,45 +2447,8 @@ actor GitService {
         if cached { args.append("--cached") }
         if reverse { args.append("--reverse") }
         args.append("-")
-        let path = repoPath
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment()
-
-                let inputPipe = Pipe()
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardInput = inputPipe
-                proc.standardOutput = outPipe
-                proc.standardError = errPipe
-
-                do {
-                    try proc.run()
-                    if let data = patch.data(using: .utf8) {
-                        inputPipe.fileHandleForWriting.write(data)
-                    }
-                    inputPipe.fileHandleForWriting.closeFile()
-                    // Drain pipes before waitUntilExit to prevent buffer deadlock
-                    let _ = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-
-                    if proc.terminationStatus != 0 {
-                        let msg = String(data: errData, encoding: .utf8) ?? "git apply failed"
-                        continuation.resume(throwing: GitError.operationFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume()
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        try await cli.run(args, input: patch)
     }
 
     // MARK: - File Actions
