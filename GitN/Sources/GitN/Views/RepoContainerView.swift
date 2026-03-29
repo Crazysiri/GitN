@@ -14,6 +14,8 @@ struct RepoContainerView: View {
     let tab: RepoTab
     let isActive: Bool
     @State private var viewModel: RepoViewModel
+    @State private var didLoadInitially = false
+    @State private var activationTask: Task<Void, Never>?
 
     @State private var sidebarWidth: CGFloat = 200
     @State private var detailWidth: CGFloat = 400
@@ -94,19 +96,15 @@ struct RepoContainerView: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
-        .task {
-            await viewModel.loadAll()
-            viewModel.startWatching()
-            viewModel.startPeriodicRefresh()
-        }
         .onAppear {
-            // When tab becomes visible (including when switching tabs), perform a throttled fetch
-            Task {
-                await viewModel.fetchIfNeeded()
-            }
+            updateActiveState(isActive)
+        }
+        .onChange(of: isActive) { _, newValue in
+            updateActiveState(newValue)
         }
         .onDisappear {
-            viewModel.stopPeriodicRefresh()
+            activationTask?.cancel()
+            deactivateBackgroundWork()
         }
         .sheet(isPresented: $showStashMessage) {
             stashSheet
@@ -134,6 +132,33 @@ struct RepoContainerView: View {
         } message: {
             Text("Branch '\(viewModel.forceDeleteBranchName)' is not fully merged. Are you sure you want to force delete it? This may cause you to lose commits.")
         }
+    }
+
+    private func updateActiveState(_ active: Bool) {
+        activationTask?.cancel()
+
+        guard active else {
+            deactivateBackgroundWork()
+            return
+        }
+
+        activationTask = Task {
+            if !didLoadInitially {
+                await viewModel.loadAll()
+                guard !Task.isCancelled else { return }
+                didLoadInitially = true
+            }
+
+            guard !Task.isCancelled else { return }
+            viewModel.startWatching()
+            viewModel.startPeriodicRefresh()
+            await viewModel.fetchIfNeeded()
+        }
+    }
+
+    private func deactivateBackgroundWork() {
+        viewModel.stopWatching()
+        viewModel.stopPeriodicRefresh()
     }
 
     private func toastView(_ toast: ToastMessage) -> some View {
@@ -359,7 +384,7 @@ struct RepoContainerView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("Toggle Terminal")
+            .hoverTooltip("Toggle Terminal")
 
             Button {
                 Task { await viewModel.refreshWithSync() }

@@ -118,5 +118,10 @@ let package = Package(
                 .linkedFramework("WebKit"),
             ]
         ),
+        .testTarget(
+            name: "GitNTests",
+            dependencies: ["GitN"],
+            path: "Tests/GitNTests"
+        ),
     ]
 )

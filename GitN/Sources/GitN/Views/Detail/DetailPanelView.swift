@@ -282,7 +282,7 @@ struct DetailPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isGeneratingAICommit)
-                .help("Regenerate commit message with AI")
+                .hoverTooltip("Regenerate commit message with AI")
             }
         }
     }
@@ -397,7 +397,7 @@ struct DetailPanelView: View {
                 editedDescription = description
                 isEditingMessage = true
             }
-            .help(isEditableCommit ? "Click to edit commit message" : "")
+            .hoverTooltip("Click to edit commit message", isEnabled: isEditableCommit)
         }
     }
 
@@ -1414,7 +1414,7 @@ struct DetailPanelView: View {
                         .foregroundStyle(.red.opacity(0.7))
                 }
                 .buttonStyle(.plain)
-                .help("Discard all unstaged changes")
+                .hoverTooltip("Discard all unstaged changes")
             }
         }
         .padding(.horizontal, 8)
@@ -1667,7 +1667,7 @@ struct DetailPanelView: View {
         }
         .buttonStyle(.plain)
         .disabled(viewModel.isGeneratingAICommit)
-        .help("Generate commit message with AI")
+        .hoverTooltip("Generate commit message with AI")
     }
 
     // MARK: - Commit Input (shown at bottom when uncommitted)
@@ -2659,7 +2659,7 @@ struct StagingFileRow: View, Equatable {
             .frame(width: 18, height: 18)
             .contentShape(Rectangle())
             .buttonStyle(.plain)
-            .help(isStaged ? "取消暂存" : "暂存")
+            .hoverTooltip(isStaged ? "取消暂存" : "暂存")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 3)

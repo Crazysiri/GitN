@@ -151,6 +151,14 @@ GitN/
 └── build_libgit2.sh               # Standalone libgit2 builder
 ```
 
+## Codebase guide
+
+For app architecture, screen structure, shared components, and current refactor hotspots, see:
+
+```bash
+DEVELOPMENT.md
+```
+
 ---
 
 ## Troubleshooting

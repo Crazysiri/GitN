@@ -5,15 +5,12 @@ import SwiftTerm
 struct TerminalPanelView: View {
     let repoPath: String
     @Binding var isVisible: Bool
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var isDark: Bool { colorScheme == .dark }
 
     var body: some View {
         VStack(spacing: 0) {
             terminalHeader
             Divider()
-            SwiftTermView(repoPath: repoPath, isDark: isDark)
+            SwiftTermView(repoPath: repoPath)
         }
         .background(ChromePalette.toolbarBackground)
     }
@@ -24,19 +21,19 @@ struct TerminalPanelView: View {
         HStack {
             Image(systemName: "terminal")
                 .font(.caption)
-                .foregroundStyle(isDark ? .green : .accentColor)
+                .foregroundStyle(ChromePalette.terminalAccent)
             Text("Terminal")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isDark ? .white.opacity(0.8) : .primary)
+                .foregroundStyle(ChromePalette.terminalPrimaryText)
             Spacer()
 
             Button(action: { isVisible = false }) {
                 Image(systemName: "chevron.down")
                     .font(.caption)
-                    .foregroundStyle(isDark ? .white.opacity(0.5) : .secondary)
+                    .foregroundStyle(ChromePalette.terminalSecondaryText)
             }
             .buttonStyle(.plain)
-            .help("Hide Terminal")
+            .hoverTooltip("Hide Terminal")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -48,7 +45,6 @@ struct TerminalPanelView: View {
 
 struct SwiftTermView: NSViewRepresentable {
     let repoPath: String
-    let isDark: Bool
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let termView = LocalProcessTerminalView(frame: .zero)
@@ -88,17 +84,10 @@ struct SwiftTermView: NSViewRepresentable {
     private func applyTheme(_ termView: LocalProcessTerminalView) {
         termView.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
         termView.nativeBackgroundColor = .textBackgroundColor
-        if isDark {
-            termView.nativeForegroundColor = NSColor(white: 0.9, alpha: 1.0)
-            termView.caretColor = .green
-            termView.selectedTextBackgroundColor = NSColor(white: 0.3, alpha: 1.0)
-            termView.appearance = NSAppearance(named: .darkAqua)
-        } else {
-            termView.nativeForegroundColor = NSColor(white: 0.15, alpha: 1.0)
-            termView.caretColor = .systemBlue
-            termView.selectedTextBackgroundColor = .selectedTextBackgroundColor
-            termView.appearance = NSAppearance(named: .aqua)
-        }
+        termView.nativeForegroundColor = .labelColor
+        termView.caretColor = .controlAccentColor
+        termView.selectedTextBackgroundColor = .selectedTextBackgroundColor
+        termView.appearance = nil
         termView.needsDisplay = true
     }
 

@@ -278,7 +278,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("Clear saved API key")
+                    .hoverTooltip("Clear saved API key")
                 }
             }
         }
@@ -392,7 +392,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("Clear GitLab URL")
+                    .hoverTooltip("Clear GitLab URL")
                 }
             }
         }
@@ -434,7 +434,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("Clear token")
+                    .hoverTooltip("Clear token")
                 }
             }
 
@@ -499,7 +499,7 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("Clear GitHub token")
+                    .hoverTooltip("Clear GitHub token")
                 }
             }
 

@@ -18,9 +18,9 @@ class LineNumberTextView: NSTextView {
 
     // Gutter styling
     var lineFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-    var lineColor = NSColor(white: 0.38, alpha: 1)
-    var gutterBackgroundColor = NSColor(red: 0.094, green: 0.098, blue: 0.110, alpha: 1)
-    var gutterSeparatorColor = NSColor.white.withAlphaComponent(0.06)
+    var lineColor = NSColor.secondaryLabelColor
+    var gutterBackgroundColor = ChromePalette.panelGutterBackgroundNSColor
+    var gutterSeparatorColor = ChromePalette.panelGutterSeparatorNSColor
     private var cachedLineStarts: [Int] = [0]
     private var cachedStringLength = -1
     var drawsInlineGutter = true

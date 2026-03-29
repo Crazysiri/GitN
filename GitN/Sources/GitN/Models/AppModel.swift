@@ -206,11 +206,28 @@ final class AppModel {
               !saved.isEmpty
         else { return }
 
+        var restoredTabs: [RepoTab] = []
+        var seenPaths = Set<String>()
+
         for repo in saved {
-            let tab = RepoTab(path: repo.path, name: repo.name)
-            tabs.append(tab)
+            guard let resolved = resolveRepositorySelection(path: repo.path, fallbackName: repo.name) else {
+                continue
+            }
+
+            guard seenPaths.insert(resolved.path).inserted else {
+                continue
+            }
+
+            restoredTabs.append(RepoTab(path: resolved.path, name: resolved.name))
         }
+
+        tabs = restoredTabs
         selectedTabID = tabs.first?.id
+
+        let restoredRepos = tabs.map { SavedRepo(path: $0.path, name: $0.name) }
+        if restoredRepos != saved {
+            persistRepos()
+        }
     }
 
     private func resolveRepositorySelection(path: String, fallbackName: String) -> (path: String, name: String)? {

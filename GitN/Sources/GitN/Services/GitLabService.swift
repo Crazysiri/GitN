@@ -8,7 +8,7 @@ actor GitLabService {
     
     private static let urlKey = "GitN.gitlabURL"
     private static let tokenKey = "GitN.gitlabToken"
-    private static let projectIDCacheKey = "GitN.gitlabProjectIDCache" // [repoPath: projectID]
+    private static let projectIDCacheKey = "GitN.gitlabProjectIDCache" // [cacheKey: projectID]
     
     // MARK: - Settings (thread-safe via MainActor for UI reads)
     
@@ -31,25 +31,33 @@ actor GitLabService {
     
     // MARK: - Project ID Cache
     
-    private static func cachedProjectID(for repoPath: String) -> Int? {
+    private static func cachedProjectID(for cacheKey: String) -> Int? {
         guard let dict = UserDefaults.standard.dictionary(forKey: projectIDCacheKey) as? [String: Int] else { return nil }
-        return dict[repoPath]
+        return dict[cacheKey]
     }
     
-    private static func cacheProjectID(_ projectID: Int, for repoPath: String) {
+    private static func cacheProjectID(_ projectID: Int, for cacheKey: String) {
         var dict = (UserDefaults.standard.dictionary(forKey: projectIDCacheKey) as? [String: Int]) ?? [:]
-        dict[repoPath] = projectID
+        dict[cacheKey] = projectID
         UserDefaults.standard.set(dict, forKey: projectIDCacheKey)
+    }
+
+    private static func projectIDCacheKey(repoPath: String, remoteURL: String, baseURL: String) -> String {
+        let normalizedRepoPath = URL(fileURLWithPath: repoPath).standardizedFileURL.resolvingSymlinksInPath().path
+        let normalizedRemoteURL = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(normalizedRepoPath)|\(baseURL)|\(normalizedRemoteURL)"
     }
     
     // MARK: - Instance
     
     private let repoPath: String
     private let remoteName: String
+    private let gitRunner: CodeHostingGitRunner
     
     init(repoPath: String, remoteName: String = "origin") {
         self.repoPath = repoPath
         self.remoteName = remoteName
+        self.gitRunner = CodeHostingGitRunner(repoPath: repoPath)
     }
     
     // MARK: - Get Base URL & Token
@@ -64,64 +72,48 @@ actor GitLabService {
     }
     
     // MARK: - Extract project path from remote origin URL
-    
-    /// Extracts the project path (e.g. "group/project") from a remote origin URL.
-    /// Supports SSH (git@host:group/project.git) and HTTPS (https://host/group/project.git) formats.
-    func extractProjectPath() async -> String? {
+
+    private func extractRemoteURL() async -> String? {
         let output: String
         do {
             output = try await runGitOutput(["config", "--get", "remote.\(remoteName).url"])
         } catch {
             return nil
         }
+
         let url = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !url.isEmpty else { return nil }
+        return url.isEmpty ? nil : url
+    }
+    
+    /// Extracts the project path (e.g. "group/project") from a remote origin URL.
+    /// Supports SSH (git@host:group/project.git) and HTTPS (https://host/group/project.git) formats.
+    func extractProjectPath() async -> String? {
+        guard let url = await extractRemoteURL() else { return nil }
         return Self.parseProjectPath(from: url)
     }
     
     static func parseProjectPath(from remoteURL: String) -> String? {
-        var path: String
-        
-        if remoteURL.contains("@") && remoteURL.contains(":") {
-            // SSH format: git@gitlab.example.com:group/subgroup/project.git
-            guard let colonIdx = remoteURL.firstIndex(of: ":") else { return nil }
-            path = String(remoteURL[remoteURL.index(after: colonIdx)...])
-        } else if remoteURL.hasPrefix("http://") || remoteURL.hasPrefix("https://") {
-            // HTTPS format: https://gitlab.example.com/group/subgroup/project.git
-            guard let urlObj = URL(string: remoteURL) else { return nil }
-            // path is "/group/subgroup/project.git"
-            path = urlObj.path
-            if path.hasPrefix("/") { path = String(path.dropFirst()) }
-        } else {
-            return nil
-        }
-        
-        // Remove .git suffix
-        if path.hasSuffix(".git") {
-            path = String(path.dropLast(4))
-        }
-        // Remove trailing slash
-        if path.hasSuffix("/") {
-            path = String(path.dropLast())
-        }
-        
-        return path.isEmpty ? nil : path
+        CodeHostingRemote.parseRepositoryPath(from: remoteURL)
     }
     
     // MARK: - Resolve Project ID
     
     /// Get or fetch the GitLab project ID. Caches the result.
     func resolveProjectID() async throws -> Int {
-        // Check cache first
-        if let cached = Self.cachedProjectID(for: repoPath) {
-            return cached
-        }
-        
         guard let config = await getConfig() else {
             throw GitLabError.notConfigured
         }
         
-        guard let projectPath = await extractProjectPath() else {
+        guard let remoteURL = await extractRemoteURL() else {
+            throw GitLabError.cannotDetermineProject
+        }
+
+        let cacheKey = Self.projectIDCacheKey(repoPath: repoPath, remoteURL: remoteURL, baseURL: config.baseURL)
+        if let cached = Self.cachedProjectID(for: cacheKey) {
+            return cached
+        }
+        
+        guard let projectPath = Self.parseProjectPath(from: remoteURL) else {
             throw GitLabError.cannotDetermineProject
         }
         
@@ -139,7 +131,7 @@ actor GitLabService {
             throw GitLabError.projectNotFound(projectPath)
         }
         
-        Self.cacheProjectID(projectID, for: repoPath)
+        Self.cacheProjectID(projectID, for: cacheKey)
         return projectID
     }
     
@@ -258,8 +250,11 @@ actor GitLabService {
                 }
             }
             
-            // Step 4: Reset source branch to match remote (in case local is stale)
-            try await runGit(["reset", "--hard", "\(remoteName)/\(sourceBranch)"])
+            // Step 4: Refuse to rewrite a local source branch that contains unpushed commits.
+            if try await localBranchHasUnpushedCommits(sourceBranch: sourceBranch) {
+                await restore()
+                throw GitLabError.localSourceBranchAhead(sourceBranch)
+            }
             
             // Step 5: Rebase onto target
             do {
@@ -314,110 +309,47 @@ actor GitLabService {
         let output = try await runGitOutput(["status", "--porcelain"])
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    
-    private func apiRequest(url urlStr: String, method: String, token: String, body: Data? = nil) async throws -> Data {
-        guard let url = URL(string: urlStr) else {
-            throw GitLabError.invalidURL(urlStr)
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue(token, forHTTPHeaderField: "PRIVATE-TOKEN")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let body { request.httpBody = body }
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GitLabError.networkError("Invalid response")
-        }
-        
-        guard (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw GitLabError.apiError(httpResponse.statusCode, body)
-        }
-        
-        return data
+
+    private func localBranchHasUnpushedCommits(sourceBranch: String) async throws -> Bool {
+        let output = try await runGitOutput(["rev-list", "--count", "\(remoteName)/\(sourceBranch)..\(sourceBranch)"])
+        return (Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) > 0
     }
     
-    // MARK: - Git CLI helpers (same pattern as GitService)
-    
-    /// Extend PATH so git hooks (e.g. git-lfs) can find tools installed via Homebrew etc.
-    private static func enrichedEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let extraPaths = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-            NSHomeDirectory() + "/.local/bin",
-        ]
-        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let missing = extraPaths.filter { !currentPath.contains($0) }
-        if !missing.isEmpty {
-            env["PATH"] = (missing + [currentPath]).joined(separator: ":")
+    private func apiRequest(url urlStr: String, method: String, token: String, body: Data? = nil) async throws -> Data {
+        do {
+            return try await CodeHostingAPIClient.request(
+                url: urlStr,
+                method: method,
+                headers: [
+                    "PRIVATE-TOKEN": token,
+                    "Content-Type": "application/json",
+                ],
+                body: body
+            )
+        } catch let error as CodeHostingSupportError {
+            throw GitLabError(error)
+        } catch {
+            throw GitLabError.networkError(error.localizedDescription)
         }
-        return env
     }
     
     private func runGit(_ args: [String]) async throws {
-        let path = repoPath
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment()
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    let _ = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                        continuation.resume(throwing: GitLabError.gitFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume()
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        do {
+            try await gitRunner.run(args)
+        } catch let error as CodeHostingSupportError {
+            throw GitLabError(error)
+        } catch {
+            throw GitLabError.networkError(error.localizedDescription)
         }
     }
     
     private func runGitOutput(_ args: [String]) async throws -> String {
-        let path = repoPath
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment()
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let msg = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                        continuation.resume(throwing: GitLabError.gitFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        do {
+            return try await gitRunner.runOutput(args)
+        } catch let error as CodeHostingSupportError {
+            throw GitLabError(error)
+        } catch {
+            throw GitLabError.networkError(error.localizedDescription)
         }
     }
 }
@@ -431,6 +363,7 @@ enum GitLabError: LocalizedError {
     case projectNotFound(String)
     case networkError(String)
     case apiError(Int, String)
+    case localSourceBranchAhead(String)
     case rebaseFailed(String, String, String)
     case mergeFailed(String)
     case gitFailed(String)
@@ -449,12 +382,31 @@ enum GitLabError: LocalizedError {
             return "Network error: \(msg)"
         case .apiError(let code, let body):
             return "GitLab API error (\(code)): \(body)"
+        case .localSourceBranchAhead(let branch):
+            return "Local branch '\(branch)' has unpushed commits. Push or move them before using Rebase & Merge."
         case .rebaseFailed(let source, let target, let detail):
             return "Rebase '\(source)' onto '\(target)' failed: \(detail)"
         case .mergeFailed(let detail):
             return "Merge failed: \(detail)"
         case .gitFailed(let msg):
             return msg
+        }
+    }
+}
+
+private extension GitLabError {
+    init(_ error: CodeHostingSupportError) {
+        switch error {
+        case .invalidURL(let url):
+            self = .invalidURL(url)
+        case .invalidResponse:
+            self = .networkError("Invalid response")
+        case .networkError(let message):
+            self = .networkError(message)
+        case .apiError(let code, let body):
+            self = .apiError(code, body)
+        case .gitFailed(let message):
+            self = .gitFailed(message)
         }
     }
 }

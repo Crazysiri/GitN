@@ -32,7 +32,7 @@ struct NewTabView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .help("Close")
+                        .hoverTooltip("Close")
                     }
                 }
                 .padding(.top, 40)

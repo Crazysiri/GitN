@@ -100,7 +100,7 @@ struct ContentView: View {
             .frame(width: 34, height: 34)
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .onHover { isHoveringFeaturesButton = $0 }
-            .help("Features")
+            .hoverTooltip("Features")
             .padding(.trailing, 10)
         }
         .frame(height: ChromeLayout.tabRowHeight)

@@ -14,16 +14,16 @@ extension String {
 // MARK: - Editor color scheme
 
 private enum EditorColors {
-    static let background = NSColor(red: 0.118, green: 0.122, blue: 0.133, alpha: 1) // #1E1F22
-    static let text       = NSColor(red: 0.737, green: 0.745, blue: 0.769, alpha: 1) // #BCBEC4
-    static let heading    = NSColor(red: 0.812, green: 0.557, blue: 0.427, alpha: 1) // #CF8E6D
-    static let code       = NSColor(red: 0.416, green: 0.671, blue: 0.451, alpha: 1) // #6AAB73
-    static let link       = NSColor(red: 0.306, green: 0.580, blue: 0.808, alpha: 1) // #4E94CE
-    static let bold       = NSColor(red: 0.95,  green: 0.95,  blue: 0.95,  alpha: 1)
-    static let blockquote = NSColor(red: 0.416, green: 0.416, blue: 0.416, alpha: 1) // #6A6A6A
-    static let marker     = NSColor(red: 0.502, green: 0.502, blue: 0.502, alpha: 1) // #808080
-    static let cursor     = NSColor.white
-    static let selection  = NSColor(red: 0.239, green: 0.369, blue: 0.533, alpha: 1)
+    static let background = ChromePalette.panelBackgroundNSColor
+    static let text = NSColor.labelColor
+    static let heading = ChromePalette.markdownHeadingNSColor
+    static let code = ChromePalette.markdownCodeNSColor
+    static let link = NSColor.linkColor
+    static let bold = NSColor.labelColor
+    static let blockquote = NSColor.secondaryLabelColor
+    static let marker = NSColor.tertiaryLabelColor
+    static let cursor = NSColor.controlAccentColor
+    static let selection = NSColor.selectedTextBackgroundColor
 }
 
 // MARK: - Syntax highlight engine

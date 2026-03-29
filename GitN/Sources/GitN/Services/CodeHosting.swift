@@ -126,11 +126,13 @@ actor GitHubService {
 
     private let repoPath: String
     private let remoteName: String
+    private let gitRunner: CodeHostingGitRunner
     private var currentUsernameCache: String?
 
     init(repoPath: String, remoteName: String = "origin") {
         self.repoPath = repoPath
         self.remoteName = remoteName
+        self.gitRunner = CodeHostingGitRunner(repoPath: repoPath)
     }
 
     private func getConfig() async -> (baseURL: String, token: String)? {
@@ -142,7 +144,7 @@ actor GitHubService {
     private func extractRepository() async -> (owner: String, name: String)? {
         let output: String
         do {
-            output = try await runGitOutput(["config", "--get", "remote.\(remoteName).url"])
+            output = try await gitRunner.runOutput(["config", "--get", "remote.\(remoteName).url"])
         } catch {
             return nil
         }
@@ -155,29 +157,7 @@ actor GitHubService {
     }
 
     static func parseRepositoryPath(from remoteURL: String) -> String? {
-        var path: String
-
-        if remoteURL.contains("@") && remoteURL.contains(":") {
-            guard let colonIndex = remoteURL.firstIndex(of: ":") else { return nil }
-            path = String(remoteURL[remoteURL.index(after: colonIndex)...])
-        } else if remoteURL.hasPrefix("http://") || remoteURL.hasPrefix("https://") {
-            guard let url = URL(string: remoteURL) else { return nil }
-            path = url.path
-            if path.hasPrefix("/") {
-                path = String(path.dropFirst())
-            }
-        } else {
-            return nil
-        }
-
-        if path.hasSuffix(".git") {
-            path = String(path.dropLast(4))
-        }
-        if path.hasSuffix("/") {
-            path = String(path.dropLast())
-        }
-
-        return path.isEmpty ? nil : path
+        CodeHostingRemote.parseRepositoryPath(from: remoteURL)
     }
 
     func listPullRequests(state: CodeReviewFilter = .opened, page: Int = 1, perPage: Int = 50) async throws -> [CodeReviewItem] {
@@ -233,75 +213,22 @@ actor GitHubService {
     }
 
     private func apiRequest(url urlString: String, method: String, token: String, body: Data? = nil) async throws -> Data {
-        guard let url = URL(string: urlString) else {
-            throw GitHubError.invalidURL(urlString)
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        if let body {
-            request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GitHubError.networkError("Invalid response")
-        }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw GitHubError.apiError(httpResponse.statusCode, body)
-        }
-        return data
-    }
-
-    private static func enrichedEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let extraPaths = [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-            NSHomeDirectory() + "/.local/bin",
-        ]
-        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let missing = extraPaths.filter { !currentPath.contains($0) }
-        if !missing.isEmpty {
-            env["PATH"] = (missing + [currentPath]).joined(separator: ":")
-        }
-        return env
-    }
-
-    private func runGitOutput(_ args: [String]) async throws -> String {
-        let path = repoPath
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-                proc.arguments = args
-                proc.currentDirectoryURL = URL(fileURLWithPath: path)
-                proc.environment = Self.enrichedEnvironment()
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = pipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    if proc.terminationStatus != 0 {
-                        let message = String(data: errData, encoding: .utf8) ?? "git \(args.first ?? "") failed"
-                        continuation.resume(throwing: GitHubError.gitFailed(message.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    } else {
-                        continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
+        do {
+            return try await CodeHostingAPIClient.request(
+                url: urlString,
+                method: method,
+                headers: [
+                    "Authorization": "Bearer \(token)",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "Content-Type": body == nil ? "" : "application/json",
+                ].filter { !$0.value.isEmpty },
+                body: body
+            )
+        } catch let error as CodeHostingSupportError {
+            throw GitHubError(error)
+        } catch {
+            throw GitHubError.networkError(error.localizedDescription)
         }
     }
 }
@@ -331,6 +258,23 @@ enum GitHubError: LocalizedError {
             return "GitHub API error (\(code)): \(body)"
         case .gitFailed(let message):
             return message
+        }
+    }
+}
+
+private extension GitHubError {
+    init(_ error: CodeHostingSupportError) {
+        switch error {
+        case .invalidURL(let url):
+            self = .invalidURL(url)
+        case .invalidResponse:
+            self = .networkError("Invalid response")
+        case .networkError(let message):
+            self = .networkError(message)
+        case .apiError(let code, let body):
+            self = .apiError(code, body)
+        case .gitFailed(let message):
+            self = .gitFailed(message)
         }
     }
 }

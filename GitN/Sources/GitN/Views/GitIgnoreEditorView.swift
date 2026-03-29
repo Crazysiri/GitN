@@ -6,6 +6,7 @@ struct GitIgnoreEditorView: View {
 
     @State private var text: String = ""
     @State private var isSaving = false
+    @State private var saveErrorMessage: String?
 
     private var ignoreURL: URL {
         URL(fileURLWithPath: repoPath).appendingPathComponent(".gitignore")
@@ -39,7 +40,7 @@ struct GitIgnoreEditorView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("关闭")
+                .hoverTooltip("关闭")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -53,6 +54,19 @@ struct GitIgnoreEditorView: View {
         }
         .frame(minWidth: 500, minHeight: 400)
         .onAppear { load() }
+        .alert(
+            "无法保存 .gitignore",
+            isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )
+        ) {
+            Button("确定", role: .cancel) {
+                saveErrorMessage = nil
+            }
+        } message: {
+            Text(saveErrorMessage ?? "发生了未知错误。")
+        }
     }
 
     private func load() {
@@ -65,12 +79,13 @@ struct GitIgnoreEditorView: View {
 
     private func save() {
         isSaving = true
+        defer { isSaving = false }
+
         do {
             try text.write(to: ignoreURL, atomically: true, encoding: .utf8)
+            isPresented = false
         } catch {
-            // ignore write errors silently
+            saveErrorMessage = error.localizedDescription
         }
-        isSaving = false
-        isPresented = false
     }
 }

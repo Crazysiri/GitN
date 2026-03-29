@@ -14,17 +14,18 @@ struct TabCompletionEngine {
 
         let tokens = tokenize(input)
         let trailingSpace = input.last == " "
+        let currentTokenRange = trailingSpace ? nil : currentTokenRange(in: input)
+        let currentToken = currentTokenRange.map { unescapeShellToken(String(input[$0])) } ?? ""
 
         if tokens.isEmpty || (tokens.count == 1 && !trailingSpace) {
-            let prefix = tokens.first ?? ""
+            let prefix = currentToken
             if prefix.contains("/") {
-                return completeFilePath(tokens: tokens, prefix: prefix, fullInput: input)
+                return completeFilePath(prefix: prefix, fullInput: input, rawTokenRange: currentTokenRange)
             }
             return completeCommand(prefix: prefix, fullInput: input)
         }
 
-        let prefix = trailingSpace ? "" : (tokens.last ?? "")
-        return completeFilePath(tokens: tokens, prefix: prefix, fullInput: input)
+        return completeFilePath(prefix: currentToken, fullInput: input, rawTokenRange: currentTokenRange)
     }
 
     // MARK: - Command completion (first token, searched in PATH)
@@ -67,7 +68,7 @@ struct TabCompletionEngine {
 
     // MARK: - File / directory completion
 
-    private func completeFilePath(tokens: [String], prefix: String, fullInput: String) -> CompletionResult {
+    private func completeFilePath(prefix: String, fullInput: String, rawTokenRange: Range<String.Index>?) -> CompletionResult {
         let expanded = expandTilde(prefix)
         let (searchDir, partial) = splitPathPrefix(expanded)
         let fm = FileManager.default
@@ -94,13 +95,7 @@ struct TabCompletionEngine {
             name.hasSuffix("/") ? String(name.dropLast()) + "/" : name
         }
 
-        let inputBeforeToken: String
-        if fullInput.last == " " || prefix.isEmpty {
-            inputBeforeToken = fullInput
-        } else {
-            let idx = fullInput.index(fullInput.endIndex, offsetBy: -prefix.count)
-            inputBeforeToken = String(fullInput[..<idx])
-        }
+        let inputBeforeToken = rawTokenRange.map { String(fullInput[..<$0.lowerBound]) } ?? fullInput
 
         let pathPrefix: String
         let range = expanded.range(of: partial, options: .backwards)
@@ -111,12 +106,12 @@ struct TabCompletionEngine {
         }
 
         if completedNames.count == 1 {
-            let completed = inputBeforeToken + pathPrefix + completedNames[0]
+            let completed = inputBeforeToken + shellEscapePathToken(pathPrefix + completedNames[0])
             return .single(completed: completed)
         }
 
         let common = longestCommonPrefix(completedNames)
-        let completed = inputBeforeToken + pathPrefix + common
+        let completed = inputBeforeToken + shellEscapePathToken(pathPrefix + common)
         return .multiple(completed: completed, candidates: displayNames)
     }
 
@@ -194,6 +189,108 @@ struct TabCompletionEngine {
             directory = (workingDirectory as NSString).appendingPathComponent(dirPart)
         }
         return (directory, lastComponent)
+    }
+
+    private func currentTokenRange(in input: String) -> Range<String.Index>? {
+        var tokenStart: String.Index?
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var escaped = false
+        var index = input.startIndex
+
+        while index < input.endIndex {
+            let ch = input[index]
+
+            if escaped {
+                escaped = false
+                index = input.index(after: index)
+                continue
+            }
+
+            if ch == "\\" && !inSingleQuote {
+                tokenStart = tokenStart ?? index
+                escaped = true
+                index = input.index(after: index)
+                continue
+            }
+
+            if ch == "'" && !inDoubleQuote {
+                tokenStart = tokenStart ?? index
+                inSingleQuote.toggle()
+                index = input.index(after: index)
+                continue
+            }
+
+            if ch == "\"" && !inSingleQuote {
+                tokenStart = tokenStart ?? index
+                inDoubleQuote.toggle()
+                index = input.index(after: index)
+                continue
+            }
+
+            if ch == " " && !inSingleQuote && !inDoubleQuote {
+                tokenStart = nil
+                index = input.index(after: index)
+                continue
+            }
+
+            tokenStart = tokenStart ?? index
+            index = input.index(after: index)
+        }
+
+        guard let tokenStart else { return nil }
+        return tokenStart..<input.endIndex
+    }
+
+    private func unescapeShellToken(_ rawToken: String) -> String {
+        var result = ""
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var escaped = false
+
+        for ch in rawToken {
+            if escaped {
+                result.append(ch)
+                escaped = false
+                continue
+            }
+
+            if ch == "\\" && !inSingleQuote {
+                escaped = true
+                continue
+            }
+
+            if ch == "'" && !inDoubleQuote {
+                inSingleQuote.toggle()
+                continue
+            }
+
+            if ch == "\"" && !inSingleQuote {
+                inDoubleQuote.toggle()
+                continue
+            }
+
+            result.append(ch)
+        }
+
+        if escaped {
+            result.append("\\")
+        }
+        return result
+    }
+
+    private func shellEscapePathToken(_ token: String) -> String {
+        let charactersToEscape = CharacterSet(charactersIn: " \\\"'`()[]{}&;|<>?$*#!")
+        var escaped = ""
+
+        for scalar in token.unicodeScalars {
+            if charactersToEscape.contains(scalar) {
+                escaped.append("\\")
+            }
+            escaped.unicodeScalars.append(scalar)
+        }
+
+        return escaped
     }
 
     private func longestCommonPrefix(_ strings: [String]) -> String {

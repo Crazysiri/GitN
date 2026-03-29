@@ -1000,7 +1000,7 @@ struct SidebarSection<Content: View>: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Refresh")
+                    .hoverTooltip("Refresh")
                 }
 
                 if let onAdd {
@@ -1010,7 +1010,7 @@ struct SidebarSection<Content: View>: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Add")
+                    .hoverTooltip("Add")
                 }
             }
             .padding(.horizontal, 12)

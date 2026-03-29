@@ -64,7 +64,7 @@ extension String {
 }
 
 struct FileInspectorOverlayView: View {
-    @Environment(ThemeManager.self) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     let viewModel: RepoViewModel
 
     @State private var targetLine: Int?
@@ -140,14 +140,16 @@ struct FileInspectorOverlayView: View {
     }
 
     private var inspectorBackgroundColor: Color {
-        Color(nsColor: theme.isDark
-            ? NSColor(red: 0.118, green: 0.125, blue: 0.145, alpha: 1)
-            : .windowBackgroundColor)
+        ChromePalette.panelBackground
+    }
+
+    private var monacoIsDark: Bool {
+        colorScheme == .dark
     }
 
     var body: some View {
         ZStack {
-            Color.black.opacity(theme.isDark ? 0.34 : 0.12)
+            ChromePalette.panelOverlay
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -161,7 +163,7 @@ struct FileInspectorOverlayView: View {
             .background(inspectorBackgroundColor)
             .overlay(
                 Rectangle()
-                    .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1)
+                    .strokeBorder(ChromePalette.panelBorder, lineWidth: 1)
             )
         }
         .onChange(of: viewModel.fileInspectorPath) { _, _ in
@@ -230,7 +232,7 @@ struct FileInspectorOverlayView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .help("Previous change")
+                    .hoverTooltip("Previous change")
 
                     Button {
                         commandBridge.navigateDiff(next: true)
@@ -242,7 +244,7 @@ struct FileInspectorOverlayView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .help("Next change")
+                    .hoverTooltip("Next change")
                 }
             }
 
@@ -273,7 +275,7 @@ struct FileInspectorOverlayView: View {
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 11)
-        .background(theme.isDark ? Color.black.opacity(0.16) : Color(nsColor: .windowBackgroundColor))
+        .background(ChromePalette.panelMutedBackground)
     }
 
     private var modePicker: some View {
@@ -308,7 +310,7 @@ struct FileInspectorOverlayView: View {
     private var monacoDiffContent: some View {
         MonacoInspectorView(
             mode: .diff,
-            isDark: theme.isDark,
+            isDark: monacoIsDark,
             preview: nil,
             items: [
                 MonacoDiffPayload(
@@ -366,7 +368,7 @@ struct FileInspectorOverlayView: View {
             } else {
                 MonacoInspectorView(
                     mode: .preview,
-                    isDark: theme.isDark,
+                    isDark: monacoIsDark,
                     preview: MonacoPreviewPayload(
                         path: viewModel.fileInspectorPath,
                         language: RepoViewModel.monacoLanguage(for: viewModel.fileInspectorPath.sourceLanguage),
@@ -397,7 +399,7 @@ struct FileInspectorOverlayView: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(theme.isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.05), in: Capsule())
+        .background(ChromePalette.chromeButtonFill, in: Capsule())
         .foregroundStyle(.secondary)
     }
 
