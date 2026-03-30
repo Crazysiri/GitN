@@ -497,4 +497,29 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertTrue(viewModel.reflogRecoveredCommits.isEmpty)
         XCTAssertTrue(viewModel.reflogRecoveryEntriesByCommitHash.isEmpty)
     }
+
+    // MARK: - checkForRebaseConflict error surfacing
+
+    func testCheckForRebaseConflictWithNoActiveRebaseShowsErrorToast() async {
+        // A path that doesn't exist has no rebase in progress, so rebaseState() returns nil.
+        let viewModel = RepoViewModel(path: "/tmp/nonexistent-\(UUID().uuidString)", name: "repo")
+        XCTAssertNil(viewModel.toastMessage)
+
+        await viewModel.checkForRebaseConflict(errorMessage: "cannot rebase: You have unstaged changes.")
+
+        XCTAssertNotNil(viewModel.toastMessage, "Expected an error toast to be shown when squash/rebase fails with no conflict")
+        XCTAssertEqual(viewModel.toastMessage?.style, .error)
+        XCTAssertTrue(
+            viewModel.toastMessage?.detail.contains("unstaged") == true,
+            "Toast detail should contain the original error message"
+        )
+    }
+
+    func testCheckForRebaseConflictWithNilErrorMessageShowsNoToast() async {
+        let viewModel = RepoViewModel(path: "/tmp/nonexistent-\(UUID().uuidString)", name: "repo")
+
+        await viewModel.checkForRebaseConflict(errorMessage: nil)
+
+        XCTAssertNil(viewModel.toastMessage, "No toast should appear when there is no error message")
+    }
 }

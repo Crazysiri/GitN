@@ -153,6 +153,25 @@ struct DiffFile: Identifiable, Equatable {
     var isRenamed: Bool { oldPath != nil }
     var isPureRename: Bool { isRenamed && additions == 0 && deletions == 0 }
 
+    /// Whether the standalone "renamed" badge should appear in the file list row.
+    /// False for image files: their `imageStatusLabel` ("renamed image") already conveys
+    /// the rename, so showing a separate "renamed" badge would produce "renamed image renamed".
+    var showsRenamedBadge: Bool { isPureRename && !path.isImageFile }
+
+    /// Short status label shown for image files in the diff file list row.
+    /// Non-image files return nil; the row falls back to numeric +/- stats.
+    var imageStatusText: String? {
+        guard path.isImageFile else { return nil }
+        switch changeKind {
+        case .added, .untracked: return "+ image"
+        case .deleted:           return "- image"
+        case .renamed:           return "renamed image"
+        case .modified:          return "modified image"
+        case .copied:            return "copied image"
+        case .unknown:           return nil
+        }
+    }
+
     init(additions: Int, deletions: Int, path: String, oldPath: String? = nil, changeKind: DiffChangeKind = .modified) {
         self.additions = additions
         self.deletions = deletions

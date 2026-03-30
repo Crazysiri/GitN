@@ -3,7 +3,7 @@ import AppKit
 
 enum SourceLanguage: String {
     case swift, python, javascript, typescript, go, rust, c, cpp, java, shell
-    case json, yaml, dart, kotlin, ruby, php, css, html, xml, toml, text
+    case json, yaml, dart, kotlin, ruby, php, css, html, xml, toml, markdown, text
 
     var displayName: String {
         switch self {
@@ -27,6 +27,7 @@ enum SourceLanguage: String {
         case .html: return "HTML"
         case .xml: return "XML"
         case .toml: return "TOML"
+        case .markdown: return "Markdown"
         case .text: return "Plain Text"
         }
     }
@@ -50,6 +51,7 @@ extension String {
         case "sh", "bash", "zsh", "fish": return .shell
         case "json", "jsonc": return .json
         case "yml", "yaml": return .yaml
+        case "md", "markdown": return .markdown
         case "dart": return .dart
         case "kt", "kts": return .kotlin
         case "rb", "rake", "gemspec": return .ruby
@@ -363,7 +365,8 @@ struct FileInspectorOverlayView: View {
                 VisualFileContentView(
                     content: visualContent,
                     path: viewModel.fileInspectorPath,
-                    mode: .diff
+                    mode: .diff,
+                    oldPath: viewModel.fileInspectorOldPath
                 )
             } else {
                 monacoDiffContent
@@ -374,6 +377,11 @@ struct FileInspectorOverlayView: View {
                     content: visualContent,
                     path: viewModel.fileInspectorPath,
                     mode: .preview
+                )
+            } else if viewModel.fileInspectorPath.isMarkdownFile {
+                MarkdownInspectorContentView(
+                    text: Bindable(viewModel).fileInspectorContent,
+                    isEditable: viewModel.isFileInspectorEditable
                 )
             } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
                 unsupportedContentState
@@ -486,11 +494,14 @@ struct VisualFileContentView: View {
     let content: VisualFileContent
     let path: String
     let mode: VisualFileContentMode
+    var changeKind: DiffChangeKind? = nil
+    /// The original path before a rename, used as the subtitle of the "Before" image card.
+    var oldPath: String? = nil
 
     var body: some View {
         Group {
             if content.isImage {
-                ImageDiffContentView(content: content, path: path, mode: mode)
+                ImageDiffContentView(content: content, path: path, mode: mode, changeKind: changeKind, oldPath: oldPath)
             } else {
                 BinaryFilePlaceholderView(
                     title: mode == .diff ? "Binary diff is not readable" : "Binary file preview is not readable",
@@ -507,22 +518,35 @@ struct ImageDiffContentView: View {
     let content: VisualFileContent
     let path: String
     let mode: VisualFileContentMode
+    var changeKind: DiffChangeKind? = nil
+    /// The original path before a rename. When set, the "Before" card uses this as its
+    /// subtitle so the user can see which path the old image came from.
+    var oldPath: String? = nil
+
+    // Overhead = outer padding (40) + card header rows (60) + card inner padding (24)
+    private static let cardOverhead: CGFloat = 124
 
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
-            VStack(spacing: 18) {
-                if mode == .preview {
-                    ImageCardView(
-                        title: previewTitle,
-                        subtitle: path,
-                        data: content.currentData
-                    )
-                } else if content.oldData != nil && content.newData != nil {
-                    HStack(alignment: .top, spacing: 18) {
-                        ImageCardView(title: "Before", subtitle: path, data: content.oldData)
-                        VStack(spacing: 8) {
-                            Spacer(minLength: 80)
-                            Image(systemName: "arrow.right")
+        GeometryReader { geo in
+            ScrollView(.vertical) {
+                VStack(spacing: 18) {
+                    if mode == .preview {
+                        ImageCardView(
+                            title: previewTitle,
+                            subtitle: path,
+                            data: content.currentData,
+                            availableSize: imageSize(in: geo)
+                        )
+                    } else if content.oldData != nil && content.newData != nil {
+                        ImageCardView(
+                            title: "Before",
+                            subtitle: oldPath ?? path,
+                            data: content.oldData,
+                            availableSize: imageSize(in: geo)
+                        )
+                        HStack(spacing: 8) {
+                            Spacer()
+                            Image(systemName: "arrow.down")
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundStyle(.secondary)
                             Text("to")
@@ -530,27 +554,49 @@ struct ImageDiffContentView: View {
                                 .foregroundStyle(.secondary)
                             Spacer()
                         }
-                        .frame(width: 40)
-                        ImageCardView(title: "After", subtitle: path, data: content.newData)
+                        .frame(height: 30)
+                        ImageCardView(
+                            title: "After",
+                            subtitle: path,
+                            data: content.newData,
+                            availableSize: imageSize(in: geo)
+                        )
+                    } else if content.newData != nil {
+                        ImageCardView(
+                            title: "+ Added",
+                            subtitle: path,
+                            data: content.newData,
+                            availableSize: imageSize(in: geo)
+                        )
+                    } else {
+                        ImageCardView(
+                            title: oldOnlyTitle,
+                            subtitle: path,
+                            data: content.oldData,
+                            availableSize: imageSize(in: geo)
+                        )
                     }
-                } else if content.newData != nil {
-                    ImageCardView(title: "+ Added", subtitle: path, data: content.newData)
-                } else {
-                    ImageCardView(title: "- Deleted", subtitle: path, data: content.oldData)
                 }
+                .padding(20)
+                .frame(width: geo.size.width)
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
+    private func imageSize(in geo: GeometryProxy) -> CGSize {
+        CGSize(
+            width: max(60, geo.size.width - 64),   // outer padding 40 + card padding 24
+            height: max(180, geo.size.height - Self.cardOverhead)
+        )
+    }
+
+    private var oldOnlyTitle: String {
+        changeKind == .deleted ? "- Deleted" : "Before"
+    }
+
     private var previewTitle: String {
-        if content.newData != nil && content.oldData == nil {
-            return "+ Added"
-        }
-        if content.newData == nil && content.oldData != nil {
-            return "- Deleted"
-        }
+        if content.newData != nil && content.oldData == nil { return "+ Added" }
+        if content.newData == nil && content.oldData != nil { return "- Deleted" }
         return "Current"
     }
 }
@@ -559,6 +605,8 @@ struct ImageCardView: View {
     let title: String
     let subtitle: String
     let data: Data?
+    /// Maximum space available for the image itself (excluding card chrome).
+    var availableSize: CGSize = CGSize(width: CGFloat.infinity, height: 600)
 
     private var image: NSImage? {
         guard let data else { return nil }
@@ -577,9 +625,7 @@ struct ImageCardView: View {
 
             Group {
                 if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+                    scaledImageView(image)
                 } else {
                     VStack(spacing: 10) {
                         Image(systemName: "photo")
@@ -589,10 +635,9 @@ struct ImageCardView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 220)
+                    .frame(maxWidth: .infinity, minHeight: 180)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 220, maxHeight: 520)
             .padding(12)
             .background(ChromePalette.panelMutedBackground, in: RoundedRectangle(cornerRadius: 12))
             .overlay(
@@ -601,6 +646,26 @@ struct ImageCardView: View {
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func scaledImageView(_ image: NSImage) -> some View {
+        let size = displaySize(for: image)
+        Image(nsImage: image)
+            .resizable()
+            .frame(width: size.width, height: size.height)
+    }
+
+    /// Computes the display size: scale down to fit availableSize if needed, never scale up.
+    private func displaySize(for image: NSImage) -> CGSize {
+        let nw = image.size.width
+        let nh = image.size.height
+        guard nw > 0, nh > 0 else { return CGSize(width: nw, height: nh) }
+        if nw <= availableSize.width && nh <= availableSize.height {
+            return CGSize(width: nw, height: nh)
+        }
+        let scale = min(availableSize.width / nw, availableSize.height / nh)
+        return CGSize(width: (nw * scale).rounded(), height: (nh * scale).rounded())
     }
 }
 

@@ -11,11 +11,11 @@ struct HoverTooltipBubble: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10))
+            .font(.system(size: 12))
             .foregroundStyle(.primary)
             .lineLimit(3)
             .multilineTextAlignment(.leading)
-            .frame(maxWidth: 240, alignment: .leading)
+            .frame(maxWidth: 400, alignment: .leading)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
@@ -36,6 +36,13 @@ private final class HoverTooltipPanel: NSPanel {
 
     private let hostingView = NSHostingView(rootView: HoverTooltipBubble(text: ""))
     private var pendingShow: DispatchWorkItem?
+    /// The anchorView that owns the current pendingShow work item, used to
+    /// decide whether cancelAndHide should cancel the in-flight show.
+    private weak var pendingShowAnchor: NSView?
+    private var pendingHide: DispatchWorkItem?
+    /// Timestamp of the last successful present(); used to let hide closures
+    /// detect that a newer show happened after they were scheduled.
+    private var lastPresentDate: Date = .distantPast
 
     private init() {
         super.init(
@@ -54,21 +61,67 @@ private final class HoverTooltipPanel: NSPanel {
     }
 
     func scheduleShow(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
+        // Cancel any scheduled hide — a new hover-in wins.
+        pendingHide?.cancel()
+        pendingHide = nil
         pendingShow?.cancel()
+
+        // Track which view owns this pending show so cancelAndHide can decide
+        // whether to cancel it (same element quick-exit) or leave it alive
+        // (adjacent element's incoming show).
+        pendingShowAnchor = anchorView
+
         let item = DispatchWorkItem { [weak self, weak anchorView] in
             guard let self, let anchorView else { return }
+            self.pendingShow = nil
+            self.pendingShowAnchor = nil
+            self.lastPresentDate = Date()
             self.present(text: text, placement: placement, from: anchorView)
         }
         pendingShow = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+        // When already visible (tab-to-tab), update quickly; otherwise use the
+        // standard initial-show delay so we don't flash on quick mouse passes.
+        let delay: TimeInterval = isVisible ? 0.05 : 0.1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    func cancelAndHide() {
-        pendingShow?.cancel()
-        pendingShow = nil
-        if isVisible {
-            orderOut(nil)
+    func cancelAndHide(from callerAnchor: NSView? = nil) {
+        pendingHide?.cancel()
+        pendingHide = nil
+
+        guard isVisible else {
+            // Tooltip never appeared — safe to cancel the pending show outright.
+            pendingShow?.cancel()
+            pendingShow = nil
+            pendingShowAnchor = nil
+            return
         }
+
+        // If the caller is the same element that owns the in-flight pendingShow,
+        // cancel it now. This closes the race where a quick hover-in/out causes
+        // pendingShow to fire *after* cancelAndHide captures snapDate, updating
+        // lastPresentDate to a time after snapDate and silently blocking the hide.
+        //
+        // If a *different* (adjacent) element owns pendingShow, leave it alive:
+        // that element's scheduleShow has already cancelled the previous
+        // pendingHide, so its upcoming present() will correctly take ownership.
+        if let callerAnchor, pendingShowAnchor === callerAnchor {
+            pendingShow?.cancel()
+            pendingShow = nil
+            pendingShowAnchor = nil
+        }
+
+        let snapDate = Date()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingHide = nil
+            // A present() that happened after we decided to hide means a new
+            // element took over — don't dismiss.
+            guard self.lastPresentDate <= snapDate else { return }
+            self.orderOut(nil)
+        }
+        pendingHide = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
     }
 
     private func present(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
@@ -140,13 +193,13 @@ private struct HoverTooltipModifier: ViewModifier {
                 updateTooltip(isHovering: isHovering)
             }
             .onDisappear {
-                HoverTooltipPanel.shared.cancelAndHide()
+                HoverTooltipPanel.shared.cancelAndHide(from: anchorView)
             }
     }
 
     private func updateTooltip(isHovering: Bool) {
         guard isEnabled, isHovering, let anchorView else {
-            HoverTooltipPanel.shared.cancelAndHide()
+            HoverTooltipPanel.shared.cancelAndHide(from: anchorView)
             return
         }
         HoverTooltipPanel.shared.scheduleShow(text: text, placement: placement, from: anchorView)

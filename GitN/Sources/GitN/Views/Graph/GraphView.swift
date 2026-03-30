@@ -39,10 +39,51 @@ struct GraphView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            graphHeader
-            Divider()
+        ZStack {
+            VStack(spacing: 0) {
+                if !viewModel.isFileInspectorPresented {
+                    graphHeader
+                    Divider()
+                }
 
+                graphContent
+            }
+
+            if viewModel.isFileInspectorPresented {
+                FileInspectorOverlayView(viewModel: viewModel)
+                    .transition(.opacity)
+                    .zIndex(10)
+            }
+        }
+        .background(Color(.textBackgroundColor))
+        .sheet(isPresented: $showCreateTagSheet) { createTagSheet }
+        .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
+        .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
+        .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
+        .alert(
+            "Delete Remote Branch",
+            isPresented: Binding(
+                get: { pendingRemoteBranchDelete != nil },
+                set: { if !$0 { pendingRemoteBranchDelete = nil } }
+            )
+        ) {
+            Button("Delete", role: .destructive) {
+                if let p = pendingRemoteBranchDelete {
+                    Task { await viewModel.performDeleteRemoteBranch(remote: p.remote, branch: p.branch) }
+                }
+                pendingRemoteBranchDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRemoteBranchDelete = nil }
+        } message: {
+            if let p = pendingRemoteBranchDelete {
+                Text("Are you sure you want to delete \(p.remote)/\(p.branch) from the remote? This cannot be undone.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var graphContent: some View {
+        Group {
             if viewModel.graphDisplayCommits.isEmpty && !viewModel.isLoading {
                 emptyState
             } else {
@@ -107,30 +148,9 @@ struct GraphView: View {
                 }
             }
         }
-        .background(Color(.textBackgroundColor))
-        .sheet(isPresented: $showCreateTagSheet) { createTagSheet }
-        .sheet(isPresented: $showCreateBranchSheet) { createBranchAtSheet }
-        .sheet(isPresented: $showEditMessageSheet) { editMessageSheet }
-        .sheet(isPresented: $showSetUpstreamSheet) { setUpstreamSheet }
-        .alert(
-            "Delete Remote Branch",
-            isPresented: Binding(
-                get: { pendingRemoteBranchDelete != nil },
-                set: { if !$0 { pendingRemoteBranchDelete = nil } }
-            )
-        ) {
-            Button("Delete", role: .destructive) {
-                if let p = pendingRemoteBranchDelete {
-                    Task { await viewModel.performDeleteRemoteBranch(remote: p.remote, branch: p.branch) }
-                }
-                pendingRemoteBranchDelete = nil
-            }
-            Button("Cancel", role: .cancel) { pendingRemoteBranchDelete = nil }
-        } message: {
-            if let p = pendingRemoteBranchDelete {
-                Text("Are you sure you want to delete \(p.remote)/\(p.branch) from the remote? This cannot be undone.")
-            }
-        }
+        // Suppress NSTrackingArea events from views behind the overlay;
+        // they ignore SwiftUI z-order and would otherwise leak through.
+        .allowsHitTesting(!viewModel.isFileInspectorPresented)
     }
 
     // MARK: - Context Action Handler

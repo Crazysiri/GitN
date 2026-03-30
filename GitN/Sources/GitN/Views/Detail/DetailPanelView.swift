@@ -1,6 +1,11 @@
 import SwiftUI
 
 struct DetailPanelView: View {
+    enum StageDropArea: String {
+        case staged
+        case unstaged
+    }
+
     private enum LayoutDefaults {
         static let uncommittedInputHeight: CGFloat = 240
         static let uncommittedInputMinHeight: CGFloat = 170
@@ -843,7 +848,7 @@ struct DetailPanelView: View {
                                         isSelected: isStatusFileSelected(file.path, in: .staged),
                                         isStaged: true,
                                         onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                        dragPayload: dragPayload(for: file.path)
+                                        dragPayload: dragPayload(for: file.path, sourceArea: .staged)
                                     )
                                     .equatable()
                                     .id(fileRowID(for: file.path, context: .staged))
@@ -875,7 +880,7 @@ struct DetailPanelView: View {
                                 }
                             }
                             .onDrop(of: [.text], isTargeted: nil) { providers in
-                                handleDrop(providers: providers, toStaged: true)
+                                handleDrop(providers: providers, to: .staged)
                             }
 
                             Divider().padding(.vertical, 2)
@@ -906,7 +911,7 @@ struct DetailPanelView: View {
                                         isSelected: isStatusFileSelected(file.path, in: .unstaged),
                                         isStaged: false,
                                         onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                        dragPayload: isRubberBanding ? nil : dragPayload(for: file.path)
+                                        dragPayload: isRubberBanding ? nil : dragPayload(for: file.path, sourceArea: .unstaged)
                                     )
                                     .equatable()
                                     .id(fileRowID(for: file.path, context: .unstaged))
@@ -967,7 +972,7 @@ struct DetailPanelView: View {
                                 unstagedRowFrames = frames
                             }
                             .onDrop(of: [.text], isTargeted: nil) { providers in
-                                handleDrop(providers: providers, toStaged: false)
+                                handleDrop(providers: providers, to: .unstaged)
                             })
                         }
                     }
@@ -1086,7 +1091,7 @@ struct DetailPanelView: View {
                                     isSelected: isStatusFileSelected(file.path, in: .staged),
                                     isStaged: true,
                                     onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path)
+                                    dragPayload: dragPayload(for: file.path, sourceArea: .staged)
                                 )
                                 .id(fileRowID(for: file.path, context: .staged))
                                 .onTapGesture {
@@ -1115,7 +1120,7 @@ struct DetailPanelView: View {
                             }
                         }
                         .onDrop(of: [.text], isTargeted: nil) { providers in
-                            handleDrop(providers: providers, toStaged: true)
+                            handleDrop(providers: providers, to: .staged)
                         }
 
                         Divider().padding(.vertical, 2)
@@ -1136,7 +1141,7 @@ struct DetailPanelView: View {
                                     isSelected: isStatusFileSelected(file.path, in: .unstaged),
                                     isStaged: false,
                                     onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path)
+                                    dragPayload: dragPayload(for: file.path, sourceArea: .unstaged)
                                 )
                                 .id(fileRowID(for: file.path, context: .unstaged))
                                 .onTapGesture {
@@ -1165,7 +1170,7 @@ struct DetailPanelView: View {
                             }
                         }
                         .onDrop(of: [.text], isTargeted: nil) { providers in
-                            handleDrop(providers: providers, toStaged: false)
+                            handleDrop(providers: providers, to: .unstaged)
                         }
                     }
                 }
@@ -1429,25 +1434,30 @@ struct DetailPanelView: View {
     /// Build the drag payload for a file row.
     /// If the file is part of a multi-selection, all selected paths are included
     /// (newline-separated) so that the entire selection moves together.
-    private func dragPayload(for filePath: String) -> String {
+    private func dragPayload(for filePath: String, sourceArea: StageDropArea) -> String {
         let selected = viewModel.selectedFilePaths
+        let sourcePrefix = sourceArea.rawValue + ":"
         if selected.contains(filePath), selected.count > 1 {
-            return selected.sorted().joined(separator: "\n")
+            return selected.sorted()
+                .map { sourcePrefix + $0 }
+                .joined(separator: "\n")
         }
-        return filePath
+        return sourcePrefix + filePath
     }
 
-    private func handleDrop(providers: [NSItemProvider], toStaged: Bool) -> Bool {
+    private func handleDrop(providers: [NSItemProvider], to destinationArea: StageDropArea) -> Bool {
         for provider in providers {
             provider.loadObject(ofClass: NSString.self) { item, _ in
                 guard let payload = item as? String else { return }
-                // Payload may contain multiple newline-separated paths.
-                let paths = payload.components(separatedBy: "\n").filter { !$0.isEmpty }
+                let decoded = StageFileDragPayload.decode(payload)
+                guard !decoded.paths.isEmpty else { return }
+                guard decoded.sourceArea != destinationArea else { return }
+
                 Task { @MainActor in
-                    if toStaged {
-                        await viewModel.stageFiles(paths)
+                    if destinationArea == .staged {
+                        await viewModel.stageFiles(decoded.paths)
                     } else {
-                        await viewModel.unstageFiles(paths)
+                        await viewModel.unstageFiles(decoded.paths)
                     }
                 }
             }
@@ -1561,7 +1571,8 @@ struct DetailPanelView: View {
                 VisualFileContentView(
                     content: visualContent,
                     path: viewModel.selectedDiffFile?.path ?? "",
-                    mode: .diff
+                    mode: .diff,
+                    oldPath: viewModel.selectedDiffFile?.oldPath
                 )
             } else if viewModel.selectedDiffFile != nil {
                 if viewModel.isLoadingDiff {
@@ -2489,6 +2500,40 @@ private struct StatusRowContentDragModifier: ViewModifier {
     }
 }
 
+struct StageFileDragPayload {
+    let sourceArea: DetailPanelView.StageDropArea
+    let paths: [String]
+
+    static func decode(_ payload: String) -> StageFileDragPayload {
+        let lines = payload.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard !lines.isEmpty else {
+            return StageFileDragPayload(sourceArea: .unstaged, paths: [])
+        }
+
+        let decodedLines = lines.compactMap { line -> (DetailPanelView.StageDropArea, String)? in
+            guard let separatorIndex = line.firstIndex(of: ":") else { return nil }
+            let rawArea = String(line[..<separatorIndex])
+            let pathStart = line.index(after: separatorIndex)
+            let path = String(line[pathStart...])
+            guard let area = DetailPanelView.StageDropArea(rawValue: rawArea), !path.isEmpty else { return nil }
+            return (area, path)
+        }
+
+        if let firstArea = decodedLines.first?.0 {
+            return StageFileDragPayload(
+                sourceArea: firstArea,
+                paths: decodedLines
+                    .filter { $0.0 == firstArea }
+                    .map(\.1)
+            )
+        }
+
+        // Backward compatibility for older plain-path payloads:
+        // treat them as unstaged-origin drags so existing drops degrade safely.
+        return StageFileDragPayload(sourceArea: .unstaged, paths: lines)
+    }
+}
+
 private final class BlankSelectionNSView: NSView {
     var onBegin: ((CGPoint) -> Void)?
     var onChange: ((CGPoint) -> Void)?
@@ -2548,23 +2593,7 @@ struct DiffFileRow: View {
     let file: DiffFile
     let isSelected: Bool
 
-    private var imageStatusLabel: String? {
-        guard file.path.isImageFile else { return nil }
-        switch file.changeKind {
-        case .added, .untracked:
-            return "+ image"
-        case .deleted:
-            return "- image"
-        case .renamed:
-            return "renamed image"
-        case .modified:
-            return "~ image"
-        case .copied:
-            return "copied image"
-        case .unknown:
-            return nil
-        }
-    }
+    private var imageStatusLabel: String? { file.imageStatusText }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -2632,7 +2661,7 @@ struct DiffFileRow: View {
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.red)
                 }
-                if file.isPureRename {
+                if file.showsRenamedBadge {
                     Text("renamed")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)

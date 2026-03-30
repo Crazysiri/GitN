@@ -2356,7 +2356,7 @@ actor GitService {
         // GIT_EDITOR=true prevents git from opening an interactive editor for the
         // combined commit message in a non-TTY Process context, which would block forever.
         try await runGitWithEnv(
-            ["rebase", "-i", "--autosquash", "\(oldestHash)^"],
+            ["rebase", "-i", "\(oldestHash)^"],
             env: [
                 "GIT_SEQUENCE_EDITOR": editor,
                 "GIT_EDITOR": "true"

@@ -282,6 +282,37 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertTrue(renameDiff.contains("rename to new-name.txt"))
     }
 
+    // MARK: - Binary image change kind
+
+    func testModifiedBinaryImageChangeKindIsModified() async throws {
+        let repo = try TemporaryGitRepository()
+
+        // 1x1 transparent PNG
+        let pngV1 = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII=")!
+        // 1x1 red PNG (different binary content)
+        let pngV2 = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==")!
+
+        let pngURL = URL(fileURLWithPath: repo.path).appendingPathComponent("icon.png")
+        try pngV1.write(to: pngURL)
+        try repo.commitAll(message: "add icon")
+
+        try pngV2.write(to: pngURL)
+        let modifyHash = try repo.commitAll(message: "update icon")
+
+        let service = GitService(repoPath: repo.path)
+        let files = try await service.committedDiffPreview(hash: modifyHash)
+
+        XCTAssertEqual(files.count, 1)
+        let file = try XCTUnwrap(files.first)
+        XCTAssertEqual(file.path, "icon.png")
+        XCTAssertEqual(file.changeKind, .modified,
+            "A PNG replaced with different PNG content must be .modified, not .deleted or .unknown")
+        XCTAssertNil(file.oldPath,
+            "A same-path binary modification is not a rename and must have no oldPath")
+    }
+
     func testCommittedDiffPreviewReturnsMetadataBeforeLineStats() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("old-name.txt", contents: "one\n")
@@ -305,5 +336,60 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertEqual(detailedFiles[0].oldPath, "old-name.txt")
         XCTAssertEqual(detailedFiles[0].additions, 1)
         XCTAssertEqual(detailedFiles[0].deletions, 0)
+    }
+
+    // MARK: - Squash commits
+
+    func testSquashTwoCommitsProducesOneCommit() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "one\n")
+        try repo.commitAll(message: "first")
+
+        try repo.appendFile("a.txt", contents: "two\n")
+        let olderHash = try repo.commitAll(message: "second")
+
+        try repo.appendFile("a.txt", contents: "three\n")
+        let newerHash = try repo.commitAll(message: "third")
+
+        let service = GitService(repoPath: repo.path)
+        // hashes are newest-first as the UI passes them
+        try await service.squashCommits([newerHash, olderHash])
+
+        let log = try repo.run(["log", "--oneline"])
+        let lines = log.split(separator: "\n")
+        // two commits squashed into one: only "first" + the squash result remain
+        XCTAssertEqual(lines.count, 2, "Expected 2 commits after squash, got: \(log)")
+    }
+
+    func testSquashPreservesFileContents() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "one\n")
+        try repo.commitAll(message: "base")
+
+        try repo.appendFile("a.txt", contents: "two\n")
+        let olderHash = try repo.commitAll(message: "add two")
+
+        try repo.appendFile("a.txt", contents: "three\n")
+        let newerHash = try repo.commitAll(message: "add three")
+
+        let service = GitService(repoPath: repo.path)
+        try await service.squashCommits([newerHash, olderHash])
+
+        let contents = try repo.readFile("a.txt")
+        XCTAssertEqual(contents, "one\ntwo\nthree\n")
+    }
+
+    func testSquashWithFewerThanTwoHashesThrows() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "x\n")
+        let hash = try repo.commitAll(message: "only")
+
+        let service = GitService(repoPath: repo.path)
+        do {
+            try await service.squashCommits([hash])
+            XCTFail("Expected squashCommits to throw for a single commit")
+        } catch {
+            // expected
+        }
     }
 }

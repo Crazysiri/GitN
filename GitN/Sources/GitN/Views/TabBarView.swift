@@ -13,18 +13,17 @@ struct TabBarView: View {
         static let trailingControlsWidth: CGFloat = 30
         static let trailingGap: CGFloat = 10
         static let addButtonSize = CGSize(width: 24, height: 24)
-        static let minTabWidth: CGFloat = 110
-        static let maxTabWidth: CGFloat = 200
+        static let maxTabWidth: CGFloat = 220
         static let contentHorizontalPadding: CGFloat = 10
         static let maxToolbarFraction: CGFloat = 0.68
         static let tabCornerRadius: CGFloat = 7
-        static let tabBaseWidth: CGFloat = 72
-        static let characterWidth: CGFloat = 7.2
+        /// Fixed chrome overhead: left-pad(12) + SF-symbol(~20) + spacing(8) + spacing(8) + close(16) + right-pad(12) + safety(8)
+        static let tabChromeOverhead: CGFloat = 84
         static let maxVisibleCharacters = 20
     }
 
     var body: some View {
-        let maxTabAreaWidth = max(Layout.minTabWidth, windowWidth * Layout.maxToolbarFraction)
+        let maxTabAreaWidth = windowWidth * Layout.maxToolbarFraction
         let tabWidths = resolvedTabWidths(for: maxTabAreaWidth)
         let totalTabsWidth = tabWidths.reduce(0, +)
         let visibleTabAreaWidth = min(maxTabAreaWidth, totalTabsWidth + Layout.contentHorizontalPadding + 1)
@@ -90,28 +89,17 @@ struct TabBarView: View {
     }
 
     private func resolvedTabWidths(for availableWidth: CGFloat) -> [CGFloat] {
-        guard !appModel.tabs.isEmpty else { return [] }
-
-        let idealWidths = appModel.tabs.map(idealWidth(for:))
-        let totalIdealWidth = idealWidths.reduce(0, +)
-        guard totalIdealWidth > availableWidth else { return idealWidths }
-
-        let minimumTotalWidth = CGFloat(appModel.tabs.count) * Layout.minTabWidth
-        guard minimumTotalWidth < totalIdealWidth else {
-            return Array(repeating: Layout.minTabWidth, count: appModel.tabs.count)
-        }
-
-        let compressionRatio = max(0, min(1, (availableWidth - minimumTotalWidth) / (totalIdealWidth - minimumTotalWidth)))
-        return idealWidths.map { width in
-            let compressed = Layout.minTabWidth + (width - Layout.minTabWidth) * compressionRatio
-            return floor(compressed)
-        }
+        appModel.tabs.map(idealWidth(for:))
     }
 
+    private static let tabLabelFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+
     private func idealWidth(for tab: RepoTab) -> CGFloat {
-        let visibleCount = min(tab.name.count, Layout.maxVisibleCharacters)
-        let estimated = Layout.tabBaseWidth + CGFloat(visibleCount) * Layout.characterWidth
-        return min(Layout.maxTabWidth, max(Layout.minTabWidth, ceil(estimated)))
+        let displayName = String(tab.name.prefix(Layout.maxVisibleCharacters))
+        let textWidth = (displayName as NSString).size(withAttributes: [.font: Self.tabLabelFont]).width
+        // Pure content-driven width — no minTabWidth floor applied here.
+        // minTabWidth is only a compression floor in resolvedTabWidths.
+        return min(Layout.maxTabWidth, Layout.tabChromeOverhead + ceil(textWidth))
     }
 }
 
@@ -189,7 +177,6 @@ struct TabItemView: View {
     private static let tabCornerRadius: CGFloat = 7
     private static let topInset: CGFloat = 5
     private static let innerHeight: CGFloat = 42
-    private static let maxVisibleCharacters = 20
 
     let tab: RepoTab
     let isSelected: Bool
@@ -211,7 +198,7 @@ struct TabItemView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(isSelected ? .primary : .secondary)
 
-                Text(displayTitle)
+                Text(tab.name)
                     .font(.system(size: 12, weight: .regular))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -241,6 +228,11 @@ struct TabItemView: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .hoverTooltip(tooltipText, placement: .below)
+    }
+
+    private var tooltipText: String {
+        "\(tab.name)\n\(tab.path)"
     }
 
     private var backgroundColor: Color {
@@ -255,11 +247,6 @@ struct TabItemView: View {
 
     private var closeIconColor: Color {
         isSelected ? Color.primary.opacity(0.8) : Color.secondary
-    }
-
-    private var displayTitle: String {
-        if tab.name.count <= Self.maxVisibleCharacters { return tab.name }
-        return String(tab.name.prefix(Self.maxVisibleCharacters))
     }
 
     private var tabShape: UnevenRoundedRectangle {

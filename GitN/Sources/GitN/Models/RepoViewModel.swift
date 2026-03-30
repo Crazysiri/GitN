@@ -186,6 +186,7 @@ final class RepoViewModel {
     var fileInspectorMode: FileInspectorMode = .diff
     var fileInspectorContext: DiffContext = .committed
     var fileInspectorPath: String = ""
+    var fileInspectorOldPath: String? = nil
     var fileInspectorContent: String = ""
     var fileInspectorInitialContent: String = ""
     var fileInspectorDisplayContent: String = ""
@@ -330,7 +331,18 @@ final class RepoViewModel {
             let inspectorBaseText: String
             let usesRawDiffFallback = preferredMode == .diff && parsedDiff == nil
             let inspectorParsedDiff: ParsedDiff?
-            if usesRawDiffFallback {
+            if let oldPath = file.oldPath,
+               context == .committed,
+               let parentHash = selectedCommit?.parentHashes.first {
+                // Committed rename: load the actual old-path content from the parent commit
+                // as the diff base so Monaco shows the real before↔after comparison.
+                // Without this, usesRawDiffFallback would give Monaco the raw git diff
+                // header as "before" — e.g. "diff --git a/… b/…\nrename from …\nrename to …".
+                let oldDecoded = try await git.decodedFileContent(atCommit: parentHash, path: oldPath)
+                inspectorBaseText = oldDecoded.text ?? loadedText
+                inspectorDisplayContent = loadedText
+                inspectorParsedDiff = preferredMode == .diff ? parsedDiff : nil
+            } else if usesRawDiffFallback {
                 let fallbackText = fileDiffContent.isEmpty ? loadedText : fileDiffContent
                 let compactSubmoduleDiff = Self.compactSubmoduleDiff(fallbackText)
                 inspectorDisplayContent = compactSubmoduleDiff?.baseText ?? Self.displayTextForRawDiffFallback(fallbackText)
@@ -348,6 +360,7 @@ final class RepoViewModel {
                 }
             }
             fileInspectorPath = file.path
+            fileInspectorOldPath = file.oldPath
             fileInspectorContext = context
             fileInspectorContent = loadedText
             fileInspectorInitialContent = loadedText
@@ -386,6 +399,7 @@ final class RepoViewModel {
     func closeFileInspector() {
         isFileInspectorPresented = false
         isFileInspectorDiffEditing = false
+        fileInspectorOldPath = nil
         fileInspectorVisualContent = nil
         fileInspectorUndoStack.removeAll(keepingCapacity: false)
         fileInspectorRedoStack.removeAll(keepingCapacity: false)
@@ -470,7 +484,7 @@ final class RepoViewModel {
     static func monacoLanguage(for language: SourceLanguage) -> String {
         switch language {
         case .swift, .python, .javascript, .typescript, .go, .rust, .c, .cpp, .java,
-             .json, .yaml, .dart, .ruby, .php, .css, .html, .xml:
+             .json, .yaml, .dart, .ruby, .php, .css, .html, .xml, .markdown:
             return language.rawValue
         case .shell:
             return "shellscript"
@@ -645,6 +659,16 @@ final class RepoViewModel {
         if hasRenderableImage {
             return VisualFileContent(kind: .image, oldData: oldData, newData: newData, message: nil)
         }
+
+        // Only return a binary placeholder when the blob data actually looks binary.
+        // Text files (JSON, Swift, plain text, …) contain no null bytes; classifying
+        // them as binary would show "Binary diff is not readable" for pure text renames
+        // where the diff has no hunks but git still provides the raw blobs.
+        let isBinaryData = [oldData, newData].contains { data in
+            guard let data else { return false }
+            return data.contains(0)
+        }
+        guard isBinaryData else { return nil }
 
         if oldData != nil || newData != nil {
             return VisualFileContent(
@@ -3641,12 +3665,12 @@ final class RepoViewModel {
                 await loadAll()
             } else {
                 if let msg = errorMessage {
-                    operationError = msg
+                    showToast(title: "Operation Failed", detail: msg, style: .error)
                 }
             }
         } catch {
             if let msg = errorMessage {
-                operationError = msg
+                showToast(title: "Operation Failed", detail: msg, style: .error)
             }
         }
     }
