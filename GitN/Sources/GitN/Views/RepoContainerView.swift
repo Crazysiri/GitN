@@ -583,7 +583,7 @@ struct RepoContainerView: View {
     }
 
     private func animatedRefreshLabel(isActive: Bool) -> some View {
-        ToolbarFetchAnimationView(title: "Refresh", isActive: isActive)
+        ToolbarRefreshAnimationView(title: "Refresh", isActive: isActive)
     }
 
     // MARK: - More Menu
@@ -809,16 +809,56 @@ private struct ToolbarFetchAnimationView: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: isActive ? 1.0 / 30.0 : 0.5, paused: !isActive)) { context in
             let progress = animationProgress(at: context.date)
-            let rotation = isActive ? progress * 360 : 0
-            let iconScale = isActive ? 1 + 0.025 * sin(progress * .pi * 2) : 1
-            let glowOpacity = isActive ? 0.18 + 0.08 * sin(progress * .pi * 2) : 0
+            let shimmer = shimmerProgress(at: context.date)
+            let dropProgress = max(0, sin(progress * .pi))
+            let ghostOpacity = isActive ? dropProgress * 0.24 : 0
+            let iconOffset = isActive ? -1.2 + 1.8 * dropProgress : 0
+            let iconScale = isActive ? 1 + 0.03 * dropProgress : 1
+            let glowOpacity = isActive ? 0.15 + 0.1 * dropProgress : 0
+
+            toolbarAnimatedContainer(
+                shimmerProgress: shimmer,
+                glowOpacity: glowOpacity,
+                icon: {
+                    ZStack {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .offset(y: -4 + 6 * CGFloat(progress))
+                            .opacity(ghostOpacity)
+                            .blur(radius: 0.25)
+
+                        Image(systemName: "arrow.down.circle")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .offset(y: iconOffset)
+                            .scaleEffect(iconScale)
+                    }
+                }
+            ) {
+                Text(title)
+                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+            }
+        }
+    }
+}
+
+private struct ToolbarRefreshAnimationView: View {
+    let title: String
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: isActive ? 1.0 / 30.0 : 0.5, paused: !isActive)) { context in
+            let progress = animationProgress(at: context.date)
+            let eased = 1 - pow(1 - progress, 3)
+            let rotation = isActive ? eased * 320 : 0
+            let iconScale = isActive ? 1 + 0.022 * sin(progress * .pi * 2) : 1
+            let glowOpacity = isActive ? 0.18 + 0.07 * sin(progress * .pi * 2) : 0
 
             toolbarAnimatedContainer(
                 shimmerProgress: 0,
                 glowOpacity: glowOpacity,
                 showsShimmer: false,
                 icon: {
-                    Image(systemName: "arrow.clockwise")
+                    Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 11.5, weight: .semibold))
                         .rotationEffect(.degrees(rotation))
                         .scaleEffect(iconScale)

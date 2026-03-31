@@ -83,6 +83,97 @@ open build/GitN.app
 
 ---
 
+## Sparkle updates
+
+GitN now has Sparkle update integration behind a normal appcast URL. The app only needs:
+
+- `SUFeedURL` in the bundle, or a custom feed override from Settings → Updates
+- `SUPublicEDKey` in the bundle
+- a signed `.zip` release published behind that feed
+
+Development builds can leave `SPARKLE_FEED_URL` and `SPARKLE_PUBLIC_ED_KEY` empty. In that case the updater UI stays disabled.
+
+More detailed Chinese guidance lives in:
+
+```bash
+UPDATE_GUIDE.zh-CN.md
+```
+
+### Prepare a release
+
+```bash
+APP_VERSION=1.2.0 \
+APP_BUILD=1200 \
+SIGNING_IDENTITY="Developer ID Application: Your Name" \
+SPARKLE_PUBLIC_ED_KEY="<public-ed25519-key>" \
+SPARKLE_FEED_URL="https://updates.example.com/appcast.xml" \
+./Scripts/build_release.sh
+```
+
+`build_release.sh` now performs all of the following:
+
+- builds the signed `.app`
+- packages the Sparkle `.zip`
+- generates `build/updates/appcast.xml`
+
+If your public zip download URL is not the same directory as the appcast URL,
+set it explicitly:
+
+```bash
+SPARKLE_DOWNLOAD_URL_PREFIX="https://downloads.example.com/gitn"
+```
+
+### Where `SPARKLE_BIN_DIR` comes from
+
+You usually do not need to set `SPARKLE_BIN_DIR` manually.
+
+The scripts auto-detect Sparkle tools from:
+
+- `GitN/.build/artifacts/sparkle/Sparkle/bin`
+- `GitN/.build/checkouts/Sparkle`
+- `/Applications/Sparkle/bin`
+
+The first path is created automatically after this repo resolves Sparkle via SwiftPM, for example after:
+
+```bash
+swift build
+```
+
+Set `SPARKLE_BIN_DIR` only if your Sparkle tools live somewhere else.
+
+If your `SPARKLE_FEED_URL` contains query parameters or goes through a proxy
+endpoint, you should also set `SPARKLE_DOWNLOAD_URL_PREFIX`. Otherwise Sparkle's
+`generate_appcast` may infer incorrect archive URLs.
+
+### Upload prepared updates to S3
+
+```bash
+S3_BUCKET=my-updates \
+S3_PREFIX=gitn/stable \
+AWS_REGION=us-east-1 \
+./Scripts/publish_update.sh build/updates
+```
+
+### Upload prepared updates to another server
+
+```bash
+UPDATE_PUBLISHER_SCRIPT=./Scripts/publishers/rsync.sh \
+RSYNC_DESTINATION=deploy@example.com:/var/www/updates/gitn \
+./Scripts/publish_update.sh build/updates
+```
+
+`publish_update.sh` is now upload-only. It does not generate `appcast.xml`; that happens during `build_release.sh`.
+
+If you want a different backend beyond S3 / rsync, point `UPDATE_PUBLISHER_SCRIPT` at any executable script that accepts the updates directory path.
+
+```bash
+UPDATE_PUBLISHER_SCRIPT=/abs/path/to/your-publisher.sh
+```
+
+The publisher only uploads static files. The app still consumes the same feed URL regardless of whether the files came from S3, rsync, CloudFront, GitHub Pages, or another host.
+
+---
+
 ## Upgrading Monaco
 
 1. Edit `Monaco/package.json`, bump `monaco-editor` (and optionally `monaco-editor-webpack-plugin`):

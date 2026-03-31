@@ -11,6 +11,7 @@ let package = Package(
         .package(url: "https://github.com/appstefan/highlightswift.git", from: "1.1.0"),
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.9.0"),
     ],
     targets: [
         // libgit2 compiled from source located at Sources/Clibgit2/libgit2.
@@ -104,7 +105,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "GitN",
-            dependencies: ["Clibgit2", "SwiftTerm", .product(name: "MarkdownUI", package: "swift-markdown-ui"), .product(name: "HighlightSwift", package: "highlightswift")],
+            dependencies: [
+                "Clibgit2",
+                "SwiftTerm",
+                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "HighlightSwift", package: "highlightswift"),
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources/GitN",
             resources: [
                 .copy("FEATURES.md"),

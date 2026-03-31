@@ -3,6 +3,7 @@ import SwiftUI
 private enum SettingsTab: String, CaseIterable {
     case ai = "AI"
     case git = "Git"
+    case updates = "Updates"
     case editor = "Editor"
     case about = "About"
 
@@ -10,6 +11,7 @@ private enum SettingsTab: String, CaseIterable {
         switch self {
         case .ai:     "sparkles"
         case .git:    "network"
+        case .updates:"arrow.triangle.2.circlepath"
         case .editor: "doc.text"
         case .about:  "info.circle"
         }
@@ -17,6 +19,8 @@ private enum SettingsTab: String, CaseIterable {
 }
 
 struct SettingsView: View {
+    @Environment(UpdateCoordinator.self) private var updateCoordinator
+
     @State private var activeTab: SettingsTab = .ai
 
     @State private var aiPrompt: String = AICommitService.userPrompt
@@ -39,6 +43,8 @@ struct SettingsView: View {
         return stored > 0 ? stored : RepoViewModel.defaultMaxDiffFileSizeMB
     }()
     @State private var maxDiffSizeHasChanges = false
+    @State private var updateFeedURL: String = UpdateSettingsStore.shared.customFeedURLString
+    @State private var updateFeedURLHasChanges = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,13 +56,14 @@ struct SettingsView: View {
                 switch activeTab {
                 case .ai:     aiSettingsTab
                 case .git:    gitSettingsTab
+                case .updates: updatesSettingsTab
                 case .editor: editorSettingsTab
                 case .about:  aboutTab
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 520, height: 480)
+        .frame(width: 560, height: 520)
     }
 
     private var tabBar: some View {
@@ -526,6 +533,146 @@ struct SettingsView: View {
 
     // MARK: - Editor Settings
 
+    private var updatesSettingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                updatesOverviewSection
+                Divider()
+                updateFeedSection
+                Divider()
+                updateBehaviorSection
+            }
+            .padding(20)
+        }
+        .task {
+            updateCoordinator.start()
+            if updateFeedURL.isEmpty {
+                updateFeedURL = updateCoordinator.currentFeedURLString
+            }
+        }
+    }
+
+    private var updatesOverviewSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("App Updates")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("GitN checks a Sparkle appcast feed for new releases. The app only needs a feed URL here; S3, CloudFront, or any other static host stays behind that URL.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 6) {
+                Image(systemName: updatesStatusSymbol)
+                    .foregroundStyle(updatesStatusColor)
+                    .font(.system(size: 12))
+                Text(updateCoordinator.availabilityDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let issue = updateCoordinator.configurationProblemDescription {
+                Text(issue)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color(.controlBackgroundColor))
+                    )
+            }
+
+            if let lastCheck = updateCoordinator.lastUpdateCheckDate {
+                Text("Last check: \(lastCheck.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var updateFeedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Appcast URL")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text("Use a full feed URL such as https://updates.example.com/appcast.xml. Leave it empty to fall back to the app bundle default.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField("https://updates.example.com/appcast.xml", text: $updateFeedURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .onChange(of: updateFeedURL) {
+                        updateFeedURLHasChanges = updateFeedURL != updateCoordinator.currentFeedURLString
+                    }
+
+                Button("Save") {
+                    updateCoordinator.saveCustomFeedURL(updateFeedURL)
+                    updateFeedURL = updateCoordinator.currentFeedURLString
+                    updateFeedURLHasChanges = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!updateFeedURLHasChanges)
+
+                Button("Reset") {
+                    updateCoordinator.clearCustomFeedURL()
+                    updateFeedURL = ""
+                    updateFeedURLHasChanges = false
+                }
+                .controlSize(.small)
+                .disabled(updateCoordinator.currentFeedURLString.isEmpty && !updateFeedURLHasChanges)
+            }
+
+            if !updateCoordinator.defaultFeedURLString.isEmpty {
+                Text("Bundle default: \(updateCoordinator.defaultFeedURLString)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+
+            if !updateCoordinator.effectiveFeedURLString.isEmpty {
+                Text("Effective feed: \(updateCoordinator.effectiveFeedURLString)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var updateBehaviorSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Behavior")
+                .font(.system(size: 13, weight: .semibold))
+
+            Toggle(
+                "Automatically check for updates",
+                isOn: Binding(
+                    get: { updateCoordinator.automaticChecksEnabled },
+                    set: { updateCoordinator.setAutomaticChecksEnabled($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .disabled(!updateCoordinator.isAvailable)
+
+            Toggle(
+                "Automatically download updates",
+                isOn: Binding(
+                    get: { updateCoordinator.automaticDownloadsEnabled },
+                    set: { updateCoordinator.setAutomaticDownloadsEnabled($0) }
+                )
+            )
+            .toggleStyle(.switch)
+            .disabled(!updateCoordinator.isAvailable)
+
+            Button("Check for Updates Now") {
+                updateCoordinator.checkForUpdates()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(!updateCoordinator.canCheckForUpdates)
+        }
+    }
+
     private var editorSettingsTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -621,5 +768,37 @@ struct SettingsView: View {
 
     private var buildNumber: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+    }
+
+    private var updatesStatusSymbol: String {
+        switch updateCoordinator.availabilityState {
+        case .error:
+            return "xmark.circle.fill"
+        case .updateAvailable:
+            return "arrow.down.circle.fill"
+        case .downloaded:
+            return "checkmark.circle.fill"
+        case .checking:
+            return "arrow.triangle.2.circlepath.circle.fill"
+        case .idle, .upToDate:
+            return "checkmark.circle.fill"
+        case .unavailable:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var updatesStatusColor: Color {
+        switch updateCoordinator.availabilityState {
+        case .error:
+            return .red
+        case .updateAvailable:
+            return .orange
+        case .downloaded, .idle, .upToDate:
+            return .green
+        case .checking:
+            return .accentColor
+        case .unavailable:
+            return .yellow
+        }
     }
 }

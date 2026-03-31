@@ -2054,9 +2054,12 @@ final class RepoViewModel {
         isLoading = true
         defer { isLoading = false }
 
+        var syncSucceeded = false
+
         do {
             // First, fetch and prune remote branches and tags
             try await git.fetchWithPrune()
+            syncSucceeded = true
         } catch {
             // If fetch fails, still continue with loadAll
             // The error will be shown if needed
@@ -2067,6 +2070,10 @@ final class RepoViewModel {
 
         // After fetch, load all data
         await loadAll()
+
+        if syncSucceeded {
+            showToast(title: "Sync Complete", detail: "Remote refs refreshed", style: .success)
+        }
     }
 
     /// Fetch remote tags from all configured remotes and update knownRemoteTags.
