@@ -1,15 +1,157 @@
 import SwiftUI
 import AppKit
 
+private func conflictScrollDebugLog(_ message: @autoclosure () -> String) {
+    print("[ConflictScroll] \(message())")
+}
+
+private enum ConflictEditorStyle {
+    static let lineHeight: CGFloat = 19
+    static let unresolvedBaseColor = NSColor.systemRed
+}
+
+enum ConflictScrollDriver {
+    case sideA
+    case sideB
+    case output
+}
+
+private enum ConflictScrollSync {
+    static func scalar(forTopLine topLine: Double, anchors: [Int], totalLines: Int) -> Double {
+        let points = segmentPoints(anchors: anchors, totalLines: totalLines)
+        guard points.count >= 2 else { return max(topLine, 0) }
+
+        let clampedTopLine = max(topLine, 0)
+        for index in 0..<(points.count - 1) {
+            let start = Double(points[index])
+            let end = Double(points[index + 1])
+            let length = max(end - start, 1)
+            if clampedTopLine < end || index == points.count - 2 {
+                let progress = min(max((clampedTopLine - start) / length, 0), 1)
+                return Double(index) + progress
+            }
+        }
+
+        return Double(max(points.count - 2, 0))
+    }
+
+    static func topLine(forScalar scalar: Double, anchors: [Int], totalLines: Int) -> Double {
+        let points = segmentPoints(anchors: anchors, totalLines: totalLines)
+        guard points.count >= 2 else { return 0 }
+
+        let maxSegmentIndex = max(points.count - 2, 0)
+        let clampedScalar = min(max(scalar, 0), Double(maxSegmentIndex) + 0.999)
+        let segmentIndex = min(Int(floor(clampedScalar)), maxSegmentIndex)
+        let progress = clampedScalar - Double(segmentIndex)
+        let start = Double(points[segmentIndex])
+        let end = Double(points[min(segmentIndex + 1, points.count - 1)])
+        return start + (end - start) * progress
+    }
+
+    static func sideAnchors(lines: [String], regions: [ConflictRegion], side: ConflictSide) -> [Int] {
+        SideDisplayLayout.make(lines: lines, conflictRegions: regions, side: side).anchors
+    }
+
+    static func sideTotalLines(lines: [String], regions: [ConflictRegion], side: ConflictSide) -> Int {
+        SideDisplayLayout.make(lines: lines, conflictRegions: regions, side: side).rows.count
+    }
+
+    static func outputAnchors(for blocks: [ConflictEditorBlock]) -> [Int] {
+        blocks.map { block in
+            block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
+        }
+    }
+
+    private static func segmentPoints(anchors: [Int], totalLines: Int) -> [Int] {
+        let uniqueAnchors = Array(Set(anchors.map { min(max($0, 0), totalLines) })).sorted()
+        var points = [0]
+        for anchor in uniqueAnchors where anchor > (points.last ?? -1) {
+            points.append(anchor)
+        }
+        if totalLines > (points.last ?? -1) {
+            points.append(totalLines)
+        } else if points.count == 1 {
+            points.append(totalLines)
+        }
+        return points
+    }
+}
+
+private struct SideDisplayLayout {
+    struct Row {
+        let sourceLineIndex: Int?
+    }
+
+    let rows: [Row]
+    let regionDisplayRanges: [Range<Int>]
+
+    var anchors: [Int] {
+        regionDisplayRanges.map(\.lowerBound)
+    }
+
+    static func make(lines: [String], conflictRegions: [ConflictRegion], side: ConflictSide) -> SideDisplayLayout {
+        let emptyRegions = conflictRegions.enumerated().filter { (_, region) in
+            let range = side == .ours ? region.oursRange : region.theirsRange
+            return range.isEmpty
+        }
+
+        let emptyRegionsByGap = Dictionary(grouping: emptyRegions, by: { element in
+            let region = element.element
+            let range = side == .ours ? region.oursRange : region.theirsRange
+            return range.lowerBound
+        })
+
+        var rows: [Row] = []
+        var sourceLineToDisplayLine: [Int] = Array(repeating: 0, count: lines.count)
+        var emptyRegionDisplayStarts: [Int: Int] = [:]
+
+        for gap in 0...lines.count {
+            if let gapRegions = emptyRegionsByGap[gap]?.sorted(by: { lhs, rhs in lhs.offset < rhs.offset }) {
+                for gapRegion in gapRegions {
+                    emptyRegionDisplayStarts[gapRegion.offset] = rows.count
+                    rows.append(Row(sourceLineIndex: nil))
+                }
+            }
+
+            guard gap < lines.count else { continue }
+            sourceLineToDisplayLine[gap] = rows.count
+            rows.append(Row(sourceLineIndex: gap))
+        }
+
+        let regionDisplayRanges = conflictRegions.enumerated().map { index, region -> Range<Int> in
+            let sourceRange = side == .ours ? region.oursRange : region.theirsRange
+            if sourceRange.isEmpty {
+                let start = emptyRegionDisplayStarts[index] ?? min(sourceRange.lowerBound, rows.count)
+                return start..<(start + 1)
+            }
+
+            let start = sourceLineToDisplayLine[sourceRange.lowerBound]
+            let end = sourceLineToDisplayLine[sourceRange.upperBound - 1] + 1
+            return start..<end
+        }
+
+        return SideDisplayLayout(rows: rows, regionDisplayRanges: regionDisplayRanges)
+    }
+}
+
 struct ConflictMergeView: View {
     let viewModel: RepoViewModel
     @State private var currentConflictIndex = 0
     @State private var scrollOffset: CGPoint = .zero
+    @State private var scrollDriver: ConflictScrollDriver = .sideA
+    @State private var suppressSideScrollFeedback = false
+    @State private var outputScrollTargetLine: Int?
+    @State private var outputScrollRequestID = 0
     @State private var initialScrollDone = false
 
     private var file: ConflictFile? { viewModel.conflictMergeFile }
     private var sides: ConflictSides? { viewModel.conflictSides }
-    private var totalConflicts: Int { sides?.markers.count ?? 0 }
+    private var document: ConflictEditorDocument? { viewModel.conflictEditorDocument }
+    private var totalConflicts: Int { document?.blocks.count ?? sides?.markers.count ?? 0 }
+    private var currentBlock: ConflictEditorBlock? {
+        guard let document, currentConflictIndex >= 0, currentConflictIndex < document.blocks.count else { return nil }
+        return document.blocks[currentConflictIndex]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,49 +189,26 @@ struct ConflictMergeView: View {
             HStack(spacing: 4) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
                 Text(file?.path ?? "")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                 if totalConflicts > 0 {
                     Text("(\(totalConflicts) conflict\(totalConflicts == 1 ? "" : "s"))")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
 
             Spacer()
 
-            if totalConflicts > 0 {
-                HStack(spacing: 4) {
-                    Text("conflict \(currentConflictIndex + 1) of \(totalConflicts)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Button(action: { navigateConflict(-1) }) {
-                        Image(systemName: "chevron.up")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .disabled(currentConflictIndex <= 0)
-
-                    Button(action: { navigateConflict(1) }) {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .disabled(currentConflictIndex >= totalConflicts - 1)
-                }
-            }
-
             Divider().frame(height: 16)
 
             Button(action: { Task { await viewModel.saveConflictResolution() } }) {
                 HStack(spacing: 3) {
                     Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 10))
+                        .font(.system(size: 12))
                     Text("Save")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -97,7 +216,7 @@ struct ConflictMergeView: View {
 
             Button(action: { viewModel.closeConflictMerge() }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -111,7 +230,15 @@ struct ConflictMergeView: View {
 
     private var oursPanel: some View {
         VStack(spacing: 0) {
-            panelHeader(label: "A", labelColor: .blue, title: sides?.oursLabel ?? "Ours")
+            panelHeader(
+                label: "A",
+                labelColor: .blue,
+                title: sides?.oursLabel ?? "Ours",
+                isChecked: Binding(
+                    get: { viewModel.allOursSelected },
+                    set: { viewModel.setAllOursSelected($0) }
+                )
+            )
             Divider()
             SyncedScrollCodeView(
                 lines: sides?.oursLines ?? [],
@@ -120,6 +247,8 @@ struct ConflictMergeView: View {
                 highlightColor: NSColor.systemBlue,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
+                scrollDriver: $scrollDriver,
+                suppressScrollFeedback: $suppressSideScrollFeedback,
                 onToggleRegion: { idx in viewModel.toggleOurs(idx) },
                 filePath: file?.path ?? ""
             )
@@ -129,7 +258,15 @@ struct ConflictMergeView: View {
 
     private var theirsPanel: some View {
         VStack(spacing: 0) {
-            panelHeader(label: "B", labelColor: .orange, title: sides?.theirsLabel ?? "Theirs")
+            panelHeader(
+                label: "B",
+                labelColor: .orange,
+                title: sides?.theirsLabel ?? "Theirs",
+                isChecked: Binding(
+                    get: { viewModel.allTheirsSelected },
+                    set: { viewModel.setAllTheirsSelected($0) }
+                )
+            )
             Divider()
             SyncedScrollCodeView(
                 lines: sides?.theirsLines ?? [],
@@ -138,6 +275,8 @@ struct ConflictMergeView: View {
                 highlightColor: NSColor.systemOrange,
                 regionChoices: viewModel.regionChoices,
                 scrollOffset: $scrollOffset,
+                scrollDriver: $scrollDriver,
+                suppressScrollFeedback: $suppressSideScrollFeedback,
                 onToggleRegion: { idx in viewModel.toggleTheirs(idx) },
                 filePath: file?.path ?? ""
             )
@@ -149,37 +288,24 @@ struct ConflictMergeView: View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Text("Output")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
+
                 Spacer()
+                    .frame(maxWidth: 150)
 
                 if totalConflicts > 0 {
-                    HStack(spacing: 4) {
-                        Text("conflict \(currentConflictIndex + 1) of \(totalConflicts)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                        Button(action: { navigateConflict(-1) }) {
-                            Image(systemName: "chevron.up")
-                                .font(.system(size: 10))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .disabled(currentConflictIndex <= 0)
-
-                        Button(action: { navigateConflict(1) }) {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .disabled(currentConflictIndex >= totalConflicts - 1)
-                    }
+                    conflictNavigator
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+
+                Spacer()
 
                 Button("Reset") {
                     viewModel.resetConflictChoices()
                 }
+                .font(.system(size: 13))
                 .buttonStyle(.bordered)
-                .controlSize(.mini)
+                .controlSize(.small)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -187,12 +313,30 @@ struct ConflictMergeView: View {
 
             Divider()
 
-            OutputScrollCodeView(
-                lines: viewModel.conflictOutputLines,
-                conflictSides: sides,
-                regionChoices: viewModel.regionChoices,
+            ConflictOutputEditorView(
+                text: Binding(
+                    get: { viewModel.conflictOutputText },
+                    set: { viewModel.updateConflictOutputText($0) }
+                ),
+                blocks: document?.blocks ?? [],
+                lineOrigins: document?.outputLineOrigins ?? [],
+                currentBlockID: currentBlock?.id,
                 scrollOffset: $scrollOffset,
-                filePath: file?.path ?? ""
+                scrollDriver: $scrollDriver,
+                suppressSideScrollFeedback: $suppressSideScrollFeedback,
+                scrollTargetLine: outputScrollTargetLine,
+                scrollRequestID: outputScrollRequestID,
+                filePath: file?.path ?? "",
+                undoManager: viewModel.conflictUndoManager,
+                canUndoConflictAction: { viewModel.canUndoConflictAction },
+                canRedoConflictAction: { viewModel.canRedoConflictAction },
+                onUndoConflictAction: { viewModel.undoConflictAction() },
+                onRedoConflictAction: { viewModel.redoConflictAction() },
+                onSave: {
+                    Task {
+                        await viewModel.saveConflictResolution()
+                    }
+                }
             )
         }
         .background(Color(.textBackgroundColor))
@@ -200,21 +344,65 @@ struct ConflictMergeView: View {
 
     // MARK: - Helpers
 
-    private func panelHeader(label: String, labelColor: Color, title: String) -> some View {
+    private func panelHeader(label: String, labelColor: Color, title: String, isChecked: Binding<Bool>) -> some View {
         HStack(spacing: 6) {
+            Toggle("", isOn: isChecked)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .controlSize(.small)
+//                .padding(2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color(.textBackgroundColor).opacity(0.92))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(.white.opacity(0.92), lineWidth: 1)
+                )
             Text(label)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(labelColor))
             Text(title)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 13, weight: .medium))
                 .lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(Color(.controlBackgroundColor).opacity(0.5))
+    }
+
+    private var conflictNavigator: some View {
+        HStack(spacing: 8) {
+            Text("conflict")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Button(action: { navigateConflict(-1) }) {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .disabled(currentConflictIndex <= 0)
+
+            Text("\(currentConflictIndex + 1) / \(totalConflicts)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 34)
+
+            Button(action: { navigateConflict(1) }) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .disabled(currentConflictIndex >= totalConflicts - 1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
     }
 
     private func navigateConflict(_ delta: Int) {
@@ -225,20 +413,42 @@ struct ConflictMergeView: View {
     }
 
     private func scrollToConflict(at index: Int) {
-        guard let markers = sides?.markers, index < markers.count else { return }
-        let firstLine = markers[index].oursRange.lowerBound
-        let y = CGFloat(firstLine) * SideCodeContentView.lineHeight - SideCodeContentView.lineHeight * 2
-        scrollOffset = CGPoint(x: scrollOffset.x, y: max(0, y))
+        guard let document, document.blocks.indices.contains(index), let sides else { return }
+        let block = document.blocks[index]
+        let sideLayout = SideDisplayLayout.make(lines: sides.oursLines, conflictRegions: sides.markers, side: .ours)
+        let sideLine = sideLayout.regionDisplayRanges[index].lowerBound
+        let outputLine = block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
+        let paddedSideLine = max(Double(sideLine) - 2, 0)
+        let scalar = ConflictScrollSync.scalar(
+            forTopLine: paddedSideLine,
+            anchors: sideLayout.anchors,
+            totalLines: sideLayout.rows.count
+        )
+        conflictScrollDebugLog("scrollToConflict index=\(index) sideLine=\(sideLine) scalar=\(scalar) outputLine=\(outputLine)")
+        scrollDriver = .sideA
+        scrollOffset = CGPoint(x: scrollOffset.x, y: CGFloat(scalar) * SideCodeContentView.lineHeight)
+        outputScrollTargetLine = outputLine
+        outputScrollRequestID += 1
     }
 
     private func scrollToFirstConflict() {
-        guard !initialScrollDone,
-              let firstLine = sides?.markers.first?.oursRange.lowerBound,
-              firstLine > 0 else { return }
+        guard !initialScrollDone, let block = document?.blocks.first, let sides else { return }
         initialScrollDone = true
-        let y = CGFloat(firstLine) * SideCodeContentView.lineHeight - SideCodeContentView.lineHeight * 2
-        scrollOffset = CGPoint(x: 0, y: max(0, y))
+        let sideLayout = SideDisplayLayout.make(lines: sides.oursLines, conflictRegions: sides.markers, side: .ours)
+        let paddedSideLine = max(Double(sideLayout.regionDisplayRanges[0].lowerBound) - 2, 0)
+        let scalar = ConflictScrollSync.scalar(
+            forTopLine: paddedSideLine,
+            anchors: sideLayout.anchors,
+            totalLines: sideLayout.rows.count
+        )
+        let outputLine = block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
+        conflictScrollDebugLog("scrollToFirstConflict sideLine=\(sideLayout.regionDisplayRanges[0].lowerBound) scalar=\(scalar) outputLine=\(outputLine)")
+        scrollDriver = .sideA
+        scrollOffset = CGPoint(x: 0, y: CGFloat(scalar) * SideCodeContentView.lineHeight)
+        outputScrollTargetLine = outputLine
+        outputScrollRequestID += 1
     }
+
 }
 
 // MARK: - Synced Scroll Code View (ours/theirs panels)
@@ -250,6 +460,8 @@ struct SyncedScrollCodeView: NSViewRepresentable {
     let highlightColor: NSColor
     let regionChoices: [Int: RepoViewModel.RegionChoice]
     @Binding var scrollOffset: CGPoint
+    @Binding var scrollDriver: ConflictScrollDriver
+    @Binding var suppressScrollFeedback: Bool
     let onToggleRegion: (Int) -> Void
     var filePath: String = ""
 
@@ -286,16 +498,26 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         )
 
         let lineH = SideCodeContentView.lineHeight
-        let contentHeight = CGFloat(lines.count) * lineH + 16
+        let contentHeight = CGFloat(contentView.displayLineCount) * lineH + 16
         let contentWidth = max(scrollView.bounds.width, contentView.cachedEstimatedWidth)
         contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
         contentView.needsDisplay = true
 
         if !context.coordinator.isScrolling {
             let cur = scrollView.contentView.bounds.origin
-            if abs(cur.y - scrollOffset.y) > 1 || abs(cur.x - scrollOffset.x) > 1 {
+            let scalar = Double(scrollOffset.y / SideCodeContentView.lineHeight)
+            let targetTopLine = ConflictScrollSync.topLine(
+                forScalar: scalar,
+                anchors: contentView.displayAnchors,
+                totalLines: contentView.displayLineCount
+            )
+            let targetY = CGFloat(targetTopLine) * SideCodeContentView.lineHeight
+            if abs(cur.y - targetY) > 1 || abs(cur.x - scrollOffset.x) > 1 {
+                conflictScrollDebugLog("syncSide side=\(side == .ours ? "A" : "B") scalar=\(scalar) targetTopLine=\(targetTopLine) curY=\(cur.y) targetY=\(targetY)")
                 context.coordinator.isSyncing = true
-                scrollView.contentView.scroll(to: scrollOffset)
+                let targetPoint = CGPoint(x: scrollOffset.x, y: targetY)
+                context.coordinator.lastProgrammaticOrigin = targetPoint
+                scrollView.contentView.scroll(to: targetPoint)
                 scrollView.reflectScrolledClipView(scrollView.contentView)
                 context.coordinator.isSyncing = false
             }
@@ -309,28 +531,62 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         var isSyncing = false
         var isScrolling = false
+        var lastProgrammaticOrigin: CGPoint?
         init(_ parent: SyncedScrollCodeView) { self.parent = parent }
 
         @objc func scrollViewDidScroll(_ notification: Notification) {
-            guard !isSyncing, let scrollView else { return }
-            isScrolling = true
+            guard let scrollView else { return }
             let origin = scrollView.contentView.bounds.origin
+            if let lastProgrammaticOrigin,
+               abs(lastProgrammaticOrigin.x - origin.x) < 1,
+               abs(lastProgrammaticOrigin.y - origin.y) < 1 {
+                self.lastProgrammaticOrigin = nil
+                return
+            }
+            if parent.suppressScrollFeedback {
+                return
+            }
+            guard !isSyncing else { return }
+            isScrolling = true
             DispatchQueue.main.async {
-                self.parent.scrollOffset = origin
+                let topLine = Double(origin.y / SideCodeContentView.lineHeight)
+                let contentView = scrollView.documentView as? SideCodeContentView
+                let scalar = ConflictScrollSync.scalar(
+                    forTopLine: topLine,
+                    anchors: contentView?.displayAnchors ?? [],
+                    totalLines: contentView?.displayLineCount ?? self.parent.lines.count
+                )
+                self.parent.scrollDriver = self.parent.side == .ours ? .sideA : .sideB
+                conflictScrollDebugLog("scrollSide side=\(self.parent.side == .ours ? "A" : "B") topLine=\(topLine) scalar=\(scalar)")
+                self.parent.scrollOffset = CGPoint(
+                    x: origin.x,
+                    y: CGFloat(scalar) * SideCodeContentView.lineHeight
+                )
                 self.isScrolling = false
             }
         }
     }
 }
 
-// MARK: - Output Scroll Code View
+// MARK: - Output Editor View
 
-struct OutputScrollCodeView: NSViewRepresentable {
-    let lines: [String]
-    let conflictSides: ConflictSides?
-    let regionChoices: [Int: RepoViewModel.RegionChoice]
+struct ConflictOutputEditorView: NSViewRepresentable {
+    @Binding var text: String
+    let blocks: [ConflictEditorBlock]
+    let lineOrigins: [ConflictEditorDocument.OutputLineOrigin]
+    let currentBlockID: Int?
     @Binding var scrollOffset: CGPoint
+    @Binding var scrollDriver: ConflictScrollDriver
+    @Binding var suppressSideScrollFeedback: Bool
+    let scrollTargetLine: Int?
+    let scrollRequestID: Int
     var filePath: String = ""
+    let undoManager: UndoManager
+    let canUndoConflictAction: () -> Bool
+    let canRedoConflictAction: () -> Bool
+    let onUndoConflictAction: () -> Void
+    let onRedoConflictAction: () -> Void
+    let onSave: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -340,10 +596,40 @@ struct OutputScrollCodeView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
 
-        let contentView = OutputCodeContentView(frame: .zero)
-        scrollView.documentView = contentView
+        let textView = ConflictOutputTextView(frame: .zero)
+        textView.delegate = context.coordinator
+        textView.conflictUndoManager = undoManager
+        textView.canUndoConflictAction = canUndoConflictAction
+        textView.canRedoConflictAction = canRedoConflictAction
+        textView.onUndoConflictAction = onUndoConflictAction
+        textView.onRedoConflictAction = onRedoConflictAction
+        textView.isRichText = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.allowsUndo = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.drawsBackground = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.selectedTextAttributes = [.backgroundColor: NSColor.selectedTextBackgroundColor]
+        textView.insertionPointColor = .controlAccentColor
+        let editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.font = editorFont
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.typingAttributes = Self.baseAttributes(font: editorFont)
+        textView.onSave = onSave
 
+        scrollView.documentView = textView
         context.coordinator.scrollView = scrollView
+
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.scrollViewDidScroll(_:)),
@@ -355,21 +641,95 @@ struct OutputScrollCodeView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let contentView = scrollView.documentView as? OutputCodeContentView else { return }
-        contentView.configure(lines: lines, conflictSides: conflictSides, regionChoices: regionChoices, filePath: filePath)
+        guard let textView = scrollView.documentView as? ConflictOutputTextView else { return }
+        textView.conflictUndoManager = undoManager
+        textView.canUndoConflictAction = canUndoConflictAction
+        textView.canRedoConflictAction = canRedoConflictAction
+        textView.onUndoConflictAction = onUndoConflictAction
+        textView.onRedoConflictAction = onRedoConflictAction
 
-        let lineH = OutputCodeContentView.lineHeight
-        let contentHeight = CGFloat(lines.count) * lineH + 16
-        let contentWidth = max(scrollView.bounds.width, contentView.cachedEstimatedWidth)
-        contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
-        contentView.needsDisplay = true
+        textView.configure(
+            blocks: blocks,
+            lineOrigins: lineOrigins,
+            currentBlockID: currentBlockID,
+            filePath: filePath
+        )
+        textView.onSave = onSave
 
-        if !context.coordinator.isScrolling {
+        if !context.coordinator.isUpdating, textView.string != text {
+            let selection = textView.selectedRange()
+            context.coordinator.isUpdating = true
+            textView.textStorage?.setAttributedString(
+                Self.highlightedText(text, filePath: filePath, font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
+            )
+            textView.setSelectedRange(selection)
+            textView.typingAttributes = Self.baseAttributes(font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
+            context.coordinator.isUpdating = false
+        }
+
+        let anchorSignature = ConflictScrollSync.outputAnchors(for: blocks)
+        let anchorSignatureChanged = context.coordinator.lastAnchorSignature != anchorSignature
+        if anchorSignatureChanged {
+            context.coordinator.lastAnchorSignature = anchorSignature
+        }
+        if scrollDriver == .output,
+           context.coordinator.lastAppliedScrollRequestID == scrollRequestID,
+           !context.coordinator.isScrolling,
+           !context.coordinator.isSyncing,
+           (anchorSignatureChanged || context.coordinator.pendingViewportRebase) {
+            context.coordinator.pendingViewportRebase = false
+            let topLine = textView.topVisibleLogicalPosition(in: scrollView)
+            let scalar = ConflictScrollSync.scalar(
+                forTopLine: topLine,
+                anchors: anchorSignature,
+                totalLines: textView.logicalLineCount
+            )
+                conflictScrollDebugLog("rebaseOutputMapping topLine=\(topLine) scalar=\(scalar) anchors=\(anchorSignature)")
+                DispatchQueue.main.async {
+                    self.suppressSideScrollFeedback = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        self.suppressSideScrollFeedback = false
+                    }
+                    self.scrollOffset = CGPoint(
+                        x: scrollView.contentView.bounds.origin.x,
+                        y: CGFloat(scalar) * SideCodeContentView.lineHeight
+                    )
+                }
+        }
+
+        if context.coordinator.lastAppliedScrollRequestID != scrollRequestID,
+           let scrollTargetLine {
+            context.coordinator.isSyncing = true
+            conflictScrollDebugLog("jumpOutput request=\(scrollRequestID) targetLine=\(scrollTargetLine)")
+            textView.scrollToLogicalLine(scrollTargetLine, in: scrollView)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            context.coordinator.lastAppliedScrollRequestID = scrollRequestID
+            context.coordinator.isSyncing = false
+        }
+
+        if !context.coordinator.isScrolling,
+           !context.coordinator.suppressSharedOutputSync,
+           scrollDriver != .output,
+           context.coordinator.lastAppliedScrollRequestID == scrollRequestID {
             let cur = scrollView.contentView.bounds.origin
-            if abs(cur.y - scrollOffset.y) > 1 || abs(cur.x - scrollOffset.x) > 1 {
+            let scalar = Double(scrollOffset.y / SideCodeContentView.lineHeight)
+            let targetTopLine = ConflictScrollSync.topLine(
+                forScalar: scalar,
+                anchors: ConflictScrollSync.outputAnchors(for: blocks),
+                totalLines: textView.logicalLineCount
+            )
+            let currentTopLine = textView.topVisibleLogicalPosition(in: scrollView)
+            if abs(currentTopLine - targetTopLine) > 0.05 || abs(cur.x - scrollOffset.x) > 1 {
+                conflictScrollDebugLog("syncOutput scalar=\(scalar) currentTopLine=\(currentTopLine) targetTopLine=\(targetTopLine)")
                 context.coordinator.isSyncing = true
-                scrollView.contentView.scroll(to: scrollOffset)
+                textView.scrollToLogicalPosition(targetTopLine, in: scrollView)
+                if abs(scrollView.contentView.bounds.origin.x - scrollOffset.x) > 1 {
+                    scrollView.contentView.scroll(
+                        to: CGPoint(x: scrollOffset.x, y: scrollView.contentView.bounds.origin.y)
+                    )
+                }
                 scrollView.reflectScrolledClipView(scrollView.contentView)
+                context.coordinator.lastProgrammaticOrigin = scrollView.contentView.bounds.origin
                 context.coordinator.isSyncing = false
             }
         }
@@ -377,22 +737,391 @@ struct OutputScrollCodeView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    final class Coordinator: NSObject {
-        var parent: OutputScrollCodeView
+    static func baseAttributes(font: NSFont) -> [NSAttributedString.Key: Any] {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.minimumLineHeight = ConflictEditorStyle.lineHeight
+        paragraphStyle.maximumLineHeight = ConflictEditorStyle.lineHeight
+        paragraphStyle.lineBreakMode = .byClipping
+
+        return [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraphStyle
+        ]
+    }
+
+    static func paragraphAttributes(font: NSFont) -> [NSAttributedString.Key: Any] {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.minimumLineHeight = ConflictEditorStyle.lineHeight
+        paragraphStyle.maximumLineHeight = ConflictEditorStyle.lineHeight
+        paragraphStyle.lineBreakMode = .byClipping
+
+        return [
+            .font: font,
+            .paragraphStyle: paragraphStyle
+        ]
+    }
+
+    static func highlightedText(_ text: String, filePath: String, font: NSFont) -> NSAttributedString {
+        let language = CodeSyntaxHighlighter.language(for: filePath)
+        let result = NSMutableAttributedString()
+        let lines = text.components(separatedBy: "\n")
+        let paragraphAttributes = paragraphAttributes(font: font)
+        let newlineAttributes = baseAttributes(font: font)
+
+        for index in lines.indices {
+            let highlightedLine = NSMutableAttributedString(
+                attributedString: CodeSyntaxHighlighter.highlight(lines[index], language: language, font: font)
+            )
+            highlightedLine.addAttributes(paragraphAttributes, range: NSRange(location: 0, length: highlightedLine.length))
+            result.append(highlightedLine)
+            if index < lines.count - 1 {
+                result.append(
+                    NSAttributedString(
+                        string: "\n",
+                        attributes: newlineAttributes
+                    )
+                )
+            }
+        }
+
+        return result
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ConflictOutputEditorView
         weak var scrollView: NSScrollView?
+        var isUpdating = false
         var isSyncing = false
         var isScrolling = false
-        init(_ parent: OutputScrollCodeView) { self.parent = parent }
+        var lastAppliedScrollRequestID = -1
+        var lastAnchorSignature: [Int] = []
+        var pendingViewportRebase = false
+        var suppressSharedOutputSync = false
+        var lastProgrammaticOrigin: CGPoint?
+
+        init(_ parent: ConflictOutputEditorView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? ConflictOutputTextView else { return }
+            let selection = textView.selectedRange()
+            isUpdating = true
+            pendingViewportRebase = true
+            suppressSharedOutputSync = true
+            parent.scrollDriver = .output
+            parent.suppressSideScrollFeedback = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.parent.suppressSideScrollFeedback = false
+                self.suppressSharedOutputSync = false
+            }
+            parent.text = textView.string
+            if let storage = textView.textStorage {
+                storage.setAttributedString(
+                    ConflictOutputEditorView.highlightedText(
+                        textView.string,
+                        filePath: parent.filePath,
+                        font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+                    )
+                )
+                textView.setSelectedRange(selection)
+            }
+            textView.typingAttributes = ConflictOutputEditorView.baseAttributes(
+                font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            )
+            textView.configure(
+                blocks: parent.blocks,
+                lineOrigins: parent.lineOrigins,
+                currentBlockID: parent.currentBlockID,
+                filePath: parent.filePath
+            )
+            isUpdating = false
+        }
 
         @objc func scrollViewDidScroll(_ notification: Notification) {
-            guard !isSyncing, let scrollView else { return }
-            isScrolling = true
+            guard let scrollView else { return }
             let origin = scrollView.contentView.bounds.origin
+            if let lastProgrammaticOrigin,
+               abs(lastProgrammaticOrigin.x - origin.x) < 1,
+               abs(lastProgrammaticOrigin.y - origin.y) < 1 {
+                self.lastProgrammaticOrigin = nil
+                return
+            }
+            guard !isSyncing else { return }
+            isScrolling = true
             DispatchQueue.main.async {
-                self.parent.scrollOffset = origin
+                guard let textView = scrollView.documentView as? ConflictOutputTextView else {
+                    self.parent.scrollOffset = origin
+                    self.isScrolling = false
+                    return
+                }
+                let topLine = textView.topVisibleLogicalPosition(in: scrollView)
+                let scalar = ConflictScrollSync.scalar(
+                    forTopLine: topLine,
+                    anchors: ConflictScrollSync.outputAnchors(for: self.parent.blocks),
+                    totalLines: textView.logicalLineCount
+                )
+                self.parent.scrollDriver = .output
+                conflictScrollDebugLog("scrollOutput topLine=\(topLine) scalar=\(scalar) originY=\(origin.y)")
+                self.parent.scrollOffset = CGPoint(
+                    x: origin.x,
+                    y: CGFloat(scalar) * SideCodeContentView.lineHeight
+                )
                 self.isScrolling = false
             }
         }
+    }
+}
+
+final class ConflictOutputTextView: LineNumberTextView {
+    private static let markerInsetX: CGFloat = 3
+    private var blocks: [ConflictEditorBlock] = []
+    private var lineOrigins: [ConflictEditorDocument.OutputLineOrigin] = []
+    private var currentBlockID: Int?
+    private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
+    weak var conflictUndoManager: UndoManager?
+    var canUndoConflictAction: (() -> Bool)?
+    var canRedoConflictAction: (() -> Bool)?
+    var onUndoConflictAction: (() -> Void)?
+    var onRedoConflictAction: (() -> Void)?
+    var onSave: (() -> Void)?
+    var logicalLineCount: Int {
+        max(string.components(separatedBy: "\n").count, 1)
+    }
+
+    func configure(
+        blocks: [ConflictEditorBlock],
+        lineOrigins: [ConflictEditorDocument.OutputLineOrigin],
+        currentBlockID: Int?,
+        filePath: String
+    ) {
+        self.blocks = blocks
+        self.lineOrigins = lineOrigins
+        self.currentBlockID = currentBlockID
+        self.syntaxLanguage = CodeSyntaxHighlighter.language(for: filePath)
+        needsDisplay = true
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "s" {
+            onSave?()
+            return true
+        }
+
+        let normalized = event.charactersIgnoringModifiers?.lowercased()
+        if normalized == "z",
+           modifiers == .command || modifiers == [.command, .shift] {
+            if modifiers == .command, canUndoConflictAction?() == true {
+                onUndoConflictAction?()
+                return true
+            }
+            if modifiers == [.command, .shift], canRedoConflictAction?() == true {
+                onRedoConflictAction?()
+                return true
+            }
+        }
+
+        return super.performKeyEquivalent(with: event)
+    }
+
+    func scrollToLogicalLine(_ lineIndex: Int, in scrollView: NSScrollView) {
+        scrollToLogicalPosition(Double(max(lineIndex, 0)), in: scrollView, withContextPadding: true)
+    }
+
+    func scrollToLogicalPosition(_ position: Double, in scrollView: NSScrollView, withContextPadding: Bool = false) {
+        guard let layoutManager, let textContainer else { return }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let clampedPosition = max(position, 0)
+        let wholeLine = Int(floor(clampedPosition))
+        let fractional = clampedPosition - Double(wholeLine)
+        let targetCharIndex = characterIndex(forLogicalLine: wholeLine)
+        guard targetCharIndex >= 0 else { return }
+
+        let glyphIndex = layoutManager.glyphIndexForCharacter(at: targetCharIndex)
+        var effectiveRange = NSRange()
+        let fragmentRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &effectiveRange)
+        let lineHeight = max(fragmentRect.height, 1)
+        let targetY = max(
+            0,
+            fragmentRect.minY
+                + CGFloat(fractional) * lineHeight
+                + textContainerInset.height
+                - (withContextPadding ? SideCodeContentView.lineHeight * 2 : 0)
+        )
+        let currentX = scrollView.contentView.bounds.origin.x
+        scrollView.contentView.scroll(to: CGPoint(x: currentX, y: targetY))
+    }
+
+    func topVisibleLogicalPosition(in scrollView: NSScrollView) -> Double {
+        guard let layoutManager, let textContainer else { return 0 }
+
+        layoutManager.ensureLayout(for: textContainer)
+        let containerPoint = NSPoint(
+            x: 0,
+            y: max(scrollView.contentView.bounds.minY - textContainerInset.height, 0)
+        )
+        let glyphIndex = layoutManager.glyphIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: nil
+        )
+        let visibleCharacterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        let lineIndex = logicalLineIndex(forCharacterAt: visibleCharacterIndex)
+        let lineCharIndex = characterIndex(forLogicalLine: lineIndex)
+        let lineGlyphIndex = layoutManager.glyphIndexForCharacter(at: lineCharIndex)
+        var effectiveRange = NSRange()
+        let fragmentRect = layoutManager.lineFragmentRect(forGlyphAt: lineGlyphIndex, effectiveRange: &effectiveRange)
+        let delta = max(containerPoint.y - fragmentRect.minY, 0)
+        let fraction = min(max(delta / max(fragmentRect.height, 1), 0), 0.999)
+        return Double(lineIndex) + fraction
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+
+        enumerateVisibleLogicalLines(in: rect) { [weak self] lineNumber, _, fragmentRect in
+            guard let self else { return }
+            let lineIndex = lineNumber - 1
+            guard lineIndex >= 0, lineIndex < self.lineOrigins.count else { return }
+            let origin = self.lineOrigins[lineIndex]
+            guard let color = self.highlightColor(for: origin) else { return }
+
+            let isCurrent = self.block(containing: lineIndex)?.id == self.currentBlockID
+            let fillRect = NSRect(
+                x: self.pinnedViewportMinX(for: rect) + LineNumberTextView.gutterWidth + 2,
+                y: fragmentRect.minY + self.textContainerInset.height,
+                width: max(self.bounds.width - LineNumberTextView.gutterWidth - 8, 40),
+                height: max(fragmentRect.height, 14)
+            )
+            color.withAlphaComponent(self.backgroundAlpha(for: origin, isCurrentBlock: isCurrent)).setFill()
+            fillRect.fill()
+            if let marker = self.lineMarker(for: origin) {
+                self.drawOriginMarker(marker, color: color, fragmentRect: fragmentRect, visibleRect: rect)
+            }
+        }
+    }
+
+    private func block(containing lineIndex: Int) -> ConflictEditorBlock? {
+        blocks.first { block in
+            guard let range = block.activeRange else { return false }
+            return range.contains(lineIndex)
+        }
+    }
+
+    private func highlightColor(for origin: ConflictEditorDocument.OutputLineOrigin) -> NSColor? {
+        switch origin {
+        case .ancestor:
+            return ConflictEditorStyle.unresolvedBaseColor
+        case .current:
+            return .systemBlue
+        case .incoming:
+            return .systemOrange
+        case .common:
+            return nil
+        case .manual:
+            return .systemPurple
+        }
+    }
+
+    private func backgroundAlpha(
+        for origin: ConflictEditorDocument.OutputLineOrigin,
+        isCurrentBlock: Bool
+    ) -> CGFloat {
+        switch origin {
+        case .common:
+            return 0
+        case .ancestor:
+            return isCurrentBlock ? 0.22 : 0.10
+        case .current, .incoming:
+            return isCurrentBlock ? 0.24 : 0.11
+        case .manual:
+            return isCurrentBlock ? 0.20 : 0.10
+        }
+    }
+
+    private func lineMarker(for origin: ConflictEditorDocument.OutputLineOrigin) -> Character? {
+        switch origin {
+        case .ancestor:
+            return "="
+        case .current:
+            return "A"
+        case .incoming:
+            return "B"
+        case .common:
+            return nil
+        case .manual:
+            return "M"
+        }
+    }
+
+    private func drawOriginMarker(
+        _ marker: Character,
+        color: NSColor,
+        fragmentRect: NSRect,
+        visibleRect: NSRect
+    ) {
+        let gutterMinX = pinnedViewportMinX(for: visibleRect)
+        let badgeFont = NSFont.systemFont(ofSize: 8, weight: .bold)
+        let badgeStr = NSAttributedString(
+            string: String(marker),
+            attributes: [.font: badgeFont, .foregroundColor: color]
+        )
+        let bSz = badgeStr.size()
+        badgeStr.draw(
+            at: NSPoint(
+                x: gutterMinX + Self.markerInsetX,
+                y: fragmentRect.minY + textContainerInset.height + (fragmentRect.height - bSz.height) / 2
+            )
+        )
+    }
+
+    private func characterIndex(forLogicalLine lineIndex: Int) -> Int {
+        guard lineIndex > 0 else { return 0 }
+
+        let nsString = string as NSString
+        let length = nsString.length
+        guard length > 0 else { return 0 }
+
+        var currentLine = 0
+        var searchIndex = 0
+        while searchIndex < length {
+            if currentLine == lineIndex {
+                return searchIndex
+            }
+
+            let lineRange = nsString.lineRange(for: NSRange(location: searchIndex, length: 0))
+            let nextIndex = NSMaxRange(lineRange)
+            guard nextIndex > searchIndex else { break }
+            searchIndex = nextIndex
+            currentLine += 1
+        }
+
+        return length
+    }
+
+    private func logicalLineIndex(forCharacterAt characterIndex: Int) -> Int {
+        let nsString = string as NSString
+        let boundedIndex = min(max(characterIndex, 0), nsString.length)
+        guard boundedIndex > 0 else { return 0 }
+
+        var lineIndex = 0
+        var searchIndex = 0
+        while searchIndex < boundedIndex {
+            let lineRange = nsString.lineRange(for: NSRange(location: searchIndex, length: 0))
+            let nextIndex = NSMaxRange(lineRange)
+            guard nextIndex > searchIndex else { break }
+            searchIndex = nextIndex
+            lineIndex += 1
+        }
+
+        return lineIndex
     }
 }
 
@@ -636,18 +1365,21 @@ enum CodeSyntaxHighlighter {
 // MARK: - Side Code Content View (ours/theirs with checkboxes)
 
 final class SideCodeContentView: NSView {
-    static let lineHeight: CGFloat = 17
+    static let lineHeight: CGFloat = 19
     private static let lineNumWidth: CGFloat = 56
     private static let checkboxSize: CGFloat = 14
 
     private var lines: [String] = []
     private var conflictRegions: [ConflictRegion] = []
+    private var displayLayout = SideDisplayLayout(rows: [], regionDisplayRanges: [])
     private var side: ConflictSide = .ours
     private var highlightColor: NSColor = .systemBlue
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var onToggleRegion: ((Int) -> Void)?
     private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
     private(set) var cachedEstimatedWidth: CGFloat = 400
+    var displayLineCount: Int { displayLayout.rows.count }
+    var displayAnchors: [Int] { displayLayout.anchors }
 
     override var isFlipped: Bool { true }
 
@@ -659,10 +1391,11 @@ final class SideCodeContentView: NSView {
     ) {
         if lines.count != self.lines.count {
             let maxLen = lines.reduce(0) { max($0, $1.count) }
-            cachedEstimatedWidth = CGFloat(maxLen) * 7.2 + 80
+            cachedEstimatedWidth = CGFloat(maxLen) * 8.4 + 80
         }
         self.lines = lines
         self.conflictRegions = conflictRegions
+        self.displayLayout = SideDisplayLayout.make(lines: lines, conflictRegions: conflictRegions, side: side)
         self.side = side
         self.highlightColor = highlightColor
         self.regionChoices = regionChoices
@@ -674,19 +1407,20 @@ final class SideCodeContentView: NSView {
         super.draw(dirtyRect)
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let lineNumFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let lineNumFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let lineH = Self.lineHeight
         let lnW = Self.lineNumWidth
 
         let visibleRect = self.visibleRect
         let startLine = max(0, Int(visibleRect.minY / lineH) - 1)
-        let endLine = min(lines.count, Int(visibleRect.maxY / lineH) + 2)
+        let endLine = min(displayLayout.rows.count, Int(visibleRect.maxY / lineH) + 2)
+        guard startLine <= endLine else { return }
 
         for i in startLine..<endLine {
             let y = CGFloat(i) * lineH
             let lineRect = NSRect(x: 0, y: y, width: bounds.width, height: lineH)
-            let regionIdx = conflictRegionIndex(for: i)
+            let regionIdx = conflictRegionIndex(forDisplayLine: i)
             let isConflict = regionIdx != nil
             let isChecked: Bool = {
                 guard let ri = regionIdx, let choice = regionChoices[ri] else { return false }
@@ -694,7 +1428,7 @@ final class SideCodeContentView: NSView {
             }()
 
             if isConflict {
-                ctx.setFillColor(highlightColor.withAlphaComponent(isChecked ? 0.15 : 0.06).cgColor)
+                ctx.setFillColor(highlightColor.withAlphaComponent(isChecked ? 0.24 : 0.11).cgColor)
                 ctx.fill(lineRect)
             }
 
@@ -706,22 +1440,25 @@ final class SideCodeContentView: NSView {
                 let path = CGPath(roundedRect: ckRect.insetBy(dx: 1, dy: 1), cornerWidth: 2, cornerHeight: 2, transform: nil)
 
                 if isChecked {
-                    ctx.setFillColor(highlightColor.withAlphaComponent(0.3).cgColor)
+                    ctx.setFillColor(highlightColor.withAlphaComponent(0.42).cgColor)
                     ctx.addPath(path)
                     ctx.fillPath()
-                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.8).cgColor)
-                    ctx.setLineWidth(1.0)
+                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.98).cgColor)
+                    ctx.setLineWidth(1.25)
                     ctx.addPath(path)
                     ctx.strokePath()
                     let checkAttrs: [NSAttributedString.Key: Any] = [
-                        .font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                        .foregroundColor: highlightColor
+                        .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                        .foregroundColor: NSColor.white
                     ]
                     let check = NSAttributedString(string: "\u{2713}", attributes: checkAttrs)
                     check.draw(at: NSPoint(x: ckX + 2, y: ckY))
                 } else {
-                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.5).cgColor)
-                    ctx.setLineWidth(1.0)
+                    ctx.setFillColor(NSColor.textBackgroundColor.withAlphaComponent(0.85).cgColor)
+                    ctx.addPath(path)
+                    ctx.fillPath()
+                    ctx.setStrokeColor(highlightColor.withAlphaComponent(0.92).cgColor)
+                    ctx.setLineWidth(1.25)
                     ctx.addPath(path)
                     ctx.strokePath()
                 }
@@ -735,16 +1472,17 @@ final class SideCodeContentView: NSView {
             ctx.strokePath()
 
             // Line number
+            let lineNumberText = displayLayout.rows[i].sourceLineIndex.map { "\($0 + 1)" } ?? ""
             let numStr = NSAttributedString(
-                string: "\(i + 1)",
+                string: lineNumberText,
                 attributes: [.font: lineNumFont, .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(0.5)]
             )
             let numSz = numStr.size()
             numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
 
             // Content text (with syntax highlighting)
-            guard i < lines.count else { continue }
-            let text = lines[i].isEmpty ? " " : lines[i]
+            let sourceIndex = displayLayout.rows[i].sourceLineIndex
+            let text = sourceIndex.flatMap { lines[$0].isEmpty ? " " : lines[$0] } ?? " "
             let textX: CGFloat = lnW + 8 + (isConflict ? 20 : 0)
             let contentStr = CodeSyntaxHighlighter.highlight(text, language: syntaxLanguage, font: font)
             let textSz = contentStr.size()
@@ -755,25 +1493,23 @@ final class SideCodeContentView: NSView {
     override func mouseDown(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
         let lineIdx = Int(loc.y / Self.lineHeight)
-        guard lineIdx >= 0, lineIdx < lines.count else { super.mouseDown(with: event); return }
-        if let ri = conflictRegionIndex(for: lineIdx), isFirstLineOfRegion(lineIdx, ri), loc.x < Self.lineNumWidth {
+        guard lineIdx >= 0, lineIdx < displayLayout.rows.count else { super.mouseDown(with: event); return }
+        if let ri = conflictRegionIndex(forDisplayLine: lineIdx), isFirstLineOfRegion(lineIdx, ri), loc.x < Self.lineNumWidth {
             onToggleRegion?(ri)
             return
         }
         super.mouseDown(with: event)
     }
 
-    private func conflictRegionIndex(for lineIdx: Int) -> Int? {
-        for (i, region) in conflictRegions.enumerated() {
-            let range = side == .ours ? region.oursRange : region.theirsRange
+    private func conflictRegionIndex(forDisplayLine lineIdx: Int) -> Int? {
+        for (i, range) in displayLayout.regionDisplayRanges.enumerated() {
             if range.contains(lineIdx) { return i }
         }
         return nil
     }
 
     private func isFirstLineOfRegion(_ lineIdx: Int, _ regionIdx: Int) -> Bool {
-        let range = side == .ours ? conflictRegions[regionIdx].oursRange : conflictRegions[regionIdx].theirsRange
-        return range.lowerBound == lineIdx
+        displayLayout.regionDisplayRanges[regionIdx].lowerBound == lineIdx
     }
 }
 
@@ -782,7 +1518,6 @@ final class SideCodeContentView: NSView {
 final class OutputCodeContentView: NSView {
     static let lineHeight: CGFloat = 17
     private static let lineNumWidth: CGFloat = 56
-    private static let originBadgeWidth: CGFloat = 18
 
     private var lines: [String] = []
     private var conflictSides: ConflictSides?
@@ -799,7 +1534,7 @@ final class OutputCodeContentView: NSView {
         let choicesChanged = regionChoices != self.regionChoices
         if linesChanged {
             let maxLen = lines.reduce(0) { max($0, $1.count) }
-            cachedEstimatedWidth = CGFloat(maxLen) * 7.2 + 80
+            cachedEstimatedWidth = CGFloat(maxLen) * 8.4 + 80
         }
         self.lines = lines
         self.conflictSides = conflictSides
@@ -846,7 +1581,7 @@ final class OutputCodeContentView: NSView {
                     if !includeOurs && !includeTheirs {
                         for j in marker.oursRange {
                             if j < oursLines.count {
-                                origins.append((nil, nil))
+                                origins.append(("=", ConflictEditorStyle.unresolvedBaseColor))
                             }
                         }
                     }
@@ -868,8 +1603,8 @@ final class OutputCodeContentView: NSView {
         super.draw(dirtyRect)
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let lineNumFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let lineNumFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let lineH = Self.lineHeight
         let lnW = Self.lineNumWidth
 
@@ -898,13 +1633,6 @@ final class OutputCodeContentView: NSView {
                 let bSz = badgeStr.size()
                 badgeStr.draw(at: NSPoint(x: 3, y: y + (lineH - bSz.height) / 2))
 
-                // Green checkmark
-                let checkStr = NSAttributedString(
-                    string: "\u{2713}",
-                    attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .bold), .foregroundColor: NSColor.systemGreen]
-                )
-                let cSz = checkStr.size()
-                checkStr.draw(at: NSPoint(x: 12, y: y + (lineH - cSz.height) / 2))
             }
 
             // Separator

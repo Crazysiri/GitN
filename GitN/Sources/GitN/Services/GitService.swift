@@ -345,6 +345,7 @@ actor GitService {
     private let cli: GitCLI
     private var repo: OpaquePointer?
     private var committedDiffSession: CommittedDiffSession?
+    private var cachedRefMap: [String: [String]]?
 
     init(repoPath: String) {
         self.repoPath = repoPath
@@ -360,6 +361,27 @@ actor GitService {
         committedDiffSession = nil
         if let repo { git_repository_free(repo) }
         git_libgit2_shutdown()
+    }
+
+    private func reopenRepository() {
+        committedDiffSession = nil
+        invalidateRefMapCache()
+        if let repo { git_repository_free(repo) }
+
+        var reopened: OpaquePointer?
+        guard git_repository_open(&reopened, repoPath) == 0 else {
+            repo = nil
+            return
+        }
+        repo = reopened
+    }
+
+    private func invalidateRefMapCache() {
+        cachedRefMap = nil
+    }
+
+    func refreshRepositoryState() {
+        reopenRepository()
     }
 
     // MARK: - OID Helpers
@@ -844,7 +866,7 @@ actor GitService {
         }
         defer { git_commit_free(commit) }
 
-        let refMap = buildRefMap()
+        let refMap = refMap()
         let shortHash = oidToShortHash(&oid)
         let parentCount = git_commit_parentcount(commit)
         var parentHashes: [String] = []
@@ -887,7 +909,7 @@ actor GitService {
 
     /// Create a pull-based commit walker that reads commits only on demand.
     func createCommitWalker() -> CommitWalker? {
-        let refMap = buildRefMap()
+        let refMap = refMap()
         return CommitWalker(repoPath: repoPath, refMap: refMap)
     }
 
@@ -896,7 +918,7 @@ actor GitService {
     func commitLog(maxCount: Int = 200) throws -> [CommitInfo] {
         guard let repo else { throw GitError.repoNotOpen }
 
-        let refMap = buildRefMap()
+        let refMap = refMap()
 
         var walker: OpaquePointer?
         guard git_revwalk_new(&walker, repo) == 0, let walker else { return [] }
@@ -952,6 +974,15 @@ actor GitService {
             count += 1
         }
         return result
+    }
+
+    private func refMap() -> [String: [String]] {
+        if let cachedRefMap {
+            return cachedRefMap
+        }
+        let built = buildRefMap()
+        cachedRefMap = built
+        return built
     }
 
     private func buildRefMap() -> [String: [String]] {
@@ -1676,8 +1707,9 @@ actor GitService {
     func stageFile(_ path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
         var index: OpaquePointer?
-        guard git_repository_index(&index, repo) == 0, let index else {
-            throw GitError.operationFailed("Cannot get index")
+        let idxRc = git_repository_index(&index, repo)
+        guard idxRc == 0, let index else {
+            throw GitError.operationFailed(libgit2RawLastError(code: idxRc))
         }
         defer { git_index_free(index) }
 
@@ -1685,11 +1717,14 @@ actor GitService {
         let fileExists = FileManager.default.fileExists(atPath: fullPath)
 
         if fileExists {
-            git_index_add_bypath(index, path)
+            let rc = git_index_add_bypath(index, path)
+            guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
         } else {
-            git_index_remove_bypath(index, path)
+            let rc = git_index_remove_bypath(index, path)
+            guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
         }
-        git_index_write(index)
+        let wrc = git_index_write(index)
+        guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
     }
 
     func stageFiles(_ paths: [String]) throws {
@@ -1697,8 +1732,9 @@ actor GitService {
         guard !paths.isEmpty else { return }
 
         var index: OpaquePointer?
-        guard git_repository_index(&index, repo) == 0, let index else {
-            throw GitError.operationFailed("Cannot get index")
+        let idxRc = git_repository_index(&index, repo)
+        guard idxRc == 0, let index else {
+            throw GitError.operationFailed(libgit2RawLastError(code: idxRc))
         }
         defer { git_index_free(index) }
 
@@ -1707,15 +1743,16 @@ actor GitService {
             let fileExists = FileManager.default.fileExists(atPath: fullPath)
 
             if fileExists {
-                git_index_add_bypath(index, path)
+                let rc = git_index_add_bypath(index, path)
+                guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
             } else {
-                git_index_remove_bypath(index, path)
+                let rc = git_index_remove_bypath(index, path)
+                guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
             }
         }
 
-        guard git_index_write(index) == 0 else {
-            throw GitError.operationFailed("Index write failed")
-        }
+        let wrc = git_index_write(index)
+        guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
     }
 
     func unstageFile(_ path: String) throws {
@@ -1733,18 +1770,22 @@ actor GitService {
             let cPath = strdup(path)
             defer { free(cPath) }
             var pathPtr: UnsafeMutablePointer<CChar>? = cPath
-            withUnsafeMutablePointer(to: &pathPtr) { strings in
+            let resetRc: Int32 = withUnsafeMutablePointer(to: &pathPtr) { strings in
                 var pathSpec = git_strarray(strings: strings, count: 1)
-                git_reset_default(repo, target, &pathSpec)
+                return git_reset_default(repo, target, &pathSpec)
             }
+            guard resetRc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: resetRc)) }
         } else {
             var index: OpaquePointer?
-            guard git_repository_index(&index, repo) == 0, let index else {
-                throw GitError.operationFailed("Cannot get index")
+            let idxRc = git_repository_index(&index, repo)
+            guard idxRc == 0, let index else {
+                throw GitError.operationFailed(libgit2RawLastError(code: idxRc))
             }
             defer { git_index_free(index) }
-            git_index_remove_bypath(index, path)
-            git_index_write(index)
+            let rc = git_index_remove_bypath(index, path)
+            guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
+            let wrc = git_index_write(index)
+            guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
         }
     }
 
@@ -1771,23 +1812,22 @@ actor GitService {
                 var pathSpec = git_strarray(strings: buffer.baseAddress, count: uniquePaths.count)
                 return git_reset_default(repo, target, &pathSpec)
             }
-            guard rc == 0 else {
-                throw GitError.operationFailed("Unstage failed (\(rc))")
-            }
+            guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
         } else {
             var index: OpaquePointer?
-            guard git_repository_index(&index, repo) == 0, let index else {
-                throw GitError.operationFailed("Cannot get index")
+            let idxRc = git_repository_index(&index, repo)
+            guard idxRc == 0, let index else {
+                throw GitError.operationFailed(libgit2RawLastError(code: idxRc))
             }
             defer { git_index_free(index) }
 
             for path in uniquePaths {
-                git_index_remove_bypath(index, path)
+                let rc = git_index_remove_bypath(index, path)
+                guard rc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: rc)) }
             }
 
-            guard git_index_write(index) == 0 else {
-                throw GitError.operationFailed("Index write failed")
-            }
+            let wrc = git_index_write(index)
+            guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
         }
     }
 
@@ -1801,6 +1841,7 @@ actor GitService {
             args.append("--all")
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     func fetchWithPrune(remoteName: String? = nil) async throws {
@@ -1812,12 +1853,14 @@ actor GitService {
             args.append("--all")
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     /// Fast-forward update a local branch to its remote tracking branch without checking it out.
     /// Uses `git fetch <remote> <branch>:<branch>` which only succeeds if it's a fast-forward.
     func fetchBranchFastForward(remoteName: String, branchName: String) async throws {
         try await runGit(["fetch", remoteName, "\(branchName):\(branchName)"])
+        invalidateRefMapCache()
     }
 
     func pull(remoteName: String? = nil, branchName: String? = nil) async throws {
@@ -1827,6 +1870,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     func pullFF(remoteName: String? = nil, branchName: String? = nil) async throws {
@@ -1836,6 +1880,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     func pullRebase(remoteName: String? = nil, branchName: String? = nil) async throws {
@@ -1845,6 +1890,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     /// Force pull: reset local branch to remote tracking branch.
@@ -1853,6 +1899,7 @@ actor GitService {
     func pullForce() async throws {
         try await runGit(["fetch", "--all"])
         try await runGit(["reset", "--hard", "@{u}"])
+        invalidateRefMapCache()
     }
 
     func push(remoteName: String? = nil, branchName: String? = nil, setUpstream: Bool = false) async throws {
@@ -1865,6 +1912,7 @@ actor GitService {
             args.append(contentsOf: ["-u", "origin", "HEAD"])
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     func pushForce(remoteName: String? = nil, branchName: String? = nil) async throws {
@@ -1874,6 +1922,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        invalidateRefMapCache()
     }
 
     // MARK: - Branch Operations (libgit2, following Xit's approach)
@@ -1884,6 +1933,14 @@ actor GitService {
             return "\(prefix): \(String(cString: msg))"
         }
         return "\(prefix) (\(code))"
+    }
+
+    /// `git_error_last()` message only (no label); use when surfacing the native libgit2 string.
+    private func libgit2RawLastError(code: Int32) -> String {
+        if let err = git_error_last(), let msg = err.pointee.message {
+            return String(cString: msg)
+        }
+        return "\(code)"
     }
 
     func createBranch(name: String, checkout: Bool = true) throws {
@@ -1915,6 +1972,8 @@ actor GitService {
 
         if checkout {
             try checkoutBranch(name)
+        } else {
+            invalidateRefMapCache()
         }
     }
 
@@ -1938,6 +1997,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Branch creation failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func checkoutBranch(_ name: String) throws {
@@ -2049,6 +2109,7 @@ actor GitService {
                 throw GitError.operationFailed(libgit2ErrorMsg("Failed to set HEAD", code: headRc))
             }
         }
+        invalidateRefMapCache()
     }
 
     func checkoutCommit(_ hash: String) throws {
@@ -2078,20 +2139,24 @@ actor GitService {
         guard headRc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to detach HEAD", code: headRc))
         }
+        invalidateRefMapCache()
     }
 
     // MARK: - Operations kept as CLI (following Xit: merge/rebase/cherry-pick/revert need CLI)
 
     func merge(_ branchOrHash: String) async throws {
         try await runGit(["merge", branchOrHash])
+        invalidateRefMapCache()
     }
 
     func rebase(onto target: String) async throws {
         try await runGit(["rebase", target])
+        invalidateRefMapCache()
     }
 
     func cherryPick(_ hash: String) async throws {
         try await runGit(["cherry-pick", hash])
+        invalidateRefMapCache()
     }
 
     func resetToCommit(_ hash: String, mode: ResetMode) throws {
@@ -2119,10 +2184,12 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Reset failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func revertCommit(_ hash: String) async throws {
         try await runGit(["revert", "--no-edit", hash])
+        invalidateRefMapCache()
     }
 
     func deleteBranch(_ name: String, force: Bool = false) throws {
@@ -2164,6 +2231,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Branch deletion failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func renameBranch(oldName: String, newName: String) throws {
@@ -2181,11 +2249,13 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Branch rename failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     // deleteRemoteBranch needs push (auth), keep CLI (Xit same)
     func deleteRemoteBranch(remote: String, branch: String) async throws {
         try await runGit(["push", remote, "--delete", branch])
+        invalidateRefMapCache()
     }
 
     func createTag(name: String, at hash: String, message: String? = nil) throws {
@@ -2221,6 +2291,7 @@ actor GitService {
                 throw GitError.operationFailed(libgit2ErrorMsg("Tag creation failed", code: rc))
             }
         }
+        invalidateRefMapCache()
     }
 
     func deleteTag(name: String) throws {
@@ -2229,6 +2300,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Tag deletion failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     /// Returns the annotation message for an annotated tag, or nil for lightweight tags.
@@ -2281,14 +2353,17 @@ actor GitService {
 
     func pushTag(name: String, remote: String) async throws {
         try await runGit(["push", remote, "refs/tags/\(name)"])
+        invalidateRefMapCache()
     }
 
     func deleteRemoteTag(name: String, remote: String) async throws {
         try await runGit(["push", remote, "--delete", "refs/tags/\(name)"])
+        invalidateRefMapCache()
     }
 
     func annotateTag(name: String, message: String) async throws {
         try await runGit(["tag", "-a", "-f", "-m", message, name])
+        invalidateRefMapCache()
     }
 
     func setUpstream(remote: String, branch: String) throws {
@@ -2304,15 +2379,18 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to set upstream", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     // CLI-only operations (Xit also uses CLI for these)
     func editCommitMessage(_ hash: String, newMessage: String) async throws {
         try await runGit(["rebase", "-i", "--autosquash", "\(hash)^"])
+        invalidateRefMapCache()
     }
 
     func amendCommitMessage(_ newMessage: String) async throws {
         try await runGit(["commit", "--amend", "-m", newMessage])
+        invalidateRefMapCache()
     }
 
     /// Reword a non-HEAD commit message using interactive rebase with GIT_SEQUENCE_EDITOR.
@@ -2336,6 +2414,7 @@ actor GitService {
                 "GIT_EDITOR": editor
             ]
         )
+        invalidateRefMapCache()
     }
 
     /// Squash multiple commits into one using interactive rebase with GIT_SEQUENCE_EDITOR.
@@ -2368,6 +2447,7 @@ actor GitService {
                 "GIT_EDITOR": "true"
             ]
         )
+        invalidateRefMapCache()
     }
 
     // Diff/compare operations kept as CLI (--follow, --numstat not in libgit2)
@@ -2441,6 +2521,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to add remote", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func deleteRemote(name: String) throws {
@@ -2450,6 +2531,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to delete remote", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func renameRemote(oldName: String, newName: String) throws {
@@ -2461,6 +2543,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to rename remote", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func setRemoteURL(name: String, url: String) throws {
@@ -2470,6 +2553,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed(libgit2ErrorMsg("Failed to set remote URL", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     // MARK: - Stash (libgit2, following Xit's XTRepository+Commands.swift)
@@ -2492,6 +2576,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed("Stash save failed (\(rc))")
         }
+        invalidateRefMapCache()
     }
 
     func stashPop(index: Int = 0) throws {
@@ -2509,6 +2594,7 @@ actor GitService {
             }
             throw GitError.operationFailed(libgit2ErrorMsg("Stash pop failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func stashApply(index: Int = 0) throws {
@@ -2526,6 +2612,7 @@ actor GitService {
             }
             throw GitError.operationFailed(libgit2ErrorMsg("Stash apply failed", code: rc))
         }
+        invalidateRefMapCache()
     }
 
     func stashDrop(index: Int = 0) throws {
@@ -2535,6 +2622,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed("Stash drop failed (\(rc))")
         }
+        invalidateRefMapCache()
     }
     
     func stashDiffFiles(_ stashRef: String) async throws -> [DiffFile] {
@@ -2629,6 +2717,19 @@ actor GitService {
             }
             throw error
         }
+    }
+
+    /// File content for a path stored in a stash (WIP commit tree or untracked `^3` tree). Used when the path is not on disk.
+    func stashPathDecodedContent(stashRef: String, path: String) async -> DecodedFileContent? {
+        for revision in ["\(stashRef):\(path)", "\(stashRef)^3:\(path)"] {
+            do {
+                let output = try await runGitOutput(["show", revision])
+                return Self.decodeFileData(Data(output.utf8))
+            } catch {
+                continue
+            }
+        }
+        return nil
     }
 
     private func formatNewFileAsDiff(path: String, content: String) -> String {
@@ -2788,11 +2889,13 @@ actor GitService {
 
     func mergeAbort() async throws {
         try await runGit(["merge", "--abort"])
+        invalidateRefMapCache()
     }
 
     /// Reset to abort stash apply conflicts (git reset --merge).
     func stashConflictAbort() async throws {
         try await runGit(["reset", "--merge"])
+        invalidateRefMapCache()
     }
 
     func rebaseState() throws -> RebaseState? {
@@ -2913,77 +3016,189 @@ actor GitService {
     }
 
     func readConflictSides(path: String) throws -> ConflictSides {
-        let fullPath = (repoPath as NSString).appendingPathComponent(path)
-        guard let data = FileManager.default.contents(atPath: fullPath),
-              let content = String(data: data, encoding: .utf8)
-        else { throw GitError.operationFailed("Cannot read file") }
-
         let oursLabel = conflictOursLabel()
         let theirsLabel = conflictTheirsLabel()
-        let lines = content.components(separatedBy: "\n")
-
-        var oursLines: [String] = []
-        var theirsLines: [String] = []
-        var regions: [ConflictRegion] = []
-        var inConflict = false
-        var inOurs = false
-        var currentOursStart = 0
-        var currentTheirsStart = 0
-        var regionId = 0
-        var baseStart = 0
-
-        for line in lines {
-            if line.hasPrefix("<<<<<<<") {
-                inConflict = true
-                inOurs = true
-                currentOursStart = oursLines.count
-                currentTheirsStart = theirsLines.count
-                baseStart = oursLines.count
-                continue
-            }
-            if line.hasPrefix("=======") && inConflict {
-                inOurs = false
-                continue
-            }
-            if line.hasPrefix(">>>>>>>") && inConflict {
-                inConflict = false
-                regions.append(ConflictRegion(
-                    id: regionId,
-                    oursRange: currentOursStart..<oursLines.count,
-                    theirsRange: currentTheirsStart..<theirsLines.count,
-                    baseRange: baseStart..<max(oursLines.count, theirsLines.count)
-                ))
-                regionId += 1
-
-                let ourCount = oursLines.count - currentOursStart
-                let theirCount = theirsLines.count - currentTheirsStart
-                if ourCount < theirCount {
-                    for _ in 0..<(theirCount - ourCount) { oursLines.append("") }
-                } else if theirCount < ourCount {
-                    for _ in 0..<(ourCount - theirCount) { theirsLines.append("") }
-                }
-                continue
-            }
-
-            if inConflict {
-                if inOurs {
-                    oursLines.append(line)
-                } else {
-                    theirsLines.append(line)
-                }
-            } else {
-                oursLines.append(line)
-                theirsLines.append(line)
-            }
-        }
-
-        return ConflictSides(
+        let indexedBaseLines = try conflictStageLines(path: path, stage: 1)
+        let indexedOursLines = try conflictStageLines(path: path, stage: 2)
+        let indexedTheirsLines = try conflictStageLines(path: path, stage: 3)
+        let baseLines = indexedBaseLines ?? []
+        let oursLines = indexedOursLines ?? []
+        let theirsLines = indexedTheirsLines ?? []
+        let mergedText = try ThreeWayConflictResolver.mergeZDdiff3(
+            baseText: baseLines.joined(separator: "\n"),
+            oursText: oursLines.joined(separator: "\n"),
+            theirsText: theirsLines.joined(separator: "\n"),
+            filePath: path,
             oursLabel: oursLabel,
-            theirsLabel: theirsLabel,
+            theirsLabel: theirsLabel
+        )
+        return Self.buildConflictSides(
+            mergedText: mergedText,
+            baseLines: baseLines,
             oursLines: oursLines,
             theirsLines: theirsLines,
-            markers: regions
+            oursLabel: oursLabel,
+            theirsLabel: theirsLabel
         )
+    }
+
+    static func buildConflictSides(
+        mergedText: String,
+        baseLines: [String],
+        oursLines: [String],
+        theirsLines: [String],
+        oursLabel: String,
+        theirsLabel: String
+    ) -> ConflictSides {
+        ThreeWayConflictResolver.buildConflictSides(
+            mergedText: mergedText,
+            baseLines: baseLines,
+            oursLines: oursLines,
+            theirsLines: theirsLines,
+            oursLabel: oursLabel,
+            theirsLabel: theirsLabel
+        )
+    }
+
+    private func conflictStageLines(path: String, stage: Int32) throws -> [String]? {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot open index")
+        }
+        defer { git_index_free(index) }
+
+        var ancestor: UnsafePointer<git_index_entry>?
+        var ours: UnsafePointer<git_index_entry>?
+        var theirs: UnsafePointer<git_index_entry>?
+        let lookupResult = git_index_conflict_get(&ancestor, &ours, &theirs, index, path)
+        guard lookupResult == 0 else {
+            throw GitError.operationFailed("Cannot load conflict base")
+        }
+
+        let entry: UnsafePointer<git_index_entry>?
+        switch stage {
+        case 1: entry = ancestor
+        case 2: entry = ours
+        case 3: entry = theirs
+        default: entry = nil
+        }
+        guard let entry else { return nil }
+
+        var blob: OpaquePointer?
+        var oid = entry.pointee.id
+        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else {
+            throw GitError.operationFailed("Cannot read conflict base blob")
+        }
+        defer { git_blob_free(blob) }
+
+        let data = Self.blobData(forBlobObject: blob) ?? Data()
+        let decoded = Self.decodeFileData(data)
+        guard let text = decoded.text else {
+            throw GitError.operationFailed("Conflict base is not UTF-8 text")
+        }
+        return text.components(separatedBy: "\n")
+    }
+
+    private static func nextLineMatchIndex(
+        for line: String,
+        in lines: [String],
+        startingAt start: Int
+    ) -> Int? {
+        guard start < lines.count else { return nil }
+        return lines[start...].firstIndex(of: line)
+    }
+
+    private static func nextSubsequenceStart(
+        for needle: [String],
+        in haystack: [String],
+        startingAt start: Int
+    ) -> Int? {
+        if needle.isEmpty { return start }
+        guard start < haystack.count, needle.count <= haystack.count else { return nil }
+        let lastStart = haystack.count - needle.count
+        guard start <= lastStart else { return nil }
+        for candidate in start...lastStart {
+            if Array(haystack[candidate..<(candidate + needle.count)]) == needle {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func nearestContextGap(
+        before: String?,
+        after: String?,
+        in lines: [String],
+        preferred: Int
+    ) -> Int? {
+        guard before != nil || after != nil else { return nil }
+        var candidates: [Int] = []
+        for gap in 0...lines.count {
+            let beforeMatches = before == nil || (gap > 0 && lines[gap - 1] == before)
+            let afterMatches = after == nil || (gap < lines.count && lines[gap] == after)
+            if beforeMatches && afterMatches {
+                candidates.append(gap)
+            }
+        }
+        return candidates.min { lhs, rhs in
+            let ld = abs(lhs - preferred)
+            let rd = abs(rhs - preferred)
+            if ld == rd { return lhs < rhs }
+            return ld < rd
+        }
+    }
+
+    private static func splitContextGap(
+        before: String?,
+        after: String?,
+        in lines: [String],
+        preferred: Int
+    ) -> Int? {
+        if let before, let after {
+            let beforeIndex = nearestLineIndex(of: before, in: lines, around: preferred, preferBefore: true)
+            let afterIndex = nearestLineIndex(of: after, in: lines, around: preferred, preferBefore: false)
+            if let beforeIndex, let afterIndex, beforeIndex < afterIndex {
+                return afterIndex
+            }
+        }
+        if let after,
+           let afterIndex = nearestLineIndex(of: after, in: lines, around: preferred, preferBefore: false) {
+            return afterIndex
+        }
+        if let before,
+           let beforeIndex = nearestLineIndex(of: before, in: lines, around: preferred, preferBefore: true) {
+            return beforeIndex + 1
+        }
+        return nil
+    }
+
+    private static func nearestLineIndex(
+        of value: String,
+        in lines: [String],
+        around preferred: Int,
+        preferBefore: Bool
+    ) -> Int? {
+        let matches = lines.indices.filter { lines[$0] == value }
+        guard !matches.isEmpty else { return nil }
+        if preferBefore, let candidate = matches.filter({ $0 <= preferred }).max() {
+            return candidate
+        }
+        if !preferBefore, let candidate = matches.filter({ $0 >= preferred }).min() {
+            return candidate
+        }
+        return matches.min { lhs, rhs in
+            let ld = abs(lhs - preferred)
+            let rd = abs(rhs - preferred)
+            if ld == rd { return lhs < rhs }
+            return ld < rd
+        }
+    }
+
+    private static func validateBaseCapacity(_ baseLines: inout [String], upTo index: Int) {
+        if index > baseLines.count {
+            baseLines.append(contentsOf: Array(repeating: "", count: index - baseLines.count))
+        }
     }
 
     private func conflictOursLabel() -> String {
@@ -3145,6 +3360,7 @@ actor GitService {
 
         var opts = git_merge_file_options()
         git_merge_file_options_init(&opts, UInt32(GIT_MERGE_FILE_OPTIONS_VERSION))
+        opts.flags = UInt32(GIT_MERGE_FILE_STYLE_ZDIFF3.rawValue)
         opts.our_label   = UnsafePointer(cOursLabel)
         opts.their_label = UnsafePointer(cTheirsLabel)
 
@@ -3288,6 +3504,7 @@ actor GitService {
 
     func commitAmend(message: String) async throws {
         try await runGit(["commit", "--amend", "-m", message])
+        invalidateRefMapCache()
     }
 
     func commit(message: String) throws {
@@ -3346,6 +3563,7 @@ actor GitService {
         guard rc == 0 else {
             throw GitError.operationFailed("Commit failed (\(rc))")
         }
+        invalidateRefMapCache()
     }
 
     // MARK: - File Content

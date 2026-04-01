@@ -98,6 +98,7 @@ struct RepoContainerView: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
         }
+        .environment(\.hoverTooltipHostActive, isActive)
         .onAppear {
             updateActiveState(isActive)
         }
@@ -149,12 +150,16 @@ struct RepoContainerView: View {
                 await viewModel.loadAll()
                 guard !Task.isCancelled else { return }
                 didLoadInitially = true
+                viewModel.startWatching()
+                viewModel.startPeriodicRefresh()
+                await viewModel.fetchIfNeeded()
+                return
             }
 
             guard !Task.isCancelled else { return }
             viewModel.startWatching()
             viewModel.startPeriodicRefresh()
-            await viewModel.fetchIfNeeded()
+            await viewModel.refreshAfterActivation()
         }
     }
 

@@ -348,8 +348,11 @@ struct ConflictFile: Identifiable, Equatable {
 struct ConflictSides: Equatable {
     let oursLabel: String
     let theirsLabel: String
+    let baseLines: [String]
+    let outputLines: [String]
     let oursLines: [String]
     let theirsLines: [String]
+    let mergedText: String
     let markers: [ConflictRegion]
 }
 
@@ -358,6 +361,11 @@ struct ConflictRegion: Identifiable, Equatable {
     let oursRange: Range<Int>
     let theirsRange: Range<Int>
     let baseRange: Range<Int>
+    let outputRange: Range<Int>
+    let currentLines: [String]
+    let baseLines: [String]
+    let incomingLines: [String]
+    let rawConflictLines: [String]
 }
 
 struct MergedLine: Identifiable, Equatable {

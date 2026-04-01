@@ -162,6 +162,44 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertFalse(branchesAfterDelete.contains(where: { $0.name == "renamed-topic" }))
     }
 
+    func testCommitInvalidatesCachedRefMap() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+
+        let service = GitService(repoPath: repo.path)
+        _ = try await service.commitLog(maxCount: 10)
+
+        try repo.appendFile("file.txt", contents: "two\n")
+        try await service.stageFile("file.txt")
+        try await service.commit(message: "second")
+
+        let commits = try await service.commitLog(maxCount: 10)
+        XCTAssertEqual(commits.first?.message, "second")
+        let refOwner = try XCTUnwrap(commits.first(where: { $0.refs.contains(where: { $0.contains("main") }) }))
+        XCTAssertEqual(refOwner.hash, commits.first?.hash)
+    }
+
+    func testCommitAmendInvalidatesCachedRefMap() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.appendFile("file.txt", contents: "two\n")
+        try repo.commitAll(message: "second")
+
+        let service = GitService(repoPath: repo.path)
+        _ = try await service.commitLog(maxCount: 10)
+
+        try repo.appendFile("file.txt", contents: "three\n")
+        try await service.stageFile("file.txt")
+        try await service.commitAmend(message: "second amended")
+
+        let commits = try await service.commitLog(maxCount: 10)
+        XCTAssertEqual(commits.first?.message, "second amended")
+        let refOwner = try XCTUnwrap(commits.first(where: { $0.refs.contains(where: { $0.contains("main") }) }))
+        XCTAssertEqual(refOwner.hash, commits.first?.hash)
+    }
+
     func testRemoteLifecycleTracksAddRenameSetURLAndDelete() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("file.txt", contents: "one\n")
@@ -225,6 +263,21 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertEqual(try repo.readFile("tracked.txt"), "one\ntwo\n")
         XCTAssertEqual(try repo.readFile("scratch.txt"), "temp\n")
         XCTAssertEqual(stashesAfterApply.count, 1)
+    }
+
+    func testStashPathDecodedContentReadsUntrackedFromStashTree() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("only_in_stash.txt", contents: "hidden\n")
+
+        let service = GitService(repoPath: repo.path)
+        try await service.stashSave(message: "wip", includeUntracked: true)
+        let stashes = try await service.stashes()
+        let ref = try XCTUnwrap(stashes.first?.index)
+
+        let decoded = await service.stashPathDecodedContent(stashRef: ref, path: "only_in_stash.txt")
+        XCTAssertEqual(decoded?.text, "hidden\n")
     }
 
     func testCompareFileListAndDiffAgainstWorkingTree() async throws {
@@ -390,6 +443,25 @@ final class GitServiceBehaviorTests: XCTestCase {
             XCTFail("Expected squashCommits to throw for a single commit")
         } catch {
             // expected
+        }
+    }
+
+    func testStageFilesThrowsWhenIndexLockFilePresent() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.appendFile("tracked.txt", contents: "two\n")
+
+        let lockURL = repo.url.appendingPathComponent(".git/index.lock")
+        try "locked".write(to: lockURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: lockURL) }
+
+        let service = GitService(repoPath: repo.path)
+        do {
+            try await service.stageFiles(["tracked.txt"])
+            XCTFail("Expected stageFiles to fail when index is locked")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty, "expected a non-empty error from libgit2")
         }
     }
 }

@@ -13,6 +13,12 @@ private enum MonacoDebugLog {
     }
 }
 
+private enum ConflictRepoDebugLog {
+    static func emit(_ message: @autoclosure () -> String) {
+        print("[ConflictRepo] \(message())")
+    }
+}
+
 @Observable @MainActor
 final class RepoViewModel {
     private struct DiffLoadPayload: Sendable {
@@ -120,6 +126,12 @@ final class RepoViewModel {
         let overviewSegments: [FileInspectorOverviewSegment]
     }
 
+    private struct ConflictUndoSnapshot {
+        let document: ConflictEditorDocument
+        let outputText: String
+        let outputLines: [String]
+    }
+
     let repoPath: String
     let repoName: String
     private let git: GitService
@@ -135,9 +147,15 @@ final class RepoViewModel {
     var currentBranch: String = ""
     var isDetachedHead: Bool = false
 
-    var commits: [CommitInfo] = []
+    var commits: [CommitInfo] = [] {
+        didSet {
+            rebuildCommitNavigationIndex()
+        }
+    }
     private(set) var headCommitHash: String?
     private(set) var currentBranchHashes: Set<String> = []
+    private var commitsByHash: [String: CommitInfo] = [:]
+    private var commitsByShortHash: [String: CommitInfo] = [:]
     var graphDisplayMode: GraphDisplayMode = .all {
         didSet {
             guard oldValue != graphDisplayMode else { return }
@@ -184,6 +202,31 @@ final class RepoViewModel {
         reflogState.displayCommits
     }
 
+    private func rebuildCommitNavigationIndex() {
+        commitsByHash = Dictionary(uniqueKeysWithValues: commits.map { ($0.hash, $0) })
+        let shortHashCounts = commits.reduce(into: [String: Int]()) { counts, commit in
+            guard !commit.shortHash.isEmpty else { return }
+            counts[commit.shortHash, default: 0] += 1
+        }
+        commitsByShortHash = commits.reduce(into: [String: CommitInfo]()) { indexed, commit in
+            guard !commit.shortHash.isEmpty,
+                  shortHashCounts[commit.shortHash] == 1 else { return }
+            indexed[commit.shortHash] = commit
+        }
+    }
+
+    private func loadedCommit(matching hash: String) -> CommitInfo? {
+        if let exact = commitsByHash[hash] {
+            return exact
+        }
+
+        if let short = commitsByShortHash[hash] {
+            return short
+        }
+
+        return commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) })
+    }
+
     // MARK: - Pagination (pull-based via CommitWalker)
     private var commitWalker: CommitWalker?
     private(set) var allCommitsLoaded = false
@@ -228,6 +271,7 @@ final class RepoViewModel {
     var fileInspectorDiffDocument: DiffEditorDocument?
     var fileInspectorSelectedRange: NSRange = NSRange(location: 0, length: 0)
     var isFileInspectorDiffEditing = false
+    var showFileInspectorExternalChangePrompt = false
     private var fileInspectorUndoStack: [FileInspectorEditSnapshot] = []
     private var fileInspectorRedoStack: [FileInspectorEditSnapshot] = []
     private var fileInspectorEditSession: FileInspectorEditSession?
@@ -346,7 +390,7 @@ final class RepoViewModel {
             let loaded = try await loadInspectableFileContent(path: file.path, context: context)
             let loadedText = loaded.content.text ?? ""
             let canEditInspectorContent = loaded.isEditable && (
-                context != .committed || selectedCommit?.isUncommitted == true || isInConflict
+                context != .committed || isWorkingTreeConflictSelection
             )
             let inspectorDisplayContent: String
             let inspectorBaseText: String
@@ -390,6 +434,7 @@ final class RepoViewModel {
             fileInspectorVisualContent = preferredMode == .diff ? payloadVisualContent(for: inspectorParsedDiff) : loaded.visualContent
             fileInspectorSelectedRange = NSRange(location: 0, length: 0)
             isFileInspectorDiffEditing = false
+            showFileInspectorExternalChangePrompt = false
             fileInspectorUndoStack.removeAll(keepingCapacity: false)
             fileInspectorRedoStack.removeAll(keepingCapacity: false)
             fileInspectorEditSession = nil
@@ -417,9 +462,19 @@ final class RepoViewModel {
         await openFileInspector(file, context: context, preferredMode: .preview)
     }
 
+    func keepFileInspectorLocalContent() {
+        showFileInspectorExternalChangePrompt = false
+    }
+
+    func reloadFileInspectorFromExternalChange() {
+        showFileInspectorExternalChangePrompt = false
+        Task { await reloadCurrentFileInspectorPreservingMode() }
+    }
+
     func closeFileInspector() {
         isFileInspectorPresented = false
         isFileInspectorDiffEditing = false
+        showFileInspectorExternalChangePrompt = false
         fileInspectorOldPath = nil
         fileInspectorVisualContent = nil
         fileInspectorUndoStack.removeAll(keepingCapacity: false)
@@ -445,6 +500,53 @@ final class RepoViewModel {
         selectedDiffVisualContent = nil
         selectedFilePaths = []
         selectedFileListContext = nil
+    }
+
+    private func refreshFileInspectorForExternalChangeIfNeeded() async {
+        guard isFileInspectorPresented,
+              fileInspectorMode == .preview || fileInspectorMode == .diff,
+              !fileInspectorPath.isEmpty
+        else { return }
+
+        let tracksWorkingTreeContent: Bool
+        if let commit = selectedCommit, !commit.isUncommitted, fileInspectorContext == .committed {
+            tracksWorkingTreeContent = false
+        } else {
+            switch fileInspectorContext {
+            case .staged:
+                tracksWorkingTreeContent = false
+            case .unstaged, .committed:
+                tracksWorkingTreeContent = true
+            }
+        }
+        guard tracksWorkingTreeContent else { return }
+
+        do {
+            let loaded = try await loadInspectableFileContent(path: fileInspectorPath, context: fileInspectorContext)
+            let loadedText = loaded.content.text ?? ""
+            let externalContentChanged = loadedText != fileInspectorInitialContent ||
+                loaded.content.encodingName != fileInspectorEncodingName ||
+                loaded.visualContent != fileInspectorVisualContent
+            guard externalContentChanged else { return }
+
+            if isFileInspectorDirty {
+                showFileInspectorExternalChangePrompt = true
+            } else {
+                await reloadCurrentFileInspectorPreservingMode()
+            }
+        } catch {
+            // Ignore transient reload failures from the watcher path.
+        }
+    }
+
+    private func reloadCurrentFileInspectorPreservingMode() async {
+        guard isFileInspectorPresented, !fileInspectorPath.isEmpty else { return }
+        let path = fileInspectorPath
+        let context = fileInspectorContext
+        let mode = fileInspectorMode
+        let file = diffFiles.first(where: { $0.path == path })
+            ?? DiffFile(additions: 0, deletions: 0, path: path, changeKind: .unknown)
+        await openFileInspector(file, context: context, preferredMode: mode)
     }
 
     private func syncSelectionWithGraphDisplay() {
@@ -525,19 +627,32 @@ final class RepoViewModel {
         isSavingFileInspector = true
         defer { isSavingFileInspector = false }
 
+        MonacoDebugLog.emit(
+            "saveFileInspector begin path=\(fileInspectorPath) mode=\(fileInspectorMode.rawValue) dirty=\(isFileInspectorDirty) contentLength=\((fileInspectorContent as NSString).length)"
+        )
         do {
             try await git.saveWorkingTreeFile(path: fileInspectorPath, content: fileInspectorContent)
             fileInspectorInitialContent = fileInspectorContent
             isFileInspectorDiffEditing = false
+            showFileInspectorExternalChangePrompt = false
             fileInspectorEditSession = nil
             fileInspectorRebuildTask?.cancel()
             fileInspectorRebuildTask = nil
             fileInspectorBlameTask?.cancel()
             fileInspectorBlameTask = nil
+            MonacoDebugLog.emit(
+                "saveFileInspector wrote path=\(fileInspectorPath) mode=\(fileInspectorMode.rawValue) dirty=\(isFileInspectorDirty) contentLength=\((fileInspectorContent as NSString).length)"
+            )
             await refreshAfterPatchAction()
+            MonacoDebugLog.emit(
+                "saveFileInspector refreshAfterPatchAction done path=\(fileInspectorPath) mode=\(fileInspectorMode.rawValue) dirty=\(isFileInspectorDirty)"
+            )
             showToast(title: "Saved", detail: fileInspectorPath, style: .success)
             return true
         } catch {
+            MonacoDebugLog.emit(
+                "saveFileInspector failed path=\(fileInspectorPath) error=\(error.localizedDescription)"
+            )
             showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
             return false
         }
@@ -585,6 +700,20 @@ final class RepoViewModel {
                 visualContent: visualContent(for: path, decoded: decoded, currentData: data)
             )
         }
+
+        // Stash detail uses `.committed` context with `selectedCommit == nil`. New or untracked files
+        // exist only inside the stash (often `rev^3`), not on disk — load their blobs for preview/diff.
+        if context == .committed, let stash = selectedStash, selectedCommit == nil,
+           let decoded = await git.stashPathDecodedContent(stashRef: stash.index, path: path) {
+            let data = try await loadPreviewData(path: path, context: context)
+            return LoadedInspectableContent(
+                content: decoded,
+                isEditable: false,
+                message: decoded.isBinary ? "Binary files can't be edited here." : nil,
+                visualContent: visualContent(for: path, decoded: decoded, currentData: data)
+            )
+        }
+
         if FileManager.default.fileExists(atPath: fullPath) {
             if await git.isDirectory(path: path) {
                 let text = try await submoduleDisplayText(path: path)
@@ -1680,7 +1809,9 @@ final class RepoViewModel {
             try await git.stageFiles(paths)
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
+        }
         await selectFirstUnstagedOrKeep()
     }
 
@@ -1692,14 +1823,16 @@ final class RepoViewModel {
             try await git.unstageFiles(paths)
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
+        }
         await selectFirstUnstagedOrKeep()
     }
 
     /// Selects the first file in the unstaged area after a staging operation.
     /// If no unstaged files remain, the current diff is preserved unchanged.
     private func selectFirstUnstagedOrKeep() async {
-        guard selectedCommit?.isUncommitted == true || isInConflict else { return }
+        guard isWorkingTreeConflictSelection else { return }
         guard let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges) else { return }
         let diffFile = diffFiles.first(where: { $0.path == firstStatus.path })
             ?? DiffFile(additions: 0, deletions: 0, path: firstStatus.path, changeKind: firstStatus.diffChangeKind)
@@ -1817,11 +1950,21 @@ final class RepoViewModel {
     var rebaseState: RebaseState?
     var isRebaseConflict: Bool { rebaseState != nil }
     var isInConflict: Bool { conflictType != nil }
+    var isWorkingTreeConflictSelection: Bool {
+        if let selectedCommit {
+            return selectedCommit.isUncommitted
+        }
+        return selectedStash == nil && isInConflict
+    }
     var hasUnresolvedConflicts: Bool { currentConflictedFiles.isEmpty == false }
     var conflictMergeFile: ConflictFile?
     var conflictSides: ConflictSides?
+    var conflictEditorDocument: ConflictEditorDocument?
+    var conflictOutputText: String = ""
     var conflictOutputLines: [String] = []
     var showConflictMergeView = false
+    let conflictUndoManager = UndoManager()
+    private var isRestoringConflictUndoSnapshot = false
     var rebaseCommitMessage = ""
     // Merge/Stash conflict files (rebase uses rebaseState.conflictedFiles)
     var mergeConflictedFiles: [ConflictFile] = []
@@ -1914,6 +2057,7 @@ final class RepoViewModel {
         ) ?? .all
         self.showReflogOverlay = UserDefaults.standard.bool(forKey: "GitN.showReflogOverlay.\(path)")
         self.selectedReflogRef = UserDefaults.standard.string(forKey: "GitN.selectedReflogRef.\(path)") ?? "HEAD"
+        self.conflictUndoManager.groupsByEvent = false
         loadCollapsedSections()
     }
 
@@ -2033,6 +2177,12 @@ final class RepoViewModel {
         refreshTimer = nil
     }
 
+    func refreshAfterActivation() async {
+        await loadAll()
+        guard !Task.isCancelled else { return }
+        await fetchIfNeeded()
+    }
+
     /// Perform a lightweight fetch (only git fetch, no full reload)
     /// This is called by the periodic timer and should be lightweight
     private func performPeriodicFetch() async {
@@ -2067,6 +2217,10 @@ final class RepoViewModel {
         } else {
             await refreshStatusAndGraph()
         }
+
+        if changes.contains(.workingDirectory) {
+            await refreshFileInspectorForExternalChangeIfNeeded()
+        }
     }
 
     /// Lightweight refresh: only file statuses + uncommitted graph entry.
@@ -2076,6 +2230,7 @@ final class RepoViewModel {
         isRefreshing = true
         defer { isRefreshing = false }
         do {
+            await git.refreshRepositoryState()
             let sts = try await git.status()
             fileStatuses = sts
             let hc = try await git.headCommitHash()
@@ -2216,6 +2371,7 @@ final class RepoViewModel {
         defer { isLoading = false }
 
         do {
+            await git.refreshRepositoryState()
             // Phase 1: Load metadata in parallel
             async let b = git.localBranches()
             async let rb = git.remoteBranches()
@@ -2342,6 +2498,7 @@ final class RepoViewModel {
 
     func selectCommit(_ commit: CommitInfo) async {
         if isCompareMode { exitCompareMode() }
+        closeFileInspector()
         invalidateCommittedDiffLoading()
         let committedDiffGeneration = committedDiffGeneration
         selectedCommit = commit
@@ -2438,7 +2595,7 @@ final class RepoViewModel {
     }
 
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed, ignoreSize: Bool = false) async {
-        let isUncommitted = selectedCommit?.isUncommitted == true || isInConflict
+        let isUncommitted = isWorkingTreeConflictSelection
         guard selectedCommit != nil || selectedStash != nil || isInConflict else { return }
         diffLoadGeneration += 1
         let generation = diffLoadGeneration
@@ -2790,7 +2947,9 @@ final class RepoViewModel {
             try await git.stageFile(path)
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
+        }
     }
 
     func unstageFile(_ path: String) async {
@@ -2801,7 +2960,9 @@ final class RepoViewModel {
             try await git.unstageFile(path)
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
+        }
     }
 
     func stageAllFiles() async {
@@ -2813,7 +2974,9 @@ final class RepoViewModel {
             try await git.stageFiles(unstaged.map(\.path))
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
+        }
         // No unstaged files remain — preserve the last displayed diff
     }
 
@@ -2826,7 +2989,9 @@ final class RepoViewModel {
             try await git.unstageFiles(staged.map(\.path))
             fileStatuses = try await git.status()
             refreshUncommittedDiffFiles()
-        } catch {}
+        } catch {
+            showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
+        }
         await selectFirstUnstagedOrKeep()
     }
 
@@ -3287,6 +3452,7 @@ final class RepoViewModel {
 
         operationInProgress = true
         operationError = nil
+        defer { operationInProgress = false }
 
         // Try fast-forward fetch first (git fetch origin branchName:branchName)
         do {
@@ -3382,10 +3548,12 @@ final class RepoViewModel {
     }
 
     func performCheckoutBranch(_ name: String) async {
+        closeFileInspector()
         await performRemoteOperation { try await $0.git.checkoutBranch(name) }
     }
 
     func performCheckoutCommit(_ hash: String) async {
+        closeFileInspector()
         await performRemoteOperation { try await $0.git.checkoutCommit(hash) }
     }
 
@@ -3567,6 +3735,7 @@ final class RepoViewModel {
     var scrollToCommitHash: String?
 
     func performCompareWithWorkingDirectory(_ commit: CommitInfo) async {
+        closeFileInspector()
         invalidateCommittedDiffLoading()
         isCompareMode = true
         compareBaseHash = commit.hash
@@ -3596,6 +3765,7 @@ final class RepoViewModel {
     }
 
     func exitCompareMode() {
+        closeFileInspector()
         invalidateCommittedDiffLoading()
         isCompareMode = false
         compareBaseHash = nil
@@ -3609,14 +3779,14 @@ final class RepoViewModel {
         ensureCommitVisibleForNavigation(hash: hash)
         scrollToCommitHash = hash
 
-        if let commit = commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) }) {
+        if let commit = loadedCommit(matching: hash) {
             await selectCommit(commit)
             return
         }
 
         while !allCommitsLoaded {
             await loadMoreCommits()
-            if let commit = commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) }) {
+            if let commit = loadedCommit(matching: hash) {
                 scrollToCommitHash = commit.hash
                 await selectCommit(commit)
                 return
@@ -3625,7 +3795,7 @@ final class RepoViewModel {
     }
 
     func scrollToCommitForBranch(_ branch: BranchInfo) async {
-        if let commit = commits.first(where: { $0.shortHash == branch.shortHash || $0.hash.hasPrefix(branch.shortHash) }) {
+        if let commit = commitsByShortHash[branch.shortHash] ?? loadedCommit(matching: branch.shortHash) {
             await revealCommit(hash: commit.hash)
             return
         }
@@ -3659,6 +3829,7 @@ final class RepoViewModel {
     
     func selectStash(_ stash: StashInfo) async {
         if isCompareMode { exitCompareMode() }
+        closeFileInspector()
         invalidateCommittedDiffLoading()
         selectedStash = stash
         selectedCommit = nil
@@ -3992,9 +4163,13 @@ final class RepoViewModel {
     func openConflictMerge(_ file: ConflictFile) async {
         conflictMergeFile = file
         do {
+            conflictUndoManager.removeAllActions()
             let sides = try await git.readConflictSides(path: file.path)
             conflictSides = sides
-            buildInitialOutput()
+            let document = ConflictEditorDocument(sides: sides)
+            conflictEditorDocument = document
+            conflictOutputText = document.outputText
+            conflictOutputLines = document.outputLines
             showConflictMergeView = true
         } catch {
             showToast(title: "Cannot Open Conflict", detail: error.localizedDescription, style: .error)
@@ -4005,46 +4180,10 @@ final class RepoViewModel {
         showConflictMergeView = false
         conflictMergeFile = nil
         conflictSides = nil
+        conflictEditorDocument = nil
+        conflictOutputText = ""
         conflictOutputLines = []
-    }
-
-    private func buildInitialOutput() {
-        guard let sides = conflictSides else { return }
-        let oursLines = sides.oursLines
-        let theirsLines = sides.theirsLines
-
-        var output: [String] = []
-        var oursIdx = 0
-        var theirsIdx = 0
-
-        let maxLines = max(oursLines.count, theirsLines.count)
-        let conflictRanges = sides.markers.map { ($0.oursRange, $0.theirsRange) }
-
-        func isInConflict(_ idx: Int) -> (Bool, Int?) {
-            for (i, (oursR, _)) in conflictRanges.enumerated() {
-                if oursR.contains(idx) { return (true, i) }
-            }
-            return (false, nil)
-        }
-
-        while oursIdx < maxLines {
-            let (inConflict, regionIdx) = isInConflict(oursIdx)
-            if inConflict, let ri = regionIdx {
-                let oursR = sides.markers[ri].oursRange
-                let theirsR = sides.markers[ri].theirsRange
-                for i in oursR { output.append(i < oursLines.count ? oursLines[i] : "") }
-                _ = theirsR
-                oursIdx = oursR.upperBound
-                theirsIdx = theirsR.upperBound
-            } else {
-                if oursIdx < oursLines.count {
-                    output.append(oursLines[oursIdx])
-                }
-                oursIdx += 1
-                theirsIdx += 1
-            }
-        }
-        conflictOutputLines = output
+        conflictUndoManager.removeAllActions()
     }
 
     struct RegionChoice: Equatable {
@@ -4052,75 +4191,178 @@ final class RepoViewModel {
         var theirsChecked: Bool
     }
 
-    var regionChoices: [Int: RegionChoice] = [:]
+    var regionChoices: [Int: RegionChoice] {
+        guard let document = conflictEditorDocument else { return [:] }
+        return Dictionary(uniqueKeysWithValues: document.blocks.map { block in
+            (
+                block.id,
+                RegionChoice(
+                    oursChecked: block.selectedSources.current,
+                    theirsChecked: block.selectedSources.incoming
+                )
+            )
+        })
+    }
+
+    var allOursSelected: Bool {
+        guard let document = conflictEditorDocument, !document.blocks.isEmpty else { return false }
+        return document.blocks.allSatisfy { $0.selectedSources.current }
+    }
+
+    var allTheirsSelected: Bool {
+        guard let document = conflictEditorDocument, !document.blocks.isEmpty else { return false }
+        return document.blocks.allSatisfy { $0.selectedSources.incoming }
+    }
+
+    private func currentConflictUndoSnapshot() -> ConflictUndoSnapshot? {
+        guard let document = conflictEditorDocument else { return nil }
+        return ConflictUndoSnapshot(
+            document: document,
+            outputText: conflictOutputText,
+            outputLines: conflictOutputLines
+        )
+    }
+
+    private func pushConflictUndoSnapshot(_ snapshot: ConflictUndoSnapshot, actionName: String) {
+        conflictUndoManager.beginUndoGrouping()
+        conflictUndoManager.registerUndo(withTarget: self) { target in
+            target.restoreConflictUndoSnapshot(snapshot, actionName: actionName)
+        }
+        conflictUndoManager.setActionName(actionName)
+        conflictUndoManager.endUndoGrouping()
+    }
+
+    private func restoreConflictUndoSnapshot(_ snapshot: ConflictUndoSnapshot, actionName: String) {
+        isRestoringConflictUndoSnapshot = true
+        defer { isRestoringConflictUndoSnapshot = false }
+
+        if let redoSnapshot = currentConflictUndoSnapshot() {
+            pushConflictUndoSnapshot(redoSnapshot, actionName: actionName)
+        }
+
+        conflictEditorDocument = snapshot.document
+        conflictOutputText = snapshot.outputText
+        conflictOutputLines = snapshot.outputLines
+    }
+
+    private func registerConflictUndo(actionName: String) {
+        guard let snapshot = currentConflictUndoSnapshot() else { return }
+        pushConflictUndoSnapshot(snapshot, actionName: actionName)
+    }
+
+    var canUndoConflictAction: Bool {
+        conflictUndoManager.canUndo
+    }
+
+    var canRedoConflictAction: Bool {
+        conflictUndoManager.canRedo
+    }
+
+    func undoConflictAction() {
+        guard conflictUndoManager.canUndo else { return }
+        conflictUndoManager.undo()
+    }
+
+    func redoConflictAction() {
+        guard conflictUndoManager.canRedo else { return }
+        conflictUndoManager.redo()
+    }
+
+    private func updateConflictDocument(_ document: ConflictEditorDocument) {
+        conflictEditorDocument = document
+        conflictOutputText = document.outputText
+        conflictOutputLines = document.outputLines
+    }
 
     func toggleOurs(_ regionIndex: Int) {
-        var choice = regionChoices[regionIndex] ?? RegionChoice(oursChecked: false, theirsChecked: false)
-        choice.oursChecked.toggle()
-        regionChoices[regionIndex] = choice
-        rebuildOutputFromChoices()
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: "Select Current")
+        if let block = document.blocks.first(where: { $0.id == regionIndex }) {
+            let preview = document.outputLines.prefix(8).joined(separator: " | ")
+            ConflictRepoDebugLog.emit(
+                "toggleOurs before block=\(regionIndex) selected=(A:\(block.selectedSources.current),B:\(block.selectedSources.incoming)) " +
+                "anchor=\(block.anchor.preferredLine) direct=\(String(describing: block.directInsertionLine)) " +
+                "displayA=\(String(describing: block.currentDisplayRange)) outputPreview=\(preview)"
+            )
+        }
+        document.toggleCurrent(blockID: regionIndex)
+        if let block = document.blocks.first(where: { $0.id == regionIndex }) {
+            ConflictRepoDebugLog.emit(
+                "toggleOurs after block=\(regionIndex) selected=(A:\(block.selectedSources.current),B:\(block.selectedSources.incoming)) " +
+                "anchor=\(block.anchor.preferredLine) direct=\(String(describing: block.directInsertionLine)) " +
+                "displayA=\(String(describing: block.currentDisplayRange))"
+            )
+        }
+        updateConflictDocument(document)
     }
 
     func toggleTheirs(_ regionIndex: Int) {
-        var choice = regionChoices[regionIndex] ?? RegionChoice(oursChecked: false, theirsChecked: false)
-        choice.theirsChecked.toggle()
-        regionChoices[regionIndex] = choice
-        rebuildOutputFromChoices()
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: "Select Incoming")
+        if let block = document.blocks.first(where: { $0.id == regionIndex }) {
+            let preview = document.outputLines.prefix(8).joined(separator: " | ")
+            ConflictRepoDebugLog.emit(
+                "toggleTheirs before block=\(regionIndex) selected=(A:\(block.selectedSources.current),B:\(block.selectedSources.incoming)) " +
+                "anchor=\(block.anchor.preferredLine) direct=\(String(describing: block.directInsertionLine)) " +
+                "displayB=\(String(describing: block.incomingDisplayRange)) outputPreview=\(preview)"
+            )
+        }
+        document.toggleIncoming(blockID: regionIndex)
+        if let block = document.blocks.first(where: { $0.id == regionIndex }) {
+            ConflictRepoDebugLog.emit(
+                "toggleTheirs after block=\(regionIndex) selected=(A:\(block.selectedSources.current),B:\(block.selectedSources.incoming)) " +
+                "anchor=\(block.anchor.preferredLine) direct=\(String(describing: block.directInsertionLine)) " +
+                "displayB=\(String(describing: block.incomingDisplayRange))"
+            )
+        }
+        updateConflictDocument(document)
+    }
+
+    func setAllOursSelected(_ isSelected: Bool) {
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: isSelected ? "Select All Current" : "Unselect All Current")
+        document.setAllCurrentSelected(isSelected)
+        updateConflictDocument(document)
+    }
+
+    func setAllTheirsSelected(_ isSelected: Bool) {
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: isSelected ? "Select All Incoming" : "Unselect All Incoming")
+        document.setAllIncomingSelected(isSelected)
+        updateConflictDocument(document)
     }
 
     func resetConflictChoices() {
-        regionChoices = [:]
-        buildInitialOutput()
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: "Reset Conflict Choices")
+        document.resetAll()
+        updateConflictDocument(document)
     }
 
-    private func rebuildOutputFromChoices() {
-        guard let sides = conflictSides else { return }
-        let oursLines = sides.oursLines
-        let theirsLines = sides.theirsLines
+    func setConflictBothOrder(_ order: ConflictEditorBlock.BothOrder, regionIndex: Int) {
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: order == .currentFirst ? "Current Then Incoming" : "Incoming Then Current")
+        document.setBothOrder(order, for: regionIndex)
+        updateConflictDocument(document)
+    }
 
-        var output: [String] = []
-        var oursIdx = 0
-
-        while oursIdx < oursLines.count {
-            var handledRegion = false
-            for (i, marker) in sides.markers.enumerated() {
-                if marker.oursRange.lowerBound == oursIdx {
-                    let choice = regionChoices[i]
-                    let includeOurs = choice?.oursChecked ?? false
-                    let includeTheirs = choice?.theirsChecked ?? false
-
-                    if includeOurs {
-                        for j in marker.oursRange {
-                            if j < oursLines.count { output.append(oursLines[j]) }
-                        }
-                    }
-                    if includeTheirs {
-                        for j in marker.theirsRange {
-                            if j < theirsLines.count { output.append(theirsLines[j]) }
-                        }
-                    }
-                    if !includeOurs && !includeTheirs {
-                        for j in marker.oursRange {
-                            if j < oursLines.count { output.append(oursLines[j]) }
-                        }
-                    }
-
-                    oursIdx = marker.oursRange.upperBound
-                    handledRegion = true
-                    break
-                }
-            }
-            if !handledRegion {
-                output.append(oursLines[oursIdx])
-                oursIdx += 1
-            }
+    func updateConflictOutputText(_ text: String) {
+        guard var document = conflictEditorDocument else { return }
+        if !isRestoringConflictUndoSnapshot, text != conflictOutputText {
+            registerConflictUndo(actionName: "Edit Conflict Output")
         }
-        conflictOutputLines = output
+        document.updateOutputText(text)
+        updateConflictDocument(document)
     }
 
     func saveConflictResolution() async {
         guard let file = conflictMergeFile else { return }
-        let content = conflictOutputLines.joined(separator: "\n")
+        guard let document = conflictEditorDocument,
+              document.blocks.contains(where: { $0.selectedSources.hasSelection }) else {
+            showToast(title: "No Hunks Selected", detail: "Select at least one conflict hunk before saving", style: .warning)
+            return
+        }
+        let content = conflictOutputText
         do {
             try await git.saveConflictResolution(path: file.path, content: content)
             try await git.markConflictResolved(path: file.path)
@@ -4128,8 +4370,10 @@ final class RepoViewModel {
             showConflictMergeView = false
             conflictMergeFile = nil
             conflictSides = nil
+            conflictEditorDocument = nil
+            conflictOutputText = ""
             conflictOutputLines = []
-            regionChoices = [:]
+            conflictUndoManager.removeAllActions()
             await refreshRebaseState()
             await refreshStatusAndGraph()
         } catch {

@@ -66,12 +66,20 @@ extension String {
 }
 
 struct FileInspectorOverlayView: View {
+    private struct PendingHunkAction {
+        let path: String
+        let hunkIndex: Int
+        let action: String
+    }
+
     @Environment(\.colorScheme) private var colorScheme
     let viewModel: RepoViewModel
 
     @State private var targetLine: Int?
     @State private var showCloseConfirmation = false
     @State private var pendingModeSwitch: RepoViewModel.FileInspectorMode?
+    @State private var pendingHunkAction: PendingHunkAction?
+    @State private var showDiscardHunkConfirm = false
     @State private var commandBridge = MonacoCommandBridge()
 
     private var supportsHunkActions: Bool {
@@ -185,6 +193,32 @@ struct FileInspectorOverlayView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You have unsaved changes in \(viewModel.fileInspectorTitle).")
+        }
+        .alert("File Changed Externally", isPresented: Binding(
+            get: { viewModel.showFileInspectorExternalChangePrompt },
+            set: { if !$0 { viewModel.keepFileInspectorLocalContent() } }
+        )) {
+            Button("Keep Mine") {
+                viewModel.keepFileInspectorLocalContent()
+            }
+            Button("Reload") {
+                viewModel.reloadFileInspectorFromExternalChange()
+            }
+        } message: {
+            Text("\(viewModel.fileInspectorTitle) changed outside GitN. Keep your local edits, or reload the file from disk.")
+        }
+        .alert("Discard Hunk", isPresented: $showDiscardHunkConfirm) {
+            Button("Discard", role: .destructive) {
+                guard let pending = pendingHunkAction else { return }
+                pendingHunkAction = nil
+                Task { await performHunkAction(pending) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingHunkAction = nil
+            }
+        } message: {
+            let fileName = pendingHunkAction.map { ($0.path as NSString).lastPathComponent } ?? "this file"
+            Text("Are you sure you want to discard this hunk in \"\(fileName)\"? This cannot be undone.")
         }
     }
 
@@ -334,23 +368,36 @@ struct FileInspectorOverlayView: View {
                 viewModel.isFileInspectorDiffEditing = false
             },
             onHunkAction: { _, hunkIndex, action in
-                Task {
-                    switch action {
-                    case "stage":
-                        await viewModel.stageHunk(hunkIndex)
-                    case "unstage":
-                        await viewModel.unstageHunk(hunkIndex)
-                    case "discard":
-                        await viewModel.discardHunk(hunkIndex)
-                    default:
-                        break
-                    }
+                let pending = PendingHunkAction(
+                    path: viewModel.fileInspectorPath,
+                    hunkIndex: hunkIndex,
+                    action: action
+                )
+                if action == "discard" {
+                    pendingHunkAction = pending
+                    showDiscardHunkConfirm = true
+                } else {
+                    Task { await performHunkAction(pending) }
                 }
             },
             onSaveRequest: {
                 Task { _ = await viewModel.saveFileInspector() }
             }
         )
+    }
+
+    @MainActor
+    private func performHunkAction(_ pending: PendingHunkAction) async {
+        switch pending.action {
+        case "stage":
+            await viewModel.stageHunk(pending.hunkIndex)
+        case "unstage":
+            await viewModel.unstageHunk(pending.hunkIndex)
+        case "discard":
+            await viewModel.discardHunk(pending.hunkIndex)
+        default:
+            break
+        }
     }
 
     @ViewBuilder

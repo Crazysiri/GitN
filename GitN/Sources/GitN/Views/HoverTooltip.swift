@@ -1,6 +1,22 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Host lifecycle (e.g. tab stack: cached inactive repo panes never disappear / never get hover-exit)
+
+private struct HoverTooltipHostActiveKey: EnvironmentKey {
+    static var defaultValue: Bool { true }
+}
+
+extension EnvironmentValues {
+    /// `RepoContainerView` sets this from `isActive`. Default `true` for UI not under the tab stack.
+    var hoverTooltipHostActive: Bool {
+        get { self[HoverTooltipHostActiveKey.self] }
+        set { self[HoverTooltipHostActiveKey.self] = newValue }
+    }
+}
+
+// MARK: - Tooltip UI
+
 enum HoverTooltipPlacement {
     case above
     case below
@@ -31,20 +47,33 @@ struct HoverTooltipBubble: View {
     }
 }
 
-private final class HoverTooltipPanel: NSPanel {
-    static let shared = HoverTooltipPanel()
+// MARK: - Anchor (layout only; hits pass through to `content`)
 
+private struct HoverTooltipAnchorView: NSViewRepresentable {
+    let onResolve: (NSView) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            onResolve(view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            onResolve(nsView)
+        }
+    }
+}
+
+// MARK: - Panel (one per `.hoverTooltip`)
+
+private final class HoverTooltipPanel: NSPanel {
     private let hostingView = NSHostingView(rootView: HoverTooltipBubble(text: ""))
     private var pendingShow: DispatchWorkItem?
-    /// The anchorView that owns the current pendingShow work item, used to
-    /// decide whether cancelAndHide should cancel the in-flight show.
-    private weak var pendingShowAnchor: NSView?
-    private var pendingHide: DispatchWorkItem?
-    /// Timestamp of the last successful present(); used to let hide closures
-    /// detect that a newer show happened after they were scheduled.
-    private var lastPresentDate: Date = .distantPast
 
-    private init() {
+    init() {
         super.init(
             contentRect: .zero,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -60,68 +89,27 @@ private final class HoverTooltipPanel: NSPanel {
         contentView = hostingView
     }
 
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
     func scheduleShow(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
-        // Cancel any scheduled hide — a new hover-in wins.
-        pendingHide?.cancel()
-        pendingHide = nil
         pendingShow?.cancel()
-
-        // Track which view owns this pending show so cancelAndHide can decide
-        // whether to cancel it (same element quick-exit) or leave it alive
-        // (adjacent element's incoming show).
-        pendingShowAnchor = anchorView
-
         let item = DispatchWorkItem { [weak self, weak anchorView] in
-            guard let self, let anchorView else { return }
+            guard let self, let anchorView, anchorView.window != nil else { return }
             self.pendingShow = nil
-            self.pendingShowAnchor = nil
-            self.lastPresentDate = Date()
             self.present(text: text, placement: placement, from: anchorView)
         }
         pendingShow = item
-        // When already visible (tab-to-tab), update quickly; otherwise use the
-        // standard initial-show delay so we don't flash on quick mouse passes.
         let delay: TimeInterval = isVisible ? 0.05 : 0.1
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
-    func cancelAndHide(from callerAnchor: NSView? = nil) {
-        pendingHide?.cancel()
-        pendingHide = nil
-
-        guard isVisible else {
-            // Tooltip never appeared — safe to cancel the pending show outright.
-            pendingShow?.cancel()
-            pendingShow = nil
-            pendingShowAnchor = nil
-            return
+    func cancelAndHide() {
+        pendingShow?.cancel()
+        pendingShow = nil
+        if isVisible {
+            orderOut(nil)
         }
-
-        // If the caller is the same element that owns the in-flight pendingShow,
-        // cancel it now. This closes the race where a quick hover-in/out causes
-        // pendingShow to fire *after* cancelAndHide captures snapDate, updating
-        // lastPresentDate to a time after snapDate and silently blocking the hide.
-        //
-        // If a *different* (adjacent) element owns pendingShow, leave it alive:
-        // that element's scheduleShow has already cancelled the previous
-        // pendingHide, so its upcoming present() will correctly take ownership.
-        if let callerAnchor, pendingShowAnchor === callerAnchor {
-            pendingShow?.cancel()
-            pendingShow = nil
-            pendingShowAnchor = nil
-        }
-
-        let snapDate = Date()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.pendingHide = nil
-            // A present() that happened after we decided to hide means a new
-            // element took over — don't dismiss.
-            guard self.lastPresentDate <= snapDate else { return }
-            self.orderOut(nil)
-        }
-        pendingHide = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
     }
 
     private func present(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
@@ -153,20 +141,16 @@ private final class HoverTooltipPanel: NSPanel {
     }
 }
 
-private struct HoverTooltipAnchorView: NSViewRepresentable {
-    let onResolve: (NSView) -> Void
+private final class HoverTooltipPanelController: ObservableObject {
+    let panel: HoverTooltipPanel
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            onResolve(view)
-        }
-        return view
+    init() {
+        panel = HoverTooltipPanel()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            onResolve(nsView)
+    deinit {
+        DispatchQueue.main.async { [panel] in
+            panel.orderOut(nil)
         }
     }
 }
@@ -176,33 +160,42 @@ private struct HoverTooltipModifier: ViewModifier {
     let placement: HoverTooltipPlacement
     let isEnabled: Bool
 
+    @Environment(\.hoverTooltipHostActive) private var hoverTooltipHostActive
+    @StateObject private var panelController = HoverTooltipPanelController()
     @State private var isHovering = false
     @State private var anchorView: NSView?
 
     func body(content: Content) -> some View {
         content
-            .background(
+            .overlay(
                 HoverTooltipAnchorView { anchorView = $0 }
-                    .frame(width: 0, height: 0)
+                    .allowsHitTesting(false)
             )
-            .onHover { isHovering = $0 }
-            .onChange(of: isHovering) { _, hovering in
-                updateTooltip(isHovering: hovering)
+            .onHover { hovering in
+                isHovering = hovering
+                syncTooltip()
             }
             .onChange(of: text) { _, _ in
-                updateTooltip(isHovering: isHovering)
+                syncTooltip()
+            }
+            .onChange(of: isEnabled) { _, _ in
+                syncTooltip()
+            }
+            .onChange(of: hoverTooltipHostActive) { _, _ in
+                syncTooltip()
             }
             .onDisappear {
-                HoverTooltipPanel.shared.cancelAndHide(from: anchorView)
+                panelController.panel.cancelAndHide()
             }
     }
 
-    private func updateTooltip(isHovering: Bool) {
-        guard isEnabled, isHovering, let anchorView else {
-            HoverTooltipPanel.shared.cancelAndHide(from: anchorView)
+    private func syncTooltip() {
+        let panel = panelController.panel
+        guard hoverTooltipHostActive, isEnabled, isHovering, let anchorView else {
+            panel.cancelAndHide()
             return
         }
-        HoverTooltipPanel.shared.scheduleShow(text: text, placement: placement, from: anchorView)
+        panel.scheduleShow(text: text, placement: placement, from: anchorView)
     }
 }
 

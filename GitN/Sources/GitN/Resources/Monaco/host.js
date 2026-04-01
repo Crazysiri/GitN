@@ -16,6 +16,9 @@
     activeTooltipKey: null,
     currentHunkIndex: -1,
     currentDiffIdentity: null,
+    currentPreviewIdentity: null,
+    currentEditorPath: null,
+    pendingViewState: null,
   };
   
 
@@ -102,6 +105,8 @@
     state.gutterOverlay = null;
     state.contentOverlay = null;
     state.currentDiffIdentity = null;
+    state.currentPreviewIdentity = null;
+    state.currentEditorPath = null;
 
     const models = window.monaco && window.monaco.editor ? window.monaco.editor.getModels() : [];
     for (const model of models) {
@@ -124,6 +129,15 @@
       isEditable: !!(item && item.isEditable),
       originalText: item && typeof item.originalText === "string" ? item.originalText : "",
       modifiedText: item && typeof item.modifiedText === "string" ? item.modifiedText : "",
+    });
+  }
+
+  function buildPreviewIdentity(item) {
+    return JSON.stringify({
+      path: item && item.path ? item.path : "",
+      language: item && item.language ? item.language : "",
+      isEditable: !!(item && item.isEditable),
+      content: item && typeof item.content === "string" ? item.content : "",
     });
   }
 
@@ -211,6 +225,12 @@
   }
 
   function resetRoot(mode) {
+    reportDebug("resetRoot", {
+      mode,
+      currentMode: state.currentMode,
+      currentEditorPath: state.currentEditorPath,
+    });
+    capturePendingViewState();
     disposeAllEditors();
     hideTooltip();
     const root = ensureRoot();
@@ -224,7 +244,55 @@
     return root;
   }
 
+  function capturePendingViewState() {
+    const editor = state.diffEditor || (state.editors.length > 0 ? state.editors[0] : null);
+    if (!editor || typeof editor.saveViewState !== "function") {
+      state.pendingViewState = null;
+      return;
+    }
+
+    state.pendingViewState = {
+      mode: state.currentMode,
+      path: state.currentEditorPath,
+      viewState: editor.saveViewState(),
+      scrollTop: typeof editor.getScrollTop === "function" ? editor.getScrollTop() : 0,
+      scrollLeft: typeof editor.getScrollLeft === "function" ? editor.getScrollLeft() : 0,
+    };
+  }
+
+  function restorePendingViewState(editor, mode, path) {
+    const pending = state.pendingViewState;
+    state.pendingViewState = null;
+
+    if (!pending || pending.mode !== mode || pending.path !== path) {
+      return;
+    }
+
+    try {
+      if (pending.viewState && typeof editor.restoreViewState === "function") {
+        editor.restoreViewState(pending.viewState);
+      }
+      if (typeof editor.setScrollPosition === "function") {
+        editor.setScrollPosition({
+          scrollTop: typeof pending.scrollTop === "number" ? pending.scrollTop : 0,
+          scrollLeft: typeof pending.scrollLeft === "number" ? pending.scrollLeft : 0,
+        });
+      }
+    } catch (error) {
+      reportDebug("restoreViewStateFailed", {
+        mode,
+        path,
+        message: error && error.message ? error.message : String(error),
+      });
+    }
+  }
+
   function renderPreview(payload) {
+    reportDebug("renderPreview", {
+      path: payload.path,
+      contentLength: (payload.content || "").length,
+      isEditable: !!payload.isEditable,
+    });
     const root = resetRoot("preview");
     const editorNode = document.createElement("div");
     editorNode.className = "preview-editor";
@@ -234,12 +302,24 @@
     const editor = window.monaco.editor.create(editorNode, Object.assign(editorOptions(payload.isEditable), {
       model,
     }));
+    editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS, () => {
+      postMessage("saveRequest");
+    });
     editor.onDidChangeModelContent(() => {
+      state.currentPreviewIdentity = buildPreviewIdentity({
+        path: payload.path,
+        language: payload.language,
+        isEditable: payload.isEditable,
+        content: editor.getValue(),
+      });
       postMessage("contentChanged", {
         path: payload.path,
         content: encodeBase64(editor.getValue()),
       });
     });
+    state.currentPreviewIdentity = buildPreviewIdentity(payload);
+    state.currentEditorPath = payload.path;
+    restorePendingViewState(editor, "preview", payload.path);
     state.editors.push(editor);
   }
 
@@ -308,13 +388,22 @@
       renderInlineDiff(editor, item.originalText || "", model.getValue());
 
       editor.onDidChangeModelContent(() => {
-        renderInlineDiff(editor, item.originalText || "", editor.getValue());
+        var currentValue = editor.getValue();
+        state.currentDiffIdentity = buildDiffIdentity({
+          path: item.path,
+          language: item.language,
+          isEditable: item.isEditable,
+          originalText: item.originalText || "",
+          modifiedText: currentValue,
+        });
+        renderInlineDiff(editor, item.originalText || "", currentValue);
         postMessage("contentChanged", {
           path: item.path,
-          content: encodeBase64(editor.getValue()),
+          content: encodeBase64(currentValue),
         });
       });
       editor.onDidScrollChange(() => {
+        syncCurrentHunkIndexToViewport(editor);
         renderDeletionGutter(editor);
       });
       editor.onDidLayoutChange(() => {
@@ -322,6 +411,9 @@
         renderDeletionGutter(editor);
       });
       state.currentDiffIdentity = buildDiffIdentity(item);
+      state.currentEditorPath = item.path;
+      restorePendingViewState(editor, "diff", item.path);
+      syncCurrentHunkIndexToViewport(editor);
       state.editors.push(editor, originalModel);
     } catch (error) {
       reportError(
@@ -1181,6 +1273,7 @@
       }),
     });
     renderDeletionGutter(state.diffEditor);
+    syncCurrentHunkIndexToViewport(state.diffEditor);
     return true;
   }
 
@@ -1213,6 +1306,34 @@
     return unique;
   }
 
+  function syncCurrentHunkIndexToViewport(editor) {
+    if (!editor || !state.diffModel) {
+      state.currentHunkIndex = -1;
+      return;
+    }
+
+    var hunkLines = getDiffHunkLines();
+    if (hunkLines.length === 0) {
+      state.currentHunkIndex = -1;
+      return;
+    }
+
+    var layoutInfo = editor.getLayoutInfo();
+    var viewportAnchor = editor.getScrollTop() + (layoutInfo ? layoutInfo.height / 2 : 0);
+    var bestIndex = 0;
+    var bestDistance = Number.POSITIVE_INFINITY;
+
+    for (var i = 0; i < hunkLines.length; i += 1) {
+      var distance = Math.abs(editor.getTopForLineNumber(hunkLines[i]) - viewportAnchor);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    }
+
+    state.currentHunkIndex = bestIndex;
+  }
+
   function navigateDiff(direction) {
     if (!state.diffEditor || !state.diffModel) {
       return;
@@ -1223,6 +1344,7 @@
       return;
     }
 
+    syncCurrentHunkIndexToViewport(editor);
     var idx = state.currentHunkIndex;
 
     if (idx < 0 || idx >= hunkLines.length) {
@@ -1263,8 +1385,22 @@
         const payload = JSON.parse(decodeBase64(encodedPayload));
         applyTheme(payload.isDark);
         if (payload.mode === "preview" && payload.preview) {
+          reportDebug("loadPayloadPreview", {
+            path: payload.preview.path,
+            contentLength: (payload.preview.content || "").length,
+            currentMode: state.currentMode,
+            currentPreviewIdentity: state.currentPreviewIdentity,
+          });
           state.pendingHunkActions = null;
           state.pendingLineBlames = null;
+          const nextIdentity = buildPreviewIdentity(payload.preview);
+          if (state.currentMode === "preview" &&
+              state.currentPreviewIdentity === nextIdentity) {
+            reportDebug("loadPayloadPreviewSkippedSameIdentity", {
+              path: payload.preview.path,
+            });
+            return;
+          }
           renderPreview(payload.preview);
           return;
         }

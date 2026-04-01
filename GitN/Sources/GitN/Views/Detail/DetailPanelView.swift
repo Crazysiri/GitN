@@ -65,7 +65,7 @@ struct DetailPanelView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if viewModel.isInConflict, let cType = viewModel.conflictType {
+            if viewModel.isWorkingTreeConflictSelection, viewModel.isInConflict, let cType = viewModel.conflictType {
                 conflictPanel(cType)
             } else if viewModel.isCompareMode, let commit = viewModel.selectedCommit {
                 compareHeader(commit)
@@ -1176,7 +1176,11 @@ struct DetailPanelView: View {
                                         isRange: flags.contains(.shift),
                                         orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
                                     )
-                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .staged) }
+                                    Task {
+                                        let diffFile = matchingDiffFile(for: file)
+                                        await viewModel.selectDiffFile(diffFile, context: .staged)
+                                        await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
+                                    }
                                 }
                                 .contextMenu {
                                     conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
@@ -1226,7 +1230,11 @@ struct DetailPanelView: View {
                                         isRange: flags.contains(.shift),
                                         orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
                                     )
-                                    Task { await viewModel.selectDiffFile(matchingDiffFile(for: file), context: .unstaged) }
+                                    Task {
+                                        let diffFile = matchingDiffFile(for: file)
+                                        await viewModel.selectDiffFile(diffFile, context: .unstaged)
+                                        await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
+                                    }
                                 }
                                 .contextMenu {
                                     conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
@@ -1596,134 +1604,6 @@ struct DetailPanelView: View {
         return location.y >= unstagedSectionMinY
     }
 
-    // MARK: - Diff Content
-
-    private var diffContentView: some View {
-        Group {
-            if viewModel.isFileTooLarge {
-                fileTooLargeView
-            } else if viewModel.selectedDiffFile?.isPureRename == true,
-                      let oldPath = viewModel.selectedDiffFile?.oldPath,
-                      let newPath = viewModel.selectedDiffFile?.path {
-                VStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                    Text("File renamed — no content changes")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        Text(oldPath)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                        Text(newPath)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let diff = viewModel.parsedDiff, !diff.hunks.isEmpty {
-                let isUncommitted = viewModel.selectedCommit?.isUncommitted == true
-                DiffHunkView(
-                    diff: diff,
-                    isUncommitted: isUncommitted,
-                    diffContext: viewModel.currentDiffContext,
-                    viewModel: viewModel,
-                    onMoveSelection: { step in
-                        focusedTarget = .fileList
-                        handleFileListStep(step)
-                    }
-                )
-            } else if let visualContent = viewModel.selectedDiffVisualContent,
-                      viewModel.selectedDiffFile != nil {
-                VisualFileContentView(
-                    content: visualContent,
-                    path: viewModel.selectedDiffFile?.path ?? "",
-                    mode: .diff,
-                    oldPath: viewModel.selectedDiffFile?.oldPath
-                )
-            } else if viewModel.selectedDiffFile != nil {
-                if viewModel.isLoadingDiff {
-                    ProgressView("Loading diff...")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if !viewModel.fileDiffContent.isEmpty {
-                    if viewModel.fileDiffContent == "Failed to load diff" {
-                        VStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle")
-                                .font(.title2)
-                                .foregroundStyle(.orange)
-                            Text("Failed to load diff")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if viewModel.fileDiffContent == "No changes in this file" {
-                        VStack(spacing: 8) {
-                            Image(systemName: "doc.text")
-                                .font(.title2)
-                                .foregroundStyle(.secondary)
-                            Text("No changes in this file")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        Text("No changes to display")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                } else {
-                    Text("No changes to display")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            } else {
-                Text("Select a file to view diff")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-    }
-
-    private var fileTooLargeView: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 36))
-                .foregroundStyle(.secondary)
-            Text("File too large to diff (\(viewModel.fileTooLargeSizeMB) MB)")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Button(action: { Task { await viewModel.forceLoadFileDiff() } }) {
-                    Label("Load anyway", systemImage: "eye")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-
-                Button(action: { viewModel.openExternalDiffTool() }) {
-                    Label("Open in External Diff Tool", systemImage: "arrow.up.forward.app")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-            }
-
-            Text("Tip: 通过 `git config diff.tool <tool>` 配置外部 diff 工具")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     // MARK: - AI Commit Button
 
     private var aiCommitButton: some View {
@@ -1954,11 +1834,6 @@ struct DetailPanelView: View {
 
             // Staged Files
             conflictStagingFileList(conflictedFiles: conflictedFiles, resolvedFiles: resolvedFiles)
-
-            Divider()
-
-            // Diff content view
-            diffContentView
 
             Divider()
 
@@ -2250,7 +2125,7 @@ struct DetailPanelView: View {
     private func handleFileListStep(_ step: Int) {
         guard step != 0 else { return }
 
-        if viewModel.isInConflict {
+        if viewModel.isWorkingTreeConflictSelection, viewModel.isInConflict {
             let conflictPaths = Set(viewModel.currentConflictedFiles.map(\.path))
             let files = viewModel.currentDiffContext == .staged
                 ? conflictStagedFiles(excludingConflicts: conflictPaths)
@@ -2972,102 +2847,6 @@ final class ActivatingTextField: NSTextField {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
     }
-}
-
-// MARK: - Diff Hunk View (with stage/discard buttons & line selection)
-
-struct DiffHunkView: View {
-    let diff: ParsedDiff
-    let isUncommitted: Bool
-    let diffContext: RepoViewModel.DiffContext
-    let viewModel: RepoViewModel
-    let onMoveSelection: ((Int) -> Void)?
-
-    @State private var selectedLines: [Int: Set<Int>] = [:]
-
-    private var allSelected: Set<Int> {
-        selectedLines.values.reduce(into: Set<Int>()) { $0.formUnion($1) }
-    }
-
-    private var hasSelection: Bool { !allSelected.isEmpty }
-
-    private var isStaged: Bool { diffContext == .staged }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if isUncommitted {
-                diffToolbar
-            }
-
-            SelectableDiffView(
-                hunks: diff.hunks,
-                filePath: viewModel.selectedDiffFile?.path,
-                isUncommitted: isUncommitted,
-                selectedLines: $selectedLines,
-                onMoveSelection: onMoveSelection
-            )
-        }
-    }
-
-    // MARK: - Unified Toolbar
-
-    private var diffToolbar: some View {
-        HStack(spacing: 6) {
-            Spacer()
-
-            Button(action: {
-                Task {
-                    if isStaged {
-                        if hasSelection {
-                            for (hunkIdx, lines) in selectedLines where !lines.isEmpty {
-                                await viewModel.unstageLines(hunkIdx, lineIndices: lines)
-                            }
-                        } else {
-                            await viewModel.unstageAllHunks()
-                        }
-                    } else {
-                        if hasSelection {
-                            for (hunkIdx, lines) in selectedLines where !lines.isEmpty {
-                                await viewModel.stageLines(hunkIdx, lineIndices: lines)
-                            }
-                        } else {
-                            await viewModel.stageAllHunks()
-                        }
-                    }
-                    selectedLines = [:]
-                }
-            }) {
-                Text(isStaged
-                     ? (hasSelection ? "取消暂存行" : "取消暂存区块")
-                     : (hasSelection ? "暂存行" : "暂存区块"))
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-
-            Button(action: {
-                Task {
-                    if hasSelection {
-                        for (hunkIdx, lines) in selectedLines where !lines.isEmpty {
-                            await viewModel.discardLines(hunkIdx, lineIndices: lines)
-                        }
-                    } else {
-                        await viewModel.discardAllHunks()
-                    }
-                    selectedLines = [:]
-                }
-            }) {
-                Text(hasSelection ? "放弃行" : "放弃区块")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color(.controlBackgroundColor).opacity(0.6))
-    }
-
 }
 
 // MARK: - NSTextView subclass with full cross-line text selection

@@ -221,6 +221,213 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         )
     }
 
+    func testSaveConflictResolutionWarnsWhenNoHunksSelected() async {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha",
+                "<<<<<<< Current",
+                "current-1",
+                "||||||| Base",
+                "base-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "omega"],
+            oursLines: ["alpha", "current-1", "omega"],
+            theirsLines: ["alpha", "incoming-1", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        viewModel.conflictMergeFile = ConflictFile(path: "file.txt", conflictCount: 1)
+        let document = ConflictEditorDocument(sides: sides)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+        viewModel.showConflictMergeView = true
+
+        await viewModel.saveConflictResolution()
+
+        XCTAssertEqual(viewModel.toastMessage?.title, "No Hunks Selected")
+        XCTAssertEqual(viewModel.toastMessage?.style, .warning)
+        XCTAssertTrue(viewModel.showConflictMergeView)
+        XCTAssertEqual(viewModel.conflictOutputText, document.outputText)
+    }
+
+    func testSetAllOursSelectedChecksEveryConflictBlock() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha",
+                "<<<<<<< Current",
+                "current-1",
+                "||||||| Base",
+                "base-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "middle",
+                "<<<<<<< Current",
+                "current-2",
+                "||||||| Base",
+                "base-2",
+                "=======",
+                "incoming-2",
+                ">>>>>>> Incoming",
+                "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "middle", "base-2", "omega"],
+            oursLines: ["alpha", "current-1", "middle", "current-2", "omega"],
+            theirsLines: ["alpha", "incoming-1", "middle", "incoming-2", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        let document = ConflictEditorDocument(sides: sides)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+
+        viewModel.setAllOursSelected(true)
+
+        XCTAssertTrue(viewModel.allOursSelected)
+        XCTAssertEqual(
+            viewModel.conflictEditorDocument?.blocks.map(\.selectedSources.current),
+            [true, true]
+        )
+    }
+
+    func testSetAllTheirsSelectedChecksEveryConflictBlock() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha",
+                "<<<<<<< Current",
+                "current-1",
+                "||||||| Base",
+                "base-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "middle",
+                "<<<<<<< Current",
+                "current-2",
+                "||||||| Base",
+                "base-2",
+                "=======",
+                "incoming-2",
+                ">>>>>>> Incoming",
+                "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "middle", "base-2", "omega"],
+            oursLines: ["alpha", "current-1", "middle", "current-2", "omega"],
+            theirsLines: ["alpha", "incoming-1", "middle", "incoming-2", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        let document = ConflictEditorDocument(sides: sides)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+
+        viewModel.setAllTheirsSelected(true)
+
+        XCTAssertTrue(viewModel.allTheirsSelected)
+        XCTAssertEqual(
+            viewModel.conflictEditorDocument?.blocks.map(\.selectedSources.incoming),
+            [true, true]
+        )
+    }
+
+    func testUndoRestoresConflictSelectionStateAndOutputText() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha",
+                "<<<<<<< Current",
+                "current-1",
+                "||||||| Base",
+                "base-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "omega"],
+            oursLines: ["alpha", "current-1", "omega"],
+            theirsLines: ["alpha", "incoming-1", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        let document = ConflictEditorDocument(sides: sides)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+        viewModel.conflictUndoManager.removeAllActions()
+
+        viewModel.toggleOurs(0)
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "current-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, true)
+
+        viewModel.conflictUndoManager.undo()
+
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "base-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, false)
+
+        viewModel.conflictUndoManager.redo()
+
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "current-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, true)
+    }
+
+    func testUndoAfterManualConflictEditRevertsEditBeforeSelection() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha",
+                "<<<<<<< Current",
+                "current-1",
+                "||||||| Base",
+                "base-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "omega"],
+            oursLines: ["alpha", "current-1", "omega"],
+            theirsLines: ["alpha", "incoming-1", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        let document = ConflictEditorDocument(sides: sides)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+        viewModel.conflictUndoManager.removeAllActions()
+
+        viewModel.toggleOurs(0)
+        viewModel.updateConflictOutputText("alpha\ncurrent-1-edited\nomega")
+
+        viewModel.undoConflictAction()
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "current-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, true)
+
+        viewModel.undoConflictAction()
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "base-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, false)
+
+        viewModel.undoConflictAction()
+        XCTAssertEqual(viewModel.conflictOutputLines, ["alpha", "base-1", "omega"])
+        XCTAssertEqual(viewModel.conflictEditorDocument?.blocks.first?.selectedSources.current, false)
+    }
+
     func testChangingGraphDisplayModeClearsSelectionForCommitOutsideVisibleScope() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         let visible = CommitInfo(
@@ -689,6 +896,87 @@ final class RepoViewModelBehaviorTests: XCTestCase {
 
         XCTAssertEqual(viewModel.selectedCommit?.hash, targetCommit.hash)
         XCTAssertEqual(viewModel.scrollToCommitHash, targetCommit.hash)
+    }
+
+    func testCommitNavigationIndexSkipsAmbiguousShortHashesWithoutCrashing() async {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let ambiguousShortHash = "abc1234"
+        let first = CommitInfo(
+            hash: ambiguousShortHash + String(repeating: "0", count: 33),
+            shortHash: ambiguousShortHash,
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-04-01",
+            message: "first",
+            refs: []
+        )
+        let second = CommitInfo(
+            hash: ambiguousShortHash + String(repeating: "1", count: 33),
+            shortHash: ambiguousShortHash,
+            parentHashes: [first.hash],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-04-01",
+            message: "second",
+            refs: []
+        )
+        let unique = CommitInfo(
+            hash: "def5678" + String(repeating: "2", count: 33),
+            shortHash: "def5678",
+            parentHashes: [second.hash],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-04-01",
+            message: "unique",
+            refs: []
+        )
+
+        viewModel.commits = [unique, second, first]
+
+        XCTAssertTrue(viewModel.canNavigateToCommit(hash: ambiguousShortHash))
+
+        await viewModel.navigateToCommit(hash: unique.shortHash)
+
+        XCTAssertEqual(viewModel.selectedCommit?.hash, unique.hash)
+        XCTAssertEqual(viewModel.scrollToCommitHash, unique.hash)
+    }
+
+    func testScrollToCommitForBranchSelectsLoadedCommitByShortHash() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        let initialHash = try repo.commitAll(message: "initial")
+        try repo.run(["branch", "feature", initialHash])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let branch = try XCTUnwrap(viewModel.localBranches.first(where: { $0.name == "feature" }))
+
+        await viewModel.scrollToCommitForBranch(branch)
+
+        XCTAssertEqual(viewModel.selectedCommit?.hash, initialHash)
+        XCTAssertEqual(viewModel.scrollToCommitHash, initialHash)
+    }
+
+    func testRefreshAfterActivationReloadsCommitsCreatedWhileInactive() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        let initialHash = try repo.commitAll(message: "initial")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        XCTAssertEqual(viewModel.commits.first?.hash, initialHash)
+
+        try repo.appendFile("tracked.txt", contents: "two\n")
+        let secondHash = try repo.commitAll(message: "second")
+
+        await viewModel.refreshAfterActivation()
+
+        XCTAssertEqual(viewModel.headCommitHash, secondHash)
+        XCTAssertTrue(viewModel.commits.contains(where: { $0.hash == secondHash && $0.message == "second" }))
+        let refOwner = try XCTUnwrap(viewModel.commits.first(where: { $0.refs.contains(where: { $0.contains("main") }) }))
+        XCTAssertEqual(refOwner.hash, secondHash)
     }
 
     func testPerformCompareWithWorkingDirectoryLoadsCompareDiffAndExitClearsState() async throws {

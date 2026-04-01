@@ -120,6 +120,10 @@ struct MonacoInspectorView: NSViewRepresentable {
 }
 
 extension MonacoInspectorView {
+    private static func emitDebugLog(_ message: @autoclosure () -> String) {
+        print("[MonacoBridge] \(message())")
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onContentChange: (String, String) -> Void
         var onHunkAction: ((String, Int, String) -> Void)?
@@ -231,16 +235,34 @@ extension MonacoInspectorView {
                   let data = try? JSONEncoder().encode(payload)
             else { return }
 
+            let mode = payload.mode
+            let previewPath = payload.preview?.path ?? ""
+            let diffPath = payload.items.first?.path ?? ""
+            MonacoInspectorView.emitDebugLog(
+                "flushPayloadIfReady mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath) applyingLocalEdit=\(isApplyingLocalEdit) samePayload=\(data == lastPayloadData)"
+            )
+
             if isApplyingLocalEdit {
                 isApplyingLocalEdit = false
                 lastPayloadData = data
+                MonacoInspectorView.emitDebugLog(
+                    "flushPayloadIfReady skippedLocalEcho mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath)"
+                )
                 return
             }
 
-            guard data != lastPayloadData else { return }
+            guard data != lastPayloadData else {
+                MonacoInspectorView.emitDebugLog(
+                    "flushPayloadIfReady skippedSamePayload mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath)"
+                )
+                return
+            }
             lastPayloadData = data
             let encodedPayload = data.base64EncodedString()
             let script = "window.gitnMonaco && window.gitnMonaco.loadPayload('\(encodedPayload)');"
+            MonacoInspectorView.emitDebugLog(
+                "flushPayloadIfReady evaluateJS mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath)"
+            )
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
     }

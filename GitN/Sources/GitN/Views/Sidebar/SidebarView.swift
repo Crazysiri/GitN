@@ -44,6 +44,8 @@ struct SidebarView: View {
     @State private var branchFromTagName = ""
     @State private var newBranchFromTagName = ""
 
+    @State private var stashPendingDrop: StashInfo?
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
@@ -88,6 +90,25 @@ struct SidebarView: View {
                 case .unknown:
                     Text("Unsupported remote host.")
                 }
+            }
+        }
+        .alert("Delete Stash", isPresented: Binding(
+            get: { stashPendingDrop != nil },
+            set: { if !$0 { stashPendingDrop = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                guard let stash = stashPendingDrop else { return }
+                stashPendingDrop = nil
+                Task { await viewModel.performStashDrop(stash: stash) }
+            }
+            Button("Cancel", role: .cancel) {
+                stashPendingDrop = nil
+            }
+        } message: {
+            if let stash = stashPendingDrop {
+                let summary = stash.message.trimmingCharacters(in: .whitespacesAndNewlines)
+                let detail = summary.isEmpty ? stash.index : "“\(summary)” (\(stash.index))"
+                Text("Remove \(detail)? The stashed changes will be discarded. This cannot be undone.")
             }
         }
     }
@@ -786,7 +807,7 @@ struct SidebarView: View {
                             }
                             Divider()
                             Button("Delete", role: .destructive) {
-                                Task { await viewModel.performStashDrop(stash: stash) }
+                                stashPendingDrop = stash
                             }
                         }
                         .font(.system(size: 11, weight: .medium))
@@ -1036,6 +1057,10 @@ struct SidebarBranchRow: View {
 
     @State private var isHovering = false
 
+    private var branchNameColor: Color {
+        isCurrent ? Color(nsColor: .controlAccentColor) : .primary
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
@@ -1054,6 +1079,7 @@ struct SidebarBranchRow: View {
             Text(name)
                 .font(.caption)
                 .fontWeight(isCurrent ? .semibold : .regular)
+                .foregroundStyle(branchNameColor)
                 .lineLimit(1)
 
             Spacer()

@@ -24,6 +24,7 @@ struct ContentView: View {
                         let isActive = !appModel.showNewTab && appModel.selectedTabID == tab.id
                         RepoContainerView(tab: tab, isActive: isActive)
                             .opacity(isActive ? 1 : 0)
+                            .disabled(!isActive)
                             .allowsHitTesting(isActive)
                             .zIndex(isActive ? 1 : 0)
                     }
