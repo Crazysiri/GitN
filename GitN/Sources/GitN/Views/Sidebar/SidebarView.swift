@@ -466,7 +466,7 @@ struct SidebarView: View {
                     shortHash: viewModel.currentBranch
                 )
                 .onTapGesture {
-                    viewModel.scrollToCommitHash = viewModel.currentBranch
+                    Task { await viewModel.navigateToCommit(hash: viewModel.currentBranch) }
                 }
             }
 

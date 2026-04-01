@@ -27,6 +27,8 @@ struct RepoContainerView: View {
     @State private var showNewBranch = false
     @State private var newBranchName = ""
     @State private var showIgnoreEditor = false
+    @State private var showPullMenu = false
+    @State private var showPushMenu = false
 
     private enum TopBarLayout {
         static let height: CGFloat = 44
@@ -394,64 +396,15 @@ struct RepoContainerView: View {
 
     // MARK: - Pull Toolbar Button (main button + dropdown triangle)
 
-    @State private var showPullMenu = false
-
     private var pullToolbarButton: some View {
-        HStack(spacing: 0) {
-            // Main Pull button – executes the currently selected default mode
-            Button {
-                Task { await viewModel.performPull() }
-            } label: {
-                toolbarButtonSurface(width: TopBarLayout.syncButtonWidth, disabled: viewModel.operationInProgress) {
-                    animatedTransferLabel(
-                        title: "Pull",
-                        systemImage: "arrow.down.to.line",
-                        direction: .down,
-                        isActive: viewModel.activeToolbarOperation == .pull
-                    )
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.operationInProgress)
-
-            // Dropdown triangle
-            Menu {
-                // Pull mode selection (checkmark only, doesn't execute)
-                Section("点击 Pull 按钮时执行") {
-                    ForEach(RepoViewModel.PullMode.allCases) { mode in
-                        Button {
-                            viewModel.defaultPullMode = mode
-                        } label: {
-                            HStack {
-                                Text(mode.label)
-                                if viewModel.defaultPullMode == mode {
-                                    Spacer()
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Divider()
-
-                // Force Pull – shows confirmation, no checkmark
-                Button(role: .destructive) {
-                    viewModel.showForcePullConfirm = true
-                } label: {
-                    Label("Force Pull (reset to remote)", systemImage: "exclamationmark.triangle")
-                }
-            } label: {
-                toolbarButtonSurface(width: 12, disabled: viewModel.operationInProgress) {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 4, weight: .semibold))
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 12, height: TopBarLayout.height)
-            .disabled(viewModel.operationInProgress)
-        }
+        toolbarSplitMenuButton(
+            title: "Pull",
+            activeOperation: .pull,
+            direction: .down,
+            action: { Task { await viewModel.performPull() } },
+            isMenuPresented: $showPullMenu,
+            menuContent: { pullToolbarMenuContent }
+        )
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
         .alert("Force Pull", isPresented: Binding(
             get: { viewModel.showForcePullConfirm },
@@ -484,41 +437,14 @@ struct RepoContainerView: View {
     // MARK: - Push Toolbar Button (main button + dropdown triangle)
 
     private var pushToolbarButton: some View {
-        HStack(spacing: 0) {
-            // Main Push button – always does normal push
-            Button {
-                Task { await viewModel.performPush() }
-            } label: {
-                toolbarButtonSurface(width: TopBarLayout.syncButtonWidth, disabled: viewModel.operationInProgress) {
-                    animatedTransferLabel(
-                        title: "Push",
-                        systemImage: "arrow.up.to.line",
-                        direction: .up,
-                        isActive: viewModel.activeToolbarOperation == .push
-                    )
-                }
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.operationInProgress)
-
-            // Dropdown triangle
-            Menu {
-                Button(role: .destructive) {
-                    viewModel.showForcePushConfirm = true
-                } label: {
-                    Label("Force Push (--force-with-lease)", systemImage: "exclamationmark.triangle")
-                }
-            } label: {
-                toolbarButtonSurface(width: 12, disabled: viewModel.operationInProgress) {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 4, weight: .semibold))
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 12, height: TopBarLayout.height)
-            .disabled(viewModel.operationInProgress)
-        }
+        toolbarSplitMenuButton(
+            title: "Push",
+            activeOperation: .push,
+            direction: .up,
+            action: { Task { await viewModel.performPush() } },
+            isMenuPresented: $showPushMenu,
+            menuContent: { pushToolbarMenuContent }
+        )
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
         .alert("Force Push", isPresented: Binding(
             get: { viewModel.showForcePushConfirm },
@@ -547,6 +473,128 @@ struct RepoContainerView: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .foregroundStyle(disabled ? .tertiary : .secondary)
+    }
+
+    private func toolbarSplitMenuButton<MenuContent: View>(
+        title: String,
+        activeOperation: RepoViewModel.ToolbarOperation?,
+        direction: TransferDirection,
+        action: @escaping () -> Void,
+        isMenuPresented: Binding<Bool>,
+        @ViewBuilder menuContent: @escaping () -> MenuContent
+    ) -> some View {
+        RepoToolbarSplitHoverSurface(
+            width: TopBarLayout.syncButtonWidth + 14,
+            height: TopBarLayout.height,
+            isEnabled: !viewModel.operationInProgress
+        ) {
+            HStack(spacing: 0) {
+                Button(action: action) {
+                    animatedTransferLabel(
+                        title: title,
+                        systemImage: direction == .down ? "arrow.down.to.line" : "arrow.up.to.line",
+                        direction: direction,
+                        isActive: viewModel.activeToolbarOperation == activeOperation
+                    )
+                    .frame(width: TopBarLayout.syncButtonWidth, height: TopBarLayout.height)
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.operationInProgress)
+
+                Button {
+                    isMenuPresented.wrappedValue.toggle()
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .scaleEffect(x: 0.82, y: 1.0)
+                        .offset(x: -2)
+                        .frame(width: 13, height: TopBarLayout.height)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(viewModel.operationInProgress)
+                .popover(isPresented: isMenuPresented, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
+                    toolbarMenuPopover {
+                        menuContent()
+                    }
+                }
+            }
+        }
+    }
+
+    private var pullToolbarMenuContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("点击 Pull 按钮时执行")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 2)
+
+            ForEach(RepoViewModel.PullMode.allCases) { mode in
+                Button {
+                    viewModel.defaultPullMode = mode
+                    showPullMenu = false
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(mode.label)
+                        Spacer(minLength: 8)
+                        if viewModel.defaultPullMode == mode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.clear)
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Button {
+                showPullMenu = false
+                viewModel.showForcePullConfirm = true
+            } label: {
+                Label("Force Pull (reset to remote)", systemImage: "exclamationmark.triangle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+        }
+        .frame(width: 260)
+    }
+
+    private var pushToolbarMenuContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                showPushMenu = false
+                viewModel.showForcePushConfirm = true
+            } label: {
+                Label("Force Push (--force-with-lease)", systemImage: "exclamationmark.triangle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+        }
+        .frame(width: 250)
+    }
+
+    private func toolbarMenuPopover<Content: View>(
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .padding(8)
     }
 
     private func toolbarButtonSurface<Content: View>(
@@ -929,6 +977,26 @@ private func shimmerProgress(at date: Date) -> Double {
 }
 
 private struct RepoToolbarHoverSurface<Content: View>: View {
+    let width: CGFloat
+    let height: CGFloat
+    let isEnabled: Bool
+    @ViewBuilder let content: () -> Content
+
+    @State private var isHovering = false
+
+    var body: some View {
+        content()
+            .frame(width: width, height: height)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovering && isEnabled ? ChromePalette.toolbarHoverBackground : .clear)
+            )
+            .onHover { isHovering = $0 }
+    }
+}
+
+private struct RepoToolbarSplitHoverSurface<Content: View>: View {
     let width: CGFloat
     let height: CGFloat
     let isEnabled: Bool

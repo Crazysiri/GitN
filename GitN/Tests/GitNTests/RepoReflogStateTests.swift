@@ -25,7 +25,8 @@ final class RepoReflogStateTests: XCTestCase {
         )
         let state = RepoReflogState(
             currentBranch: "feature/demo",
-            commits: [existing],
+            isDetachedHead: false,
+            baseCommits: [existing],
             recoveredCommits: [recovered],
             visibleEntriesByCommitHash: [:],
             recoveryEntriesByCommitHash: [:],
@@ -82,7 +83,8 @@ final class RepoReflogStateTests: XCTestCase {
         )
         let state = RepoReflogState(
             currentBranch: "",
-            commits: [],
+            isDetachedHead: false,
+            baseCommits: [],
             recoveredCommits: [],
             visibleEntriesByCommitHash: [hash: [commit]],
             recoveryEntriesByCommitHash: [hash: [duplicateCheckout, checkout]],
@@ -127,7 +129,8 @@ final class RepoReflogStateTests: XCTestCase {
         )
         let state = RepoReflogState(
             currentBranch: "main",
-            commits: [
+            isDetachedHead: false,
+            baseCommits: [
                 CommitInfo.uncommittedEntry(parentHash: anchor.hash, stagedCount: 1, unstagedCount: 0),
                 anchor,
             ],
@@ -171,5 +174,58 @@ final class RepoReflogStateTests: XCTestCase {
         )
         XCTAssertEqual(state.displayCommit(matching: String(recoveredTip.hash.prefix(10)))?.hash, recoveredTip.hash)
         XCTAssertTrue(state.isRecoveredCommit(recoveredTip))
+    }
+
+    func testDisplayCommitsReturnsBaseCommitsWhenReflogOverlayIsDisabled() {
+        let existing = CommitInfo(
+            hash: String(repeating: "a", count: 40),
+            shortHash: "aaaaaaa",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "Existing",
+            refs: []
+        )
+        let recovered = CommitInfo(
+            hash: String(repeating: "b", count: 40),
+            shortHash: "bbbbbbb",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "Recovered",
+            refs: []
+        )
+        let state = RepoReflogState(
+            currentBranch: "main",
+            isDetachedHead: false,
+            baseCommits: [existing],
+            recoveredCommits: [recovered],
+            visibleEntriesByCommitHash: [:],
+            recoveryEntriesByCommitHash: [:],
+            showReflogOverlay: false,
+            allCommitsLoaded: true
+        )
+
+        XCTAssertEqual(state.displayCommits.map(\.hash), [existing.hash])
+    }
+
+    func testSourceOptionsOmitSyntheticBranchOptionWhileHeadIsDetached() {
+        let state = RepoReflogState(
+            currentBranch: "abc1234",
+            isDetachedHead: true,
+            baseCommits: [],
+            recoveredCommits: [],
+            visibleEntriesByCommitHash: [:],
+            recoveryEntriesByCommitHash: [:],
+            showReflogOverlay: false,
+            allCommitsLoaded: true
+        )
+
+        XCTAssertEqual(
+            state.sourceOptions,
+            [ReflogSourceOption(refName: "HEAD", title: "HEAD")]
+        )
     }
 }

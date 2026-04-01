@@ -40,6 +40,8 @@ struct DetailPanelView: View {
     @State private var measuredCommittedMetadataHeight: CGFloat = 0
     @State private var uncommittedInputHeight: CGFloat = LayoutDefaults.uncommittedInputHeight
     @State private var hoveredReflogLinkID: String?
+    @State private var isHoveringCommitHash = false
+    @State private var hoveredParentHash: String?
 
     // MARK: - Rubber-band selection (unstaged area)
     @State private var isRubberBanding = false
@@ -249,8 +251,32 @@ struct DetailPanelView: View {
             Text("commit:")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-            Text(commit.shortHash)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(commit.hash, forType: .string)
+                viewModel.showToast(title: "Commit copied", detail: commit.shortHash, style: .success)
+            } label: {
+                Text(commit.shortHash)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(isHoveringCommitHash ? Color.accentColor : .primary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(isHoveringCommitHash ? Color.accentColor.opacity(0.12) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(RoundedRectangle(cornerRadius: 4))
+            .hoverTooltip("Copy commit SHA")
+            .onHover { hovering in
+                isHoveringCommitHash = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
             Spacer()
             if isEditableCommit && isEditingMessage {
                 Button(action: {
@@ -431,9 +457,15 @@ struct DetailPanelView: View {
                 Spacer()
 
                 if !commit.parentHashes.isEmpty {
-                    Text("parent: \(commit.parentHashes.map { String($0.prefix(7)) }.joined(separator: ", "))")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Text(commit.parentHashes.count > 1 ? "parents:" : "parent:")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+
+                        ForEach(commit.parentHashes, id: \.self) { parentHash in
+                            parentCommitLink(parentHash)
+                        }
+                    }
                 }
             }
 
@@ -612,6 +644,45 @@ struct DetailPanelView: View {
             return Color.accentColor.opacity(0.12)
         }
         return Color.secondary.opacity(0.12)
+    }
+
+    @ViewBuilder
+    private func parentCommitLink(_ hash: String) -> some View {
+        let shortHash = String(hash.prefix(7))
+        let canNavigate = viewModel.canNavigateToCommit(hash: hash)
+        let isHovered = hoveredParentHash == hash
+
+        if canNavigate {
+            Button {
+                Task { await viewModel.navigateToCommit(hash: hash) }
+            } label: {
+                Text(shortHash)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(isHovered ? Color.accentColor : .secondary)
+                    .underline(isHovered)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(isHovered ? Color.accentColor.opacity(0.12) : Color.clear)
+                    )
+            }
+            .buttonStyle(.plain)
+            .contentShape(RoundedRectangle(cornerRadius: 3))
+            .hoverTooltip("Jump to \(shortHash)")
+            .onHover { hovering in
+                hoveredParentHash = hovering ? hash : nil
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+        } else {
+            Text(shortHash)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - Avatar Helpers

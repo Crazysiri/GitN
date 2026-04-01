@@ -47,7 +47,7 @@ struct SwiftTermView: NSViewRepresentable {
     let repoPath: String
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let termView = LocalProcessTerminalView(frame: .zero)
+        let termView = DropReceivingTerminalView(frame: .zero)
         termView.wantsLayer = true
         termView.processDelegate = context.coordinator
 
@@ -109,5 +109,63 @@ struct SwiftTermView: NSViewRepresentable {
 
         func processTerminated(source: TerminalView, exitCode: Int32?) {
         }
+    }
+}
+
+enum TerminalDropInsertionFormatter {
+    static func pastedText(for paths: [String]) -> String {
+        let escapedPaths = paths
+            .filter { !$0.isEmpty }
+            .map(shellEscape)
+
+        guard !escapedPaths.isEmpty else { return "" }
+        return escapedPaths.joined(separator: " ") + " "
+    }
+
+    static func shellEscape(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+private final class DropReceivingTerminalView: LocalProcessTerminalView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFilePaths(from: sender).isEmpty ? [] : .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        droppedFilePaths(from: sender).isEmpty ? [] : .copy
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        !droppedFilePaths(from: sender).isEmpty
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let paths = droppedFilePaths(from: sender)
+        let pastedText = TerminalDropInsertionFormatter.pastedText(for: paths)
+        guard !pastedText.isEmpty else { return false }
+
+        window?.makeFirstResponder(self)
+        send(txt: pastedText)
+        return true
+    }
+
+    private func droppedFilePaths(from draggingInfo: NSDraggingInfo) -> [String] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true
+        ]
+        let classes: [AnyClass] = [NSURL.self]
+        let urls = draggingInfo.draggingPasteboard.readObjects(forClasses: classes, options: options) as? [URL] ?? []
+        return urls.map(\.path)
     }
 }

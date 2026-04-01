@@ -222,6 +222,7 @@ final class CommitWalker: @unchecked Sendable {
         git_revwalk_push_glob(w, "refs/heads/*")
         git_revwalk_push_glob(w, "refs/remotes/*")
         git_revwalk_push_glob(w, "refs/tags/*")
+        git_revwalk_push_head(w)
     }
 
     deinit {
@@ -436,12 +437,17 @@ actor GitService {
         return oidToHash(oid)
     }
 
-    /// Returns the set of commit hashes reachable from HEAD (i.e. on the current branch).
-    func commitHashesOnCurrentBranch() async -> Set<String> {
-        guard let output = try? await runGitOutput(["rev-list", "HEAD"]) else {
+    /// Returns the set of commit hashes reachable from the given revision.
+    func commitHashes(reachableFrom revision: String) async -> Set<String> {
+        guard let output = try? await runGitOutput(["rev-list", revision]) else {
             return []
         }
         return Set(output.components(separatedBy: "\n").filter { !$0.isEmpty })
+    }
+
+    /// Returns the set of commit hashes reachable from HEAD (i.e. on the current branch).
+    func commitHashesOnCurrentBranch() async -> Set<String> {
+        await commitHashes(reachableFrom: "HEAD")
     }
 
     func blameLines(at revision: String, path: String) async throws -> [Int: BlameLine] {

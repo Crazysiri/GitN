@@ -131,6 +131,13 @@ struct ReflogSourceOption: Identifiable, Equatable {
     var id: String { refName }
 }
 
+enum GraphDisplayMode: String, CaseIterable, Equatable {
+    case all
+    case current
+
+    var title: String { rawValue }
+}
+
 enum DiffChangeKind: Sendable, Equatable {
     case added
     case deleted

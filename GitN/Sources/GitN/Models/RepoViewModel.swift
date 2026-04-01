@@ -138,6 +138,17 @@ final class RepoViewModel {
     var commits: [CommitInfo] = []
     private(set) var headCommitHash: String?
     private(set) var currentBranchHashes: Set<String> = []
+    var graphDisplayMode: GraphDisplayMode = .all {
+        didSet {
+            guard oldValue != graphDisplayMode else { return }
+            UserDefaults.standard.set(graphDisplayMode.rawValue, forKey: "GitN.graphDisplayMode.\(repoPath)")
+            Task {
+                await ensureCurrentGraphCommitsAreLoaded()
+                syncSelectionWithGraphDisplay()
+            }
+            syncSelectionWithGraphDisplay()
+        }
+    }
     var showReflogOverlay = false {
         didSet {
             UserDefaults.standard.set(showReflogOverlay, forKey: "GitN.showReflogOverlay.\(repoPath)")
@@ -160,6 +171,15 @@ final class RepoViewModel {
     var reflogRecoveredCommits: [CommitInfo] = []
     var reflogRecoveryEntriesByCommitHash: [String: [ReflogEntryInfo]] = [:]
 
+    private var baseGraphCommits: [CommitInfo] {
+        switch graphDisplayMode {
+        case .all:
+            return commits
+        case .current:
+            return commits.filter { $0.isUncommitted || currentBranchHashes.contains($0.hash) }
+        }
+    }
+
     var graphDisplayCommits: [CommitInfo] {
         reflogState.displayCommits
     }
@@ -168,7 +188,8 @@ final class RepoViewModel {
     private var commitWalker: CommitWalker?
     private(set) var allCommitsLoaded = false
     private(set) var isLoadingMore = false
-    private let commitPageSize = 2000
+    private let commitPageSize: Int
+    private var isEnsuringCurrentGraphVisibility = false
 
     var selectedCommit: CommitInfo?
     var selectedStash: StashInfo?
@@ -424,6 +445,54 @@ final class RepoViewModel {
         selectedDiffVisualContent = nil
         selectedFilePaths = []
         selectedFileListContext = nil
+    }
+
+    private func syncSelectionWithGraphDisplay() {
+        guard let selectedCommit,
+              !selectedCommit.isUncommitted,
+              !graphDisplayCommits.contains(where: { $0.hash == selectedCommit.hash }) else { return }
+        guard !canCurrentGraphRevealCommitLater(hash: selectedCommit.hash) else { return }
+        clearDetailSelection()
+    }
+
+    private func normalizeGraphDisplayMode() {
+        guard graphDisplayMode == .current, isDetachedHead else { return }
+        graphDisplayMode = .all
+    }
+
+    private func ensureCommitVisibleForNavigation(hash: String) {
+        guard graphDisplayMode == .current else { return }
+        guard !graphDisplayCommits.contains(where: { RepoReflogState.matches($0, hash: hash) }) else { return }
+        guard !currentBranchContains(hash: hash) else { return }
+        graphDisplayMode = .all
+    }
+
+    func ensureCurrentGraphCommitsAreLoaded() async {
+        guard graphDisplayMode == .current, !isEnsuringCurrentGraphVisibility else { return }
+        isEnsuringCurrentGraphVisibility = true
+        defer { isEnsuringCurrentGraphVisibility = false }
+
+        while !hasVisibleCurrentBranchCommit, !allCommitsLoaded {
+            let previousCommitCount = commits.count
+            await loadMoreCommits()
+            guard commits.count > previousCommitCount else { break }
+        }
+    }
+
+    private var hasVisibleCurrentBranchCommit: Bool {
+        graphDisplayCommits.contains { !$0.isUncommitted && currentBranchHashes.contains($0.hash) }
+    }
+
+    private func canCurrentGraphRevealCommitLater(hash: String) -> Bool {
+        graphDisplayMode == .current && !allCommitsLoaded && currentBranchContains(hash: hash)
+    }
+
+    private func currentBranchContains(hash: String) -> Bool {
+        currentBranchHashes.contains { $0 == hash || $0.hasPrefix(hash) || hash.hasPrefix($0) }
+    }
+
+    func setCurrentBranchHashesForTesting(_ hashes: Set<String>) {
+        currentBranchHashes = hashes
     }
 
     func setFileInspectorMode(_ mode: FileInspectorMode) async {
@@ -1831,14 +1900,18 @@ final class RepoViewModel {
         codeHostingProvider.mergeActionTitle
     }
 
-    init(path: String, name: String) {
+    init(path: String, name: String, commitPageSize: Int = 2000) {
         self.repoPath = path
         self.repoName = name
+        self.commitPageSize = commitPageSize
         let gitService = GitService(repoPath: path)
         self.git = gitService
         self.reflogLoader = RepoReflogLoader(git: gitService)
         // 恢复上次 terminal 的打开状态
         self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
+        self.graphDisplayMode = GraphDisplayMode(
+            rawValue: UserDefaults.standard.string(forKey: "GitN.graphDisplayMode.\(path)") ?? GraphDisplayMode.all.rawValue
+        ) ?? .all
         self.showReflogOverlay = UserDefaults.standard.bool(forKey: "GitN.showReflogOverlay.\(path)")
         self.selectedReflogRef = UserDefaults.standard.string(forKey: "GitN.selectedReflogRef.\(path)") ?? "HEAD"
         loadCollapsedSections()
@@ -1854,7 +1927,8 @@ final class RepoViewModel {
     private var reflogState: RepoReflogState {
         RepoReflogState(
             currentBranch: currentBranch,
-            commits: commits,
+            isDetachedHead: isDetachedHead,
+            baseCommits: baseGraphCommits,
             recoveredCommits: reflogRecoveredCommits,
             visibleEntriesByCommitHash: reflogEntriesByCommitHash,
             recoveryEntriesByCommitHash: reflogRecoveryEntriesByCommitHash,
@@ -1884,6 +1958,7 @@ final class RepoViewModel {
     }
 
     func selectRecoveredCommit(_ commit: CommitInfo) async {
+        ensureCommitVisibleForNavigation(hash: commit.hash)
         if let existing = commits.first(where: { $0.hash == commit.hash }) {
             await revealCommit(hash: existing.hash)
             return
@@ -2005,7 +2080,9 @@ final class RepoViewModel {
             fileStatuses = sts
             let hc = try await git.headCommitHash()
             headCommitHash = hc
+            isDetachedHead = try await git.isDetachedHead()
             currentBranchHashes = await git.commitHashesOnCurrentBranch()
+            normalizeGraphDisplayMode()
 
             let hadUncommitted = commits.first?.isUncommitted == true
             let needsUncommitted = !sts.isEmpty || rebaseState != nil
@@ -2047,6 +2124,8 @@ final class RepoViewModel {
                     }
                 }
             }
+            syncSelectionWithGraphDisplay()
+            await ensureCurrentGraphCommitsAreLoaded()
         } catch {}
     }
 
@@ -2164,6 +2243,7 @@ final class RepoViewModel {
             headCommitHash = hc
             isDetachedHead = dh
             currentBranchHashes = await branchHashes
+            normalizeGraphDisplayMode()
             if selectedReflogRef != "HEAD", selectedReflogRef != "refs/heads/\(cb)" {
                 selectedReflogRef = "HEAD"
             }
@@ -2230,6 +2310,8 @@ final class RepoViewModel {
             }
 
             commits = loadedCommits
+            syncSelectionWithGraphDisplay()
+            await ensureCurrentGraphCommitsAreLoaded()
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -3524,6 +3606,7 @@ final class RepoViewModel {
     }
 
     private func revealCommit(hash: String) async {
+        ensureCommitVisibleForNavigation(hash: hash)
         scrollToCommitHash = hash
 
         if let commit = commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) }) {

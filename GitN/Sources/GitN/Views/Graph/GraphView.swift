@@ -17,11 +17,13 @@ struct GraphView: View {
     @State private var pendingRemoteBranchDelete: (remote: String, branch: String)?
     @State private var uncommittedScrolledAway = false
     @State private var isHoveringReflogToggle = false
+    @State private var isHoveringGraphMode = false
+    @State private var showGraphModeMenu = false
 
     private let rowHeight: CGFloat = 24
     private let columnWidth: CGFloat = 18
     private let avatarSize: CGFloat = 18
-    private let graphAreaWidth: CGFloat = 150
+    private let graphAreaWidth: CGFloat = 128
     private let refsColumnWidth: CGFloat = 86
 
     private var reflogToggleFill: Color {
@@ -36,6 +38,10 @@ struct GraphView: View {
             return ChromePalette.reflogToggleBorder
         }
         return isHoveringReflogToggle ? ChromePalette.chromeButtonHoverBorder : ChromePalette.chromeButtonBorder
+    }
+
+    private var graphModeFill: Color {
+        isHoveringGraphMode ? ChromePalette.chromeButtonHoverFill : .clear
     }
 
     var body: some View {
@@ -97,7 +103,7 @@ struct GraphView: View {
                         showReflogOverlay: viewModel.showReflogOverlay,
                         reflogEntries: viewModel.reflogEntries,
                         reflogBadgeEntriesByCommitHash: viewModel.reflogBadgeEntriesByCommitHash,
-                        recoveredCommitHashes: Set(viewModel.reflogRecoveredCommits.map(\.hash)),
+                        recoveredCommitHashes: viewModel.showReflogOverlay ? Set(viewModel.reflogRecoveredCommits.map(\.hash)) : [],
                         scrollToHash: viewModel.scrollToCommitHash,
                         allCommitsLoaded: viewModel.allCommitsLoaded,
                         rowHeight: rowHeight,
@@ -214,11 +220,57 @@ struct GraphView: View {
                 .frame(width: refsColumnWidth, alignment: .leading)
                 .padding(.leading, 8)
             Divider().frame(height: 12)
-            Text("Graph")
-                .frame(width: graphAreaWidth, alignment: .leading)
-                .padding(.leading, 6)
+            Button {
+                showGraphModeMenu.toggle()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .scaleEffect(x: 0.82, y: 1.0)
+                        .foregroundStyle(.secondary)
+                    Text("Graph(\(viewModel.graphDisplayMode.title))")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: graphAreaWidth - 10, alignment: .leading)
+                .padding(.leading, 4)
+                .padding(.trailing, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(graphModeFill)
+                )
+            }
+            .buttonStyle(.plain)
+            .onHover { isHoveringGraphMode = $0 }
+            .popover(isPresented: $showGraphModeMenu, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(GraphDisplayMode.allCases, id: \.self) { mode in
+                        Button {
+                            viewModel.graphDisplayMode = mode
+                            showGraphModeMenu = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(mode.title)
+                                Spacer(minLength: 8)
+                                if mode == viewModel.graphDisplayMode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                    }
+                }
+                .padding(8)
+                .frame(width: 170)
+            }
             Divider().frame(height: 12)
-            Text("Commit Message")
+            Text("Commit")
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 6)
 
@@ -232,8 +284,9 @@ struct GraphView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(width: 110)
+                .frame(width: 80)
                 .controlSize(.small)
+                .padding(.trailing, 4)
             }
 
             Toggle(isOn: Binding(
@@ -256,13 +309,9 @@ struct GraphView: View {
                     .strokeBorder(reflogToggleBorder, lineWidth: 0.75)
             )
             .onHover { isHoveringReflogToggle = $0 }
-            .hoverTooltip(
-                "Use git reflog to show recent ref\nmoves and recovered commits",
-                placement: .below
-            )
             .padding(.trailing, 8)
         }
-        .font(.system(size: 10, weight: .medium))
+        .font(.system(size: 10, weight: .semibold))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -761,7 +810,7 @@ struct CommitTableView: NSViewRepresentable {
             cell.isSelectedRow = selectedRowHashes.contains(commit.hash)
             cell.currentBranch = currentBranch
             cell.isInConflict = commit.isUncommitted && hasUnresolvedConflicts
-            cell.isRecoveredRow = recoveredCommitHashes.contains(commit.hash)
+            cell.isRecoveredRow = showReflogOverlay && recoveredCommitHashes.contains(commit.hash)
             cell.showReflogOverlay = showReflogOverlay
             cell.reflogBadgeEntries = reflogBadgeEntriesByCommitHash[commit.hash] ?? []
             cell.rowHeight = rowHeight

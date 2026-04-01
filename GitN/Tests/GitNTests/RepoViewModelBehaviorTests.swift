@@ -184,6 +184,312 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         )
     }
 
+    func testGraphDisplayModeCurrentFiltersToCurrentBranchHashesAndKeepsUncommitted() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let visible = CommitInfo(
+            hash: String(repeating: "1", count: 40),
+            shortHash: "1111111",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "visible",
+            refs: []
+        )
+        let hidden = CommitInfo(
+            hash: String(repeating: "2", count: 40),
+            shortHash: "2222222",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "hidden",
+            refs: []
+        )
+
+        viewModel.commits = [
+            CommitInfo.uncommittedEntry(parentHash: visible.hash, stagedCount: 1, unstagedCount: 0),
+            visible,
+            hidden,
+        ]
+        viewModel.setCurrentBranchHashesForTesting([visible.hash])
+        viewModel.graphDisplayMode = .current
+
+        XCTAssertEqual(
+            viewModel.graphDisplayCommits.map(\.hash),
+            [CommitInfo.uncommittedHash, visible.hash]
+        )
+    }
+
+    func testChangingGraphDisplayModeClearsSelectionForCommitOutsideVisibleScope() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let visible = CommitInfo(
+            hash: String(repeating: "1", count: 40),
+            shortHash: "1111111",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "visible",
+            refs: []
+        )
+        let hidden = CommitInfo(
+            hash: String(repeating: "2", count: 40),
+            shortHash: "2222222",
+            parentHashes: [],
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-03-29",
+            message: "hidden",
+            refs: []
+        )
+
+        viewModel.commits = [visible, hidden]
+        viewModel.setCurrentBranchHashesForTesting([visible.hash])
+        viewModel.selectedCommit = hidden
+        viewModel.selectedDiffFile = DiffFile(additions: 1, deletions: 0, path: "tracked.txt")
+        viewModel.fileDiffContent = "diff"
+        viewModel.selectedFilePaths = ["tracked.txt"]
+        viewModel.selectedFileListContext = .committed
+
+        viewModel.graphDisplayMode = .current
+
+        XCTAssertNil(viewModel.selectedCommit)
+        XCTAssertNil(viewModel.selectedDiffFile)
+        XCTAssertEqual(viewModel.fileDiffContent, "")
+        XCTAssertTrue(viewModel.selectedFilePaths.isEmpty)
+        XCTAssertNil(viewModel.selectedFileListContext)
+    }
+
+    func testCurrentGraphModeLoadsAdditionalPagesWhenFirstPageHasNoCurrentBranchCommits() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let initialHash = try repo.commitAll(
+            message: "initial",
+            environment: gitDateEnv("2026-01-01T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "-b", "feature"])
+        try repo.writeFile("file.txt", contents: "feature\n")
+        let featureHash = try repo.commitAll(
+            message: "feature",
+            environment: gitDateEnv("2026-01-02T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("file.txt", contents: "main 1\n")
+        _ = try repo.commitAll(
+            message: "main-1",
+            environment: gitDateEnv("2026-01-03T00:00:00Z")
+        )
+        try repo.writeFile("file.txt", contents: "main 2\n")
+        _ = try repo.commitAll(
+            message: "main-2",
+            environment: gitDateEnv("2026-01-04T00:00:00Z")
+        )
+        try repo.writeFile("file.txt", contents: "main 3\n")
+        let newestMainHash = try repo.commitAll(
+            message: "main-3",
+            environment: gitDateEnv("2026-01-05T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "feature"])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+
+        XCTAssertEqual(viewModel.currentBranch, "feature")
+        XCTAssertEqual(viewModel.commits.map(\.hash), [newestMainHash])
+        XCTAssertFalse(viewModel.commits.contains(where: { $0.hash == featureHash }))
+        XCTAssertFalse(viewModel.commits.contains(where: { $0.hash == initialHash }))
+
+        viewModel.graphDisplayMode = .current
+        await viewModel.ensureCurrentGraphCommitsAreLoaded()
+
+        XCTAssertFalse(viewModel.graphDisplayCommits.isEmpty)
+        XCTAssertEqual(viewModel.graphDisplayCommits.first?.hash, featureHash)
+        XCTAssertTrue(viewModel.commits.contains(where: { $0.hash == featureHash }))
+    }
+
+    func testCurrentGraphModePreservesSelectedCommitWhilePagingInOlderCurrentBranchCommits() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "file\n")
+        let initialHash = try repo.commitAll(
+            message: "initial",
+            environment: gitDateEnv("2026-01-01T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "-b", "feature"])
+        try repo.writeFile("file.txt", contents: "feature\n")
+        let featureHash = try repo.commitAll(
+            message: "feature",
+            environment: gitDateEnv("2026-01-02T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("file.txt", contents: "main 1\n")
+        _ = try repo.commitAll(
+            message: "main-1",
+            environment: gitDateEnv("2026-01-03T00:00:00Z")
+        )
+        try repo.writeFile("file.txt", contents: "main 2\n")
+        _ = try repo.commitAll(
+            message: "main-2",
+            environment: gitDateEnv("2026-01-04T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "feature"])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+
+        XCTAssertFalse(viewModel.commits.contains(where: { $0.hash == featureHash }))
+
+        viewModel.selectedCommit = makeCommit(hash: featureHash, parentHashes: [initialHash], message: "feature")
+        viewModel.graphDisplayMode = .current
+        await viewModel.ensureCurrentGraphCommitsAreLoaded()
+
+        XCTAssertEqual(viewModel.selectedCommit?.hash, featureHash)
+        XCTAssertTrue(viewModel.graphDisplayCommits.contains(where: { $0.hash == featureHash }))
+    }
+
+    func testCurrentGraphModeLoadsPastUncommittedEntryWhenFirstPageHasNoCurrentBranchCommits() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        _ = try repo.commitAll(
+            message: "initial",
+            environment: gitDateEnv("2026-01-01T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "-b", "feature"])
+        try repo.writeFile("file.txt", contents: "feature\n")
+        let featureHash = try repo.commitAll(
+            message: "feature",
+            environment: gitDateEnv("2026-01-02T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("file.txt", contents: "main 1\n")
+        _ = try repo.commitAll(
+            message: "main-1",
+            environment: gitDateEnv("2026-01-03T00:00:00Z")
+        )
+        try repo.writeFile("file.txt", contents: "main 2\n")
+        _ = try repo.commitAll(
+            message: "main-2",
+            environment: gitDateEnv("2026-01-04T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "feature"])
+        try repo.appendFile("file.txt", contents: "dirty\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+        viewModel.graphDisplayMode = .current
+        await viewModel.ensureCurrentGraphCommitsAreLoaded()
+
+        XCTAssertEqual(viewModel.graphDisplayCommits.first?.hash, CommitInfo.uncommittedHash)
+        XCTAssertTrue(viewModel.graphDisplayCommits.contains(where: { $0.hash == featureHash }))
+    }
+
+    func testNavigateToHiddenCurrentBranchCommitKeepsCurrentGraphMode() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let firstHash = try repo.commitAll(message: "first")
+        try repo.writeFile("file.txt", contents: "second\n")
+        _ = try repo.commitAll(message: "second")
+        try repo.writeFile("file.txt", contents: "third\n")
+        let thirdHash = try repo.commitAll(message: "third")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+        viewModel.graphDisplayMode = .current
+
+        XCTAssertEqual(viewModel.graphDisplayCommits.map(\.hash), [thirdHash])
+
+        await viewModel.navigateToCommit(hash: firstHash)
+
+        XCTAssertEqual(viewModel.graphDisplayMode, .current)
+        XCTAssertEqual(viewModel.selectedCommit?.hash, firstHash)
+        XCTAssertEqual(viewModel.scrollToCommitHash, firstHash)
+        XCTAssertTrue(viewModel.graphDisplayCommits.contains(where: { $0.hash == firstHash }))
+    }
+
+    func testNavigateToHiddenDetachedHeadCommitInCurrentModeSwitchesToAllBeforeNavigating() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let firstHash = try repo.commitAll(message: "first")
+        try repo.writeFile("file.txt", contents: "second\n")
+        let secondHash = try repo.commitAll(message: "second")
+        try repo.run(["checkout", firstHash])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        viewModel.graphDisplayMode = .current
+
+        XCTAssertEqual(viewModel.graphDisplayCommits.map(\.hash), [firstHash])
+
+        await viewModel.navigateToCommit(hash: secondHash)
+
+        XCTAssertEqual(viewModel.graphDisplayMode, .all)
+        XCTAssertEqual(viewModel.selectedCommit?.hash, secondHash)
+        XCTAssertEqual(viewModel.graphDisplayCommits.map(\.hash), [secondHash, firstHash])
+        XCTAssertEqual(viewModel.scrollToCommitHash, secondHash)
+    }
+
+    func testLoadAllIncludesDetachedHeadOnlyCommitInGraph() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let initialHash = try repo.commitAll(message: "first")
+        try repo.run(["checkout", initialHash])
+        try repo.writeFile("file.txt", contents: "detached\n")
+        let detachedHash = try repo.commitAll(message: "detached")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        XCTAssertTrue(viewModel.isDetachedHead)
+        XCTAssertEqual(viewModel.currentBranch, String(detachedHash.prefix(7)))
+        XCTAssertEqual(viewModel.commits.first?.hash, detachedHash)
+    }
+
+    func testLoadAllSwitchesCurrentGraphModeToAllWhenHeadIsDetached() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let initialHash = try repo.commitAll(message: "first")
+        try repo.writeFile("file.txt", contents: "second\n")
+        _ = try repo.commitAll(message: "second")
+        try repo.run(["checkout", initialHash])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        viewModel.graphDisplayMode = .current
+
+        await viewModel.loadAll()
+
+        XCTAssertTrue(viewModel.isDetachedHead)
+        XCTAssertEqual(viewModel.graphDisplayMode, .all)
+    }
+
+    func testNavigateToShortDetachedHeadHashSelectsHeadCommit() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "base\n")
+        let initialHash = try repo.commitAll(message: "first")
+        try repo.run(["checkout", initialHash])
+        try repo.writeFile("file.txt", contents: "detached\n")
+        let detachedHash = try repo.commitAll(message: "detached")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        XCTAssertTrue(viewModel.isDetachedHead)
+        XCTAssertEqual(viewModel.currentBranch, String(detachedHash.prefix(7)))
+
+        await viewModel.navigateToCommit(hash: viewModel.currentBranch)
+
+        XCTAssertEqual(viewModel.selectedCommit?.hash, detachedHash)
+        XCTAssertEqual(viewModel.scrollToCommitHash, detachedHash)
+    }
+
     func testLoadAllPrependsUncommittedEntryForDirtyRepository() async {
         let repo = try! TemporaryGitRepository()
         try! repo.writeFile("tracked.txt", contents: "one\n")
@@ -521,5 +827,25 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         await viewModel.checkForRebaseConflict(errorMessage: nil)
 
         XCTAssertNil(viewModel.toastMessage, "No toast should appear when there is no error message")
+    }
+
+    private func makeCommit(hash: String, parentHashes: [String] = [], message: String) -> CommitInfo {
+        CommitInfo(
+            hash: hash,
+            shortHash: String(hash.prefix(7)),
+            parentHashes: parentHashes,
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            date: "2026-04-01",
+            message: message,
+            refs: []
+        )
+    }
+
+    private func gitDateEnv(_ iso8601: String) -> [String: String] {
+        [
+            "GIT_AUTHOR_DATE": iso8601,
+            "GIT_COMMITTER_DATE": iso8601
+        ]
     }
 }

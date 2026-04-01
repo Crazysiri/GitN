@@ -2,15 +2,32 @@
 
 set -euo pipefail
 
+is_sparkle_bin_dir() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 1
+    [ -f "${candidate}/generate_appcast" ] && [ -x "${candidate}/generate_appcast" ]
+}
+
+resolve_sparkle_bin_candidate() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 1
+
+    if is_sparkle_bin_dir "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    if is_sparkle_bin_dir "${candidate}/bin"; then
+        printf '%s\n' "${candidate}/bin"
+        return 0
+    fi
+
+    return 1
+}
+
 resolve_sparkle_bin_dir() {
     if [ -n "${SPARKLE_BIN_DIR:-}" ]; then
-        if [ -f "${SPARKLE_BIN_DIR}/generate_appcast" ] && [ -x "${SPARKLE_BIN_DIR}/generate_appcast" ]; then
-            printf '%s\n' "$SPARKLE_BIN_DIR"
-            return 0
-        fi
-
-        if [ -f "${SPARKLE_BIN_DIR}/bin/generate_appcast" ] && [ -x "${SPARKLE_BIN_DIR}/bin/generate_appcast" ]; then
-            printf '%s\n' "${SPARKLE_BIN_DIR}/bin"
+        if resolve_sparkle_bin_candidate "${SPARKLE_BIN_DIR}"; then
             return 0
         fi
     fi
@@ -22,16 +39,15 @@ resolve_sparkle_bin_dir() {
 
     for candidate in \
         "${project_dir}/.build/artifacts/sparkle/Sparkle/bin" \
+        "${project_dir}/.build/artifacts/sparkle/Sparkle" \
+        "${project_dir}/.build/artifacts/sparkle/bin" \
+        "${project_dir}/.build/checkouts/sparkle" \
         "${project_dir}/.build/checkouts/Sparkle" \
+        "${project_dir}/.build/checkouts/sparkle/bin" \
+        "${project_dir}/.build/checkouts/Sparkle/bin" \
         "/Applications/Sparkle/bin"
     do
-        if [ -f "${candidate}/generate_appcast" ] && [ -x "${candidate}/generate_appcast" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-
-        if [ -f "${candidate}/bin/generate_appcast" ] && [ -x "${candidate}/bin/generate_appcast" ]; then
-            printf '%s\n' "${candidate}/bin"
+        if resolve_sparkle_bin_candidate "$candidate"; then
             return 0
         fi
     done
@@ -51,6 +67,7 @@ Unable to locate Sparkle tools.
 
 Set SPARKLE_BIN_DIR explicitly, or let the script auto-detect one of:
 - GitN/.build/artifacts/sparkle/Sparkle/bin
+- GitN/.build/checkouts/sparkle
 - GitN/.build/checkouts/Sparkle
 - /Applications/Sparkle/bin
 EOF

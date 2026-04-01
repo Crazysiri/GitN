@@ -2,7 +2,8 @@ import Foundation
 
 struct RepoReflogState {
     let currentBranch: String
-    let commits: [CommitInfo]
+    let isDetachedHead: Bool
+    let baseCommits: [CommitInfo]
     let recoveredCommits: [CommitInfo]
     let visibleEntriesByCommitHash: [String: [ReflogEntryInfo]]
     let recoveryEntriesByCommitHash: [String: [ReflogEntryInfo]]
@@ -11,7 +12,7 @@ struct RepoReflogState {
 
     var sourceOptions: [ReflogSourceOption] {
         var options = [ReflogSourceOption(refName: "HEAD", title: "HEAD")]
-        if !currentBranch.isEmpty {
+        if !isDetachedHead, !currentBranch.isEmpty {
             options.append(ReflogSourceOption(refName: "refs/heads/\(currentBranch)", title: currentBranch))
         }
         return options
@@ -44,16 +45,16 @@ struct RepoReflogState {
     }
 
     var displayCommits: [CommitInfo] {
-        guard showReflogOverlay, !recoveredCommits.isEmpty else { return commits }
+        guard showReflogOverlay, !recoveredCommits.isEmpty else { return baseCommits }
 
         let pinnedPrefix: [CommitInfo]
-        let baseCommits: [CommitInfo]
-        if let first = commits.first, first.isUncommitted {
+        let commitRows: [CommitInfo]
+        if let first = baseCommits.first, first.isUncommitted {
             pinnedPrefix = [first]
-            baseCommits = Array(commits.dropFirst())
+            commitRows = Array(baseCommits.dropFirst())
         } else {
             pinnedPrefix = []
-            baseCommits = commits
+            commitRows = baseCommits
         }
 
         let recoveredByHash = Dictionary(uniqueKeysWithValues: recoveredCommits.map { ($0.hash, $0) })
@@ -110,7 +111,7 @@ struct RepoReflogState {
         if let rootChains = chainsByAnchor["__root__"] {
             result.append(contentsOf: rootChains.flatMap { $0 })
         }
-        for commit in baseCommits {
+        for commit in commitRows {
             if let anchoredChains = chainsByAnchor[commit.hash] {
                 result.append(contentsOf: anchoredChains.flatMap { $0 })
             }
@@ -121,7 +122,7 @@ struct RepoReflogState {
 
     func canNavigateToCommit(hash: String?) -> Bool {
         guard let hash, !hash.isEmpty else { return false }
-        if commits.contains(where: { Self.matches($0, hash: hash) }) ||
+        if baseCommits.contains(where: { Self.matches($0, hash: hash) }) ||
             recoveredCommits.contains(where: { Self.matches($0, hash: hash) }) {
             return true
         }

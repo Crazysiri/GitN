@@ -79,9 +79,9 @@ final class TemporaryGitRepository {
     }
 
     @discardableResult
-    func commitAll(message: String) throws -> String {
+    func commitAll(message: String, environment: [String: String] = [:]) throws -> String {
         try run(["add", "."])
-        try run(["commit", "-m", message])
+        try run(["commit", "-m", message], environment: environment)
         return try headHash()
     }
 

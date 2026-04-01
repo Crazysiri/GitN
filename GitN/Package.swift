@@ -8,10 +8,10 @@ let package = Package(
         .executable(name: "GitN", targets: ["GitN"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/appstefan/highlightswift.git", from: "1.1.0"),
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
-        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.0"),
-        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.9.0"),
+        .package(url: "https://github.com/appstefan/highlightswift.git", exact: "1.1.0"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.11.2"),
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", exact: "2.4.1"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", exact: "2.9.1"),
     ],
     targets: [
         // libgit2 compiled from source located at Sources/Clibgit2/libgit2.

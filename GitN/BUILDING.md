@@ -130,6 +130,7 @@ You usually do not need to set `SPARKLE_BIN_DIR` manually.
 The scripts auto-detect Sparkle tools from:
 
 - `GitN/.build/artifacts/sparkle/Sparkle/bin`
+- `GitN/.build/checkouts/sparkle`
 - `GitN/.build/checkouts/Sparkle`
 - `/Applications/Sparkle/bin`
 
