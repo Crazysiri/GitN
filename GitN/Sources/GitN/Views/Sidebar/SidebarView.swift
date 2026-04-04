@@ -3,6 +3,9 @@ import SwiftUI
 struct SidebarView: View {
     let viewModel: RepoViewModel
 
+    private static let animatedSectionItemLimit = 60
+    private static let animatedRemoteDisclosureItemLimit = 120
+
     @State private var showAddRemote = false
     @State private var newRemoteName = ""
     @State private var newRemoteURL = ""
@@ -33,6 +36,7 @@ struct SidebarView: View {
     @State private var showMergeConfirm = false
     @State private var mergingMR: CodeReviewItem?
 
+    @State private var collapsedRemotes: Set<String> = []
     @State private var collapsedLocalFolders: Set<String> = []
     @State private var collapsedRemoteFolders: Set<String> = []
 
@@ -46,10 +50,57 @@ struct SidebarView: View {
 
     @State private var stashPendingDrop: StashInfo?
 
+    private var localBranchesSectionShouldAnimate: Bool {
+        viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0) <= Self.animatedSectionItemLimit
+    }
+
+    private var remoteSectionShouldAnimate: Bool {
+        let remoteBranchCount = viewModel.remoteBranchGroups.values.reduce(0) { $0 + $1.count }
+        return remoteBranchCount + viewModel.remotes.count <= Self.animatedSectionItemLimit
+    }
+
+    private var tagsSectionShouldAnimate: Bool {
+        viewModel.tags.count <= Self.animatedSectionItemLimit
+    }
+
+    private var stashesSectionShouldAnimate: Bool {
+        viewModel.stashes.count <= Self.animatedSectionItemLimit
+    }
+
+    private var submodulesSectionShouldAnimate: Bool {
+        viewModel.submodules.count <= Self.animatedSectionItemLimit
+    }
+
+    private func remoteDisclosureShouldAnimate(_ remoteName: String) -> Bool {
+        (viewModel.remoteBranchGroups[remoteName]?.count ?? 0) <= Self.animatedRemoteDisclosureItemLimit
+    }
+
+    private func isRemoteCollapsed(_ remoteName: String) -> Bool {
+        collapsedRemotes.contains(remoteName)
+    }
+
+    private func toggleRemoteDisclosure(_ remoteName: String, animate: Bool) {
+        let update = {
+            if collapsedRemotes.contains(remoteName) {
+                collapsedRemotes.remove(remoteName)
+            } else {
+                collapsedRemotes.insert(remoteName)
+            }
+        }
+
+        if animate {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                update()
+            }
+        } else {
+            update()
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
+                LazyVStack(alignment: .leading, spacing: 2) {
                     localBranchesSection
                     remotesSection
                     tagsSection
@@ -479,7 +530,8 @@ struct SidebarView: View {
             icon: "arrow.triangle.branch",
             count: viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0),
             isCollapsed: viewModel.isSectionCollapsed("local"),
-            onToggle: { viewModel.toggleSection("local") }
+            onToggle: { viewModel.toggleSection("local") },
+            animateCollapse: localBranchesSectionShouldAnimate
         ) {
             // Detached HEAD indicator
             if viewModel.isDetachedHead {
@@ -512,7 +564,7 @@ struct SidebarView: View {
                     }
                     .contextMenu {
                         localBranchContextMenu(branch)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.Sidebar.contextMenu)
                     }
                 } else {
                     BranchGroupRow(
@@ -541,72 +593,85 @@ struct SidebarView: View {
             count: viewModel.remotes.count,
             isCollapsed: viewModel.isSectionCollapsed("remote"),
             onToggle: { viewModel.toggleSection("remote") },
+            animateCollapse: remoteSectionShouldAnimate,
             onAdd: { showAddRemote = true }
         ) {
             ForEach(viewModel.remotes) { remote in
-                DisclosureGroup {
-                    let branches = viewModel.remoteBranchGroups[remote.name] ?? []
-                    let remoteTree = makeBranchTree(branches: branches, prefix: remote.name)
-                    let remoteFlat = flattenBranchTree(remoteTree, depth: 0, collapsedFolders: collapsedRemoteFolders)
-                    ForEach(remoteFlat) { node in
-                        if let branch = node.branchInfo {
-                            SidebarBranchRow(
-                                name: node.displayName,
-                                isCurrent: false,
-                                icon: "arrow.triangle.branch",
-                                indentDepth: node.depth
-                            )
-                            .padding(.leading, 8)
-                            .onTapGesture(count: 2) {
-                                Task { await viewModel.performCheckoutBranch(branch.name) }
+                let shouldAnimate = remoteDisclosureShouldAnimate(remote.name)
+                let isCollapsed = isRemoteCollapsed(remote.name)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    SidebarRemoteDisclosureRow(
+                        name: remote.name,
+                        isCollapsed: isCollapsed,
+                        onToggle: {
+                            toggleRemoteDisclosure(remote.name, animate: shouldAnimate)
+                        }
+                    )
+                    .padding(.leading, 24)
+                    .contextMenu {
+                        Group {
+                            Button {
+                                editingRemote = remote
+                                editRemoteName = remote.name
+                                editRemoteURL = remote.url
+                                showEditRemote = true
+                            } label: {
+                                Label("Edit Remote…", systemImage: "pencil")
                             }
-                            .onTapGesture {
-                                Task { await viewModel.scrollToCommitForBranch(branch) }
+                            Divider()
+                            Button(role: .destructive) {
+                                Task { await viewModel.performDeleteRemote(name: remote.name) }
+                            } label: {
+                                Label("Delete Remote", systemImage: "trash")
                             }
-                            .contextMenu {
-                                remoteBranchContextMenu(branch, remoteName: remote.name)
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                        } else {
-                            BranchGroupRow(
-                                name: node.displayName,
-                                isCollapsed: collapsedRemoteFolders.contains(node.fullPath),
-                                depth: node.depth
-                            )
-                            .padding(.leading, 8)
-                            .onTapGesture {
-                                if collapsedRemoteFolders.contains(node.fullPath) {
-                                    collapsedRemoteFolders.remove(node.fullPath)
+                        }
+                        .font(AppTypography.Sidebar.contextMenu)
+                    }
+
+                    if !isCollapsed {
+                        let branches = viewModel.remoteBranchGroups[remote.name] ?? []
+                        let remoteTree = makeBranchTree(branches: branches, prefix: remote.name)
+                        let remoteFlat = flattenBranchTree(remoteTree, depth: 0, collapsedFolders: collapsedRemoteFolders)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(remoteFlat) { node in
+                                if let branch = node.branchInfo {
+                                    SidebarBranchRow(
+                                        name: node.displayName,
+                                        isCurrent: false,
+                                        icon: "arrow.triangle.branch",
+                                        indentDepth: node.depth
+                                    )
+                                    .padding(.leading, 32)
+                                    .onTapGesture(count: 2) {
+                                        Task { await viewModel.performCheckoutBranch(branch.name) }
+                                    }
+                                    .onTapGesture {
+                                        Task { await viewModel.scrollToCommitForBranch(branch) }
+                                    }
+                                    .contextMenu {
+                                        remoteBranchContextMenu(branch, remoteName: remote.name)
+                                            .font(AppTypography.Sidebar.contextMenu)
+                                    }
                                 } else {
-                                    collapsedRemoteFolders.insert(node.fullPath)
+                                    BranchGroupRow(
+                                        name: node.displayName,
+                                        isCollapsed: collapsedRemoteFolders.contains(node.fullPath),
+                                        depth: node.depth
+                                    )
+                                    .padding(.leading, 32)
+                                    .onTapGesture {
+                                        if collapsedRemoteFolders.contains(node.fullPath) {
+                                            collapsedRemoteFolders.remove(node.fullPath)
+                                        } else {
+                                            collapsedRemoteFolders.insert(node.fullPath)
+                                        }
+                                    }
                                 }
                             }
                         }
+                        .transition(shouldAnimate ? .move(edge: .top).combined(with: .opacity) : .identity)
                     }
-                } label: {
-                    Label(remote.name, systemImage: "externaldrive.connected.to.line.below")
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                }
-                .padding(.leading, 24)
-                .contextMenu {
-                    Group {
-                        Button {
-                            editingRemote = remote
-                            editRemoteName = remote.name
-                            editRemoteURL = remote.url
-                            showEditRemote = true
-                        } label: {
-                            Label("Edit Remote…", systemImage: "pencil")
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            Task { await viewModel.performDeleteRemote(name: remote.name) }
-                        } label: {
-                            Label("Delete Remote", systemImage: "trash")
-                        }
-                    }
-                    .font(.system(size: 11, weight: .medium))
                 }
             }
         }
@@ -764,7 +829,8 @@ struct SidebarView: View {
             icon: "tag",
             count: viewModel.tags.count,
             isCollapsed: viewModel.isSectionCollapsed("tags"),
-            onToggle: { viewModel.toggleSection("tags") }
+            onToggle: { viewModel.toggleSection("tags") },
+            animateCollapse: tagsSectionShouldAnimate
         ) {
             ForEach(viewModel.tags, id: \.self) { tag in
                 SidebarTagRow(name: tag)
@@ -776,7 +842,7 @@ struct SidebarView: View {
                     }
                     .contextMenu {
                         tagContextMenu(tag)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.Sidebar.contextMenu)
                     }
             }
         }
@@ -790,7 +856,8 @@ struct SidebarView: View {
             icon: "tray",
             count: viewModel.stashes.count,
             isCollapsed: viewModel.isSectionCollapsed("stashes"),
-            onToggle: { viewModel.toggleSection("stashes") }
+            onToggle: { viewModel.toggleSection("stashes") },
+            animateCollapse: stashesSectionShouldAnimate
         ) {
             ForEach(viewModel.stashes) { stash in
                 SidebarStashRow(stash: stash)
@@ -810,7 +877,7 @@ struct SidebarView: View {
                                 stashPendingDrop = stash
                             }
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Sidebar.contextMenu)
                     }
             }
         }
@@ -824,7 +891,8 @@ struct SidebarView: View {
             icon: "shippingbox",
             count: viewModel.submodules.count,
             isCollapsed: viewModel.isSectionCollapsed("submodules"),
-            onToggle: { viewModel.toggleSection("submodules") }
+            onToggle: { viewModel.toggleSection("submodules") },
+            animateCollapse: submodulesSectionShouldAnimate
         ) {
             ForEach(viewModel.submodules) { sub in
                 Label(sub.name, systemImage: "shippingbox")
@@ -863,7 +931,7 @@ struct SidebarView: View {
                         Task { await viewModel.setMRFilter(filter) }
                     } label: {
                         Text(filter.displayName)
-                            .font(.system(size: 9, weight: viewModel.mrStateFilter == filter ? .bold : .regular))
+                            .font(.system(size: 10, weight: viewModel.mrStateFilter == filter ? .bold : .regular))
                             .foregroundStyle(viewModel.mrStateFilter == filter ? .white : .secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -892,7 +960,7 @@ struct SidebarView: View {
                 .padding(.vertical, 8)
             } else if let error = viewModel.mrError {
                 Text(error)
-                    .font(.system(size: 10))
+                    .font(AppTypography.Sidebar.row)
                     .foregroundStyle(.red)
                     .lineLimit(3)
                     .padding(.leading, 28)
@@ -900,7 +968,7 @@ struct SidebarView: View {
                     .padding(.vertical, 4)
             } else if viewModel.mergeRequests.isEmpty {
                 Text(viewModel.mergeRequestsEmptyStateText)
-                    .font(.caption)
+                    .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 28)
                     .padding(.vertical, 4)
@@ -909,7 +977,7 @@ struct SidebarView: View {
                     SidebarMRRow(mr: mr)
                         .contextMenu {
                             mrContextMenu(mr)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(AppTypography.Sidebar.contextMenu)
                         }
                         .onTapGesture(count: 2) {
                             viewModel.openMRInBrowser(mr)
@@ -960,6 +1028,7 @@ struct SidebarSection<Content: View>: View {
     let count: Int
     let isCollapsed: Bool
     let onToggle: () -> Void
+    let animateCollapse: Bool
     let onAdd: (() -> Void)?
     let onRefresh: (() -> Void)?
     @ViewBuilder let content: () -> Content
@@ -970,6 +1039,7 @@ struct SidebarSection<Content: View>: View {
         count: Int,
         isCollapsed: Bool,
         onToggle: @escaping () -> Void,
+        animateCollapse: Bool = true,
         onAdd: (() -> Void)? = nil,
         onRefresh: (() -> Void)? = nil,
         @ViewBuilder content: @escaping () -> Content
@@ -979,6 +1049,7 @@ struct SidebarSection<Content: View>: View {
         self.count = count
         self.isCollapsed = isCollapsed
         self.onToggle = onToggle
+        self.animateCollapse = animateCollapse
         self.onAdd = onAdd
         self.onRefresh = onRefresh
         self.content = content
@@ -987,23 +1058,31 @@ struct SidebarSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
-                Button(action: onToggle) {
+                Button(action: {
+                    if animateCollapse {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            onToggle()
+                        }
+                    } else {
+                        onToggle()
+                    }
+                }) {
                     HStack(spacing: 4) {
                         Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(AppTypography.Sidebar.sectionChevron)
                             .foregroundStyle(.tertiary)
                             .frame(width: 12)
 
                         Image(systemName: icon)
-                            .font(.caption2)
+                            .font(AppTypography.Sidebar.rowMeta)
                             .foregroundStyle(.secondary)
 
                         Text(title)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(AppTypography.Sidebar.sectionHeader)
                             .foregroundStyle(.secondary)
 
                         Text("\(count)")
-                            .font(.system(size: 9))
+                            .font(AppTypography.Sidebar.sectionCount)
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
@@ -1017,7 +1096,7 @@ struct SidebarSection<Content: View>: View {
                 if let onRefresh {
                     Button(action: onRefresh) {
                         Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(AppTypography.Sidebar.rowMetaStrong)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -1027,7 +1106,7 @@ struct SidebarSection<Content: View>: View {
                 if let onAdd {
                     Button(action: onAdd) {
                         Image(systemName: "plus")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(AppTypography.Sidebar.rowMetaStrong)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -1038,9 +1117,43 @@ struct SidebarSection<Content: View>: View {
             .padding(.vertical, 6)
 
             if !isCollapsed {
-                content()
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    content()
+                }
+                .transition(
+                    animateCollapse
+                        ? .move(edge: .top).combined(with: .opacity)
+                        : .identity
+                )
+                .clipped()
             }
         }
+    }
+}
+
+private struct SidebarRemoteDisclosureRow: View {
+    let name: String
+    let isCollapsed: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 6) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(AppTypography.Sidebar.sectionChevron)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 12)
+
+                Label(name, systemImage: "externaldrive.connected.to.line.below")
+                    .font(AppTypography.Sidebar.row)
+                    .foregroundStyle(.primary)
+
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .padding(.trailing, 8)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1064,12 +1177,12 @@ struct SidebarBranchRow: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.caption2)
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(isCurrent ? .green : (iconColor ?? .secondary))
 
             if let badge = badge {
                 Text(badge)
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .font(AppTypography.Sidebar.rowMonoStrong)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
@@ -1077,7 +1190,7 @@ struct SidebarBranchRow: View {
             }
 
             Text(name)
-                .font(.caption)
+                .font(AppTypography.Sidebar.row)
                 .fontWeight(isCurrent ? .semibold : .regular)
                 .foregroundStyle(branchNameColor)
                 .lineLimit(1)
@@ -1090,7 +1203,7 @@ struct SidebarBranchRow: View {
 
             if isCurrent {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.caption2)
+                    .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(.green)
             }
         }
@@ -1110,7 +1223,7 @@ struct SidebarBranchRow: View {
             if ahead > 0 {
                 HStack(spacing: 1) {
                     Text("\(ahead)")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .font(AppTypography.Sidebar.rowMono)
                     Image(systemName: "arrow.up")
                         .font(.system(size: 7, weight: .bold))
                 }
@@ -1119,7 +1232,7 @@ struct SidebarBranchRow: View {
             if behind > 0 {
                 HStack(spacing: 1) {
                     Text("\(behind)")
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .font(AppTypography.Sidebar.rowMono)
                     Image(systemName: "arrow.down")
                         .font(.system(size: 7, weight: .bold))
                 }
@@ -1137,25 +1250,25 @@ struct SidebarDetachedHeadRow: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "point.topleft.filled.down.to.point.bottomright.curvepath")
-                .font(.caption2)
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(.orange)
 
             Text("HEAD")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
                 .background(Capsule().fill(.orange.opacity(0.8)))
 
             Text(shortHash)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .font(AppTypography.Sidebar.rowMonoLarge)
                 .foregroundStyle(.primary)
                 .lineLimit(1)
 
             Spacer()
 
             Text("detached")
-                .font(.system(size: 9))
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(.tertiary)
                 .italic()
         }
@@ -1183,11 +1296,11 @@ struct SidebarMRRow: View {
             HStack(spacing: 5) {
                 // State icon
                 Image(systemName: mrStateIcon)
-                    .font(.caption2)
+                    .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(mrStateColor)
 
                 Text(mr.numberDisplay)
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .font(AppTypography.Sidebar.rowMonoStrong)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
@@ -1195,7 +1308,7 @@ struct SidebarMRRow: View {
 
                 if mr.isDraft {
                     Text("Draft")
-                        .font(.system(size: 8, weight: .medium))
+                        .font(AppTypography.Sidebar.rowMeta)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
@@ -1206,30 +1319,30 @@ struct SidebarMRRow: View {
 
                 if let author = mr.author {
                     Text(author.displayName)
-                        .font(.system(size: 9))
+                        .font(AppTypography.Sidebar.rowMeta)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
             }
 
             Text(mr.title)
-                .font(.caption)
+                .font(AppTypography.Sidebar.row)
                 .lineLimit(2)
                 .foregroundStyle(.primary)
 
             HStack(spacing: 4) {
                 Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 8))
+                    .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(.tertiary)
                 Text(mr.sourceBranch)
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(AppTypography.Sidebar.rowMono)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Image(systemName: "arrow.right")
                     .font(.system(size: 7))
                     .foregroundStyle(.tertiary)
                 Text(mr.targetBranch)
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(AppTypography.Sidebar.rowMono)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -1273,11 +1386,11 @@ struct SidebarTagRow: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "tag")
-                .font(.caption2)
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(.secondary)
             
             Text(name)
-                .font(.caption)
+                .font(AppTypography.Sidebar.row)
                 .lineLimit(1)
             
             Spacer()
@@ -1380,10 +1493,10 @@ struct BranchGroupRow: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 9)
             Image(systemName: "folder")
-                .font(.caption2)
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(.secondary)
             Text(name)
-                .font(.caption)
+                .font(AppTypography.Sidebar.row)
                 .foregroundStyle(.secondary)
             Spacer()
         }
@@ -1409,10 +1522,10 @@ struct SidebarStashRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(stash.message)
-                .font(.caption)
+                .font(AppTypography.Sidebar.row)
                 .lineLimit(1)
             Text(stash.index)
-                .font(.caption2)
+                .font(AppTypography.Sidebar.rowMeta)
                 .foregroundStyle(.secondary)
         }
         .padding(.leading, 28)

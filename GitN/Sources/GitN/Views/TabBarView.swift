@@ -52,7 +52,7 @@ struct TabBarView: View {
 
             Button(action: { appModel.showNewTabView() }) {
                 Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(AppTypography.Chrome.tabIcon)
                     .foregroundStyle(.secondary)
                     .frame(width: Layout.addButtonSize.width, height: Layout.addButtonSize.height)
                     .background(
@@ -92,7 +92,7 @@ struct TabBarView: View {
         appModel.tabs.map(idealWidth(for:))
     }
 
-    private static let tabLabelFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+    private static let tabLabelFont = AppTypography.Chrome.tabLabelNS
 
     private func idealWidth(for tab: RepoTab) -> CGFloat {
         let displayName = String(tab.name.prefix(Layout.maxVisibleCharacters))
@@ -137,10 +137,10 @@ struct FeaturesView: View {
             // Toolbar
             HStack(spacing: 12) {
                 Image(systemName: "sparkles.rectangle.stack")
-                    .font(.system(size: 13))
+                    .font(AppTypography.Chrome.toolbarTitle)
                     .foregroundStyle(.secondary)
                 Text("FEATURES.md")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(AppTypography.Chrome.toolbarTitle)
                 Spacer()
                 Button {
                     isPresented = false
@@ -195,11 +195,11 @@ struct TabItemView: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(AppTypography.Chrome.tabIcon)
                     .foregroundStyle(isSelected ? .primary : .secondary)
 
                 Text(tab.name)
-                    .font(.system(size: 12, weight: .regular))
+                    .font(AppTypography.Chrome.tabLabel)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .foregroundStyle(isSelected ? .primary : .secondary)
@@ -208,7 +208,7 @@ struct TabItemView: View {
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(AppTypography.Chrome.tabClose)
                         .foregroundStyle(closeIconColor)
                         .frame(width: 16, height: 16)
                         .background(

@@ -64,6 +64,9 @@ struct ContentView: View {
                 loadedTabIDs.insert(id)
             }
         }
+        .onChange(of: appModel.tabs.map(\.id)) { _, ids in
+            loadedTabIDs.formIntersection(Set(ids))
+        }
     }
 
     /// 判断一个 tab 是否需要渲染：已加载过 OR 当前正被选中

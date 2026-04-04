@@ -249,7 +249,7 @@ struct DetailPanelView: View {
         let _ = loadFullMessageIfNeeded(commit: commit)
         return HStack(spacing: 6) {
             Text("commit:")
-                .font(.system(size: 10))
+                .font(AppTypography.Detail.commitLabel)
                 .foregroundStyle(.secondary)
             Button {
                 NSPasteboard.general.clearContents()
@@ -257,7 +257,7 @@ struct DetailPanelView: View {
                 viewModel.showToast(title: "Commit copied", detail: commit.shortHash, style: .success)
             } label: {
                 Text(commit.shortHash)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(AppTypography.Detail.commitHash)
                     .foregroundStyle(isHoveringCommitHash ? Color.accentColor : .primary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -294,10 +294,10 @@ struct DetailPanelView: View {
                                 .scaleEffect(0.7)
                         } else {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 9))
+                                .font(AppTypography.Detail.caption)
                         }
                         Text("AI")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(AppTypography.Detail.captionMedium)
                     }
                     .foregroundStyle(.purple)
                     .padding(.horizontal, 6)
@@ -326,13 +326,13 @@ struct DetailPanelView: View {
                     CommitTitleField(
                         text: $editedTitle,
                         placeholder: "Title",
-                        font: .systemFont(ofSize: 11, weight: .semibold)
+                        font: AppTypography.Detail.titleFieldNS
                     )
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
 
                     Text("\(72 - editedTitle.count)")
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .foregroundStyle(editedTitle.count > 72 ? .red : .secondary)
                         .padding(.trailing, 6)
                 }
@@ -362,7 +362,7 @@ struct DetailPanelView: View {
                         Task { await viewModel.performEditCommitMessage(hash: commit.hash, newMessage: fullMessage) }
                     }) {
                         Text("Update Message")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.Detail.bodyMedium)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
@@ -379,7 +379,7 @@ struct DetailPanelView: View {
                         editedDescription = originalDescription
                     }) {
                         Text("Cancel")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.Detail.bodyMedium)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -390,7 +390,7 @@ struct DetailPanelView: View {
         } else {
             ScrollView(.vertical, showsIndicators: true) {
                 Text(fullCommitMessage.isEmpty ? commit.message : fullCommitMessage)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.Detail.messageTitle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(6)
             }
@@ -441,15 +441,15 @@ struct DetailPanelView: View {
                         .fill(avatarColor(for: commit.authorName))
                         .frame(width: 28, height: 28)
                     Text(avatarInitial(commit.authorName))
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(AppTypography.Detail.messageTitle)
                         .foregroundStyle(.white)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(commit.authorName)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Detail.bodyMedium)
                     Text("authored \(formattedDate(commit.date))")
-                        .font(.system(size: 10))
+                        .font(AppTypography.Detail.meta)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.leading, 6)
@@ -459,7 +459,7 @@ struct DetailPanelView: View {
                 if !commit.parentHashes.isEmpty {
                     HStack(spacing: 4) {
                         Text(commit.parentHashes.count > 1 ? "parents:" : "parent:")
-                            .font(.system(size: 10))
+                            .font(AppTypography.Detail.meta)
                             .foregroundStyle(.secondary)
 
                         ForEach(commit.parentHashes, id: \.self) { parentHash in
@@ -476,7 +476,7 @@ struct DetailPanelView: View {
             if commit.isMerge {
                 HStack(spacing: 4) {
                     Text("Merge")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.Detail.captionMedium)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(
@@ -503,19 +503,19 @@ struct DetailPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "tray")
-                    .font(.system(size: 10))
+                    .font(AppTypography.Detail.meta)
                     .foregroundStyle(.secondary)
                 Text("stash:")
-                    .font(.system(size: 10))
+                    .font(AppTypography.Detail.meta)
                     .foregroundStyle(.secondary)
                 Text(stash.index)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(AppTypography.Detail.monoStrong)
                 Spacer()
             }
             
             if !stash.message.isEmpty {
                 Text(stash.message)
-                    .font(.system(size: 11))
+                    .font(AppTypography.Detail.body)
                     .foregroundStyle(.primary)
                     .lineLimit(3)
             }
@@ -528,21 +528,21 @@ struct DetailPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 10))
+                    .font(AppTypography.Detail.meta)
                     .foregroundStyle(.secondary)
                 Text("Reflog")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppTypography.Detail.metaStrong)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(viewModel.selectedReflogRef == "HEAD" ? "HEAD" : RefBadgeHelper.displayName(viewModel.selectedReflogRef))
-                    .font(.system(size: 9))
+                    .font(AppTypography.Detail.caption)
                     .foregroundStyle(.tertiary)
             }
 
             ForEach(entries.prefix(4)) { entry in
                 HStack(alignment: .top, spacing: 6) {
-                    Text(entry.kind.label)
-                        .font(.system(size: 9, weight: .semibold))
+                        Text(entry.kind.label)
+                            .font(AppTypography.Detail.captionMedium)
                         .foregroundStyle(Color(nsColor: ReflogBadgeHelper.badgeColor(for: entry.kind)))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -553,12 +553,12 @@ struct DetailPanelView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(entry.message)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(AppTypography.Detail.bodyMedium)
                             .lineLimit(2)
                         reflogCommitLinkRow(entry)
                         if !entry.date.isEmpty {
                             Text(entry.date)
-                                .font(.system(size: 9))
+                                .font(AppTypography.Detail.caption)
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -579,7 +579,7 @@ struct DetailPanelView: View {
             )
 
             Text("->")
-                .font(.system(size: 9, design: .monospaced))
+                .font(AppTypography.Detail.mono)
                 .foregroundStyle(.tertiary)
 
             reflogCommitLink(
@@ -657,7 +657,7 @@ struct DetailPanelView: View {
                 Task { await viewModel.navigateToCommit(hash: hash) }
             } label: {
                 Text(shortHash)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(AppTypography.Detail.monoMedium)
                     .foregroundStyle(isHovered ? Color.accentColor : .secondary)
                     .underline(isHovered)
                     .padding(.horizontal, 4)
@@ -680,7 +680,7 @@ struct DetailPanelView: View {
             }
         } else {
             Text(shortHash)
-                .font(.system(size: 10, design: .monospaced))
+                .font(AppTypography.Detail.mono)
                 .foregroundStyle(.secondary)
         }
     }
@@ -709,7 +709,7 @@ struct DetailPanelView: View {
                 Image(systemName: "arrow.left.arrow.right")
                     .foregroundStyle(.purple)
                 Text("Comparing commit against working directory")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.Detail.messageTitle)
                 Spacer()
                 Button("Done") {
                     viewModel.exitCompareMode()
@@ -721,7 +721,7 @@ struct DetailPanelView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(commit.shortHash)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(
@@ -729,14 +729,14 @@ struct DetailPanelView: View {
                                 .fill(Color.purple.opacity(0.15))
                         )
                     Text(commit.message)
-                        .font(.system(size: 10))
+                        .font(AppTypography.Detail.meta)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Image(systemName: "arrow.right")
                     .foregroundStyle(.secondary)
                 Text("Working Directory")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AppTypography.Detail.metaStrong)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(
@@ -746,7 +746,7 @@ struct DetailPanelView: View {
             }
 
             Text("\(viewModel.diffFiles.count) file(s) changed")
-                .font(.system(size: 10))
+                .font(AppTypography.Detail.meta)
                 .foregroundStyle(.secondary)
         }
         .padding(10)
@@ -1486,7 +1486,7 @@ struct DetailPanelView: View {
             .buttonStyle(.plain)
 
             Text("\(title) (\(count))")
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppTypography.Detail.metaStrong)
                 .foregroundStyle(.secondary)
 
             Spacer()
@@ -1494,7 +1494,7 @@ struct DetailPanelView: View {
             if let onDiscard, count > 0 {
                 Button(action: onDiscard) {
                     Image(systemName: "trash")
-                        .font(.system(size: 10))
+                        .font(AppTypography.Detail.meta)
                         .foregroundStyle(.red.opacity(0.7))
                 }
                 .buttonStyle(.plain)
@@ -1617,10 +1617,10 @@ struct DetailPanelView: View {
                         .scaleEffect(0.7)
                 } else {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 9))
+                        .font(AppTypography.Detail.caption)
                 }
                 Text("AI")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(AppTypography.Detail.captionMedium)
             }
             .foregroundStyle(.purple)
             .padding(.horizontal, 6)
@@ -1646,7 +1646,7 @@ struct DetailPanelView: View {
             // Header: "Commit Message" + Amend checkbox + AI button
             HStack {
                 Text("Commit Message")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(AppTypography.Detail.sectionTitle)
                     .foregroundStyle(.primary)
                 Spacer()
                 Toggle(isOn: Binding(
@@ -1662,7 +1662,7 @@ struct DetailPanelView: View {
                     }
                 )) {
                     Text("Amend")
-                        .font(.system(size: 10))
+                        .font(AppTypography.Detail.meta)
                 }
                 .toggleStyle(.checkbox)
                 .controlSize(.small)
@@ -1681,13 +1681,13 @@ struct DetailPanelView: View {
                         set: { viewModel.commitSummary = $0 }
                     ),
                     placeholder: "Summary",
-                    font: .systemFont(ofSize: 11)
+                    font: AppTypography.Detail.titleFieldRegularNS
                 )
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
 
                 Text("\(72 - viewModel.commitSummary.count)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(AppTypography.Detail.mono)
                     .foregroundStyle(viewModel.commitSummary.count > 72 ? .red : .secondary)
                     .padding(.trailing, 6)
             }
@@ -1717,7 +1717,7 @@ struct DetailPanelView: View {
                     Task { await viewModel.stageAllFiles() }
                 }) {
                     Text("Stage all changes to commit")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Detail.bodyMedium)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -1730,7 +1730,7 @@ struct DetailPanelView: View {
                     Task { await viewModel.performCommit() }
                 }) {
                     Text(viewModel.isAmend ? "Amend Commit" : "Commit")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Detail.bodyMedium)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -1751,7 +1751,7 @@ struct DetailPanelView: View {
             .overlay(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
                     Text(placeholder)
-                        .font(.system(size: 11))
+                        .font(AppTypography.Detail.body)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, CommitMessageEditor.horizontalInset)
                         .padding(.top, CommitMessageEditor.verticalInset + 1)
@@ -1778,7 +1778,7 @@ struct DetailPanelView: View {
                         .foregroundStyle(.yellow)
                         .font(.system(size: 14))
                     Text(type.title)
-                        .font(.system(size: 12, weight: .bold))
+                        .font(AppTypography.Detail.messageTitle.weight(.bold))
                     Spacer()
                 }
 
@@ -1794,13 +1794,13 @@ struct DetailPanelView: View {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8))
                     Text("Conflicted Files (\(conflictedFiles.count))")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppTypography.Detail.sectionTitle.weight(.semibold))
                     Spacer()
                     if !conflictedFiles.isEmpty {
                         Button("Mark All Resolved") {
                             Task { await viewModel.markAllFilesResolved() }
                         }
-                        .font(.system(size: 9, weight: .medium))
+                        .font(AppTypography.Detail.captionMedium)
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                         .tint(.orange)
@@ -1815,7 +1815,7 @@ struct DetailPanelView: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.yellow)
                         Text(file.path)
-                            .font(.system(size: 10))
+                            .font(AppTypography.Detail.body)
                             .lineLimit(1)
                         Spacer()
                     }
@@ -1846,7 +1846,7 @@ struct DetailPanelView: View {
             HStack(spacing: 8) {
                 Button(action: { Task { await viewModel.conflictAbort() } }) {
                     Text(type.abortLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Detail.bodyMedium)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -1856,7 +1856,7 @@ struct DetailPanelView: View {
                 if case .rebase = type {
                     Button(action: { Task { await viewModel.rebaseSkip() } }) {
                         Text("Skip")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppTypography.Detail.bodyMedium)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -1864,7 +1864,7 @@ struct DetailPanelView: View {
 
                 Button(action: { Task { await viewModel.conflictContinue() } }) {
                     Text(type.continueLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(AppTypography.Detail.bodyMedium)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -1883,19 +1883,19 @@ struct DetailPanelView: View {
             if let state = viewModel.rebaseState {
                 HStack(spacing: 4) {
                     Text("Rebasing")
-                        .font(.system(size: 11))
+                        .font(AppTypography.Detail.body)
                         .foregroundStyle(.secondary)
                     Text(state.sourceBranch)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.Detail.metaStrong)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 3).fill(Color.orange.opacity(0.2)))
                         .foregroundStyle(.orange)
                     Text("onto")
-                        .font(.system(size: 11))
+                        .font(AppTypography.Detail.body)
                         .foregroundStyle(.secondary)
                     Text(state.targetBranch)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.Detail.metaStrong)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 3).fill(Color.green.opacity(0.2)))
@@ -1962,7 +1962,7 @@ struct DetailPanelView: View {
 
                 if let state = viewModel.rebaseState {
                     Text("Rebasing commit \(state.currentStep) out of \(state.totalSteps)")
-                        .font(.system(size: 10))
+                        .font(AppTypography.Detail.meta)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1970,7 +1970,7 @@ struct DetailPanelView: View {
 
             // Commit message editor
             TextEditor(text: conflictMessageBinding(type))
-            .font(.system(size: 11, design: .monospaced))
+            .font(AppTypography.Detail.mono)
             .scrollContentBackground(.hidden)
             .padding(4)
             .background(Color(.textBackgroundColor).opacity(0.5))
@@ -1983,11 +1983,11 @@ struct DetailPanelView: View {
             if !conflictedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("# Conflicts:")
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .foregroundStyle(.secondary)
                     ForEach(conflictedFiles) { file in
                         Text("#   \(file.path)")
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(AppTypography.Detail.mono)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -1997,7 +1997,7 @@ struct DetailPanelView: View {
             DisclosureGroup("Commit options") {
                 EmptyView()
             }
-            .font(.system(size: 10))
+            .font(AppTypography.Detail.meta)
             .foregroundStyle(.secondary)
         }
         .padding(10)
@@ -2026,7 +2026,7 @@ struct DetailPanelView: View {
                 .font(.title2)
                 .foregroundStyle(.secondary)
             Text("Select a commit to view details")
-                .font(.caption)
+                .font(AppTypography.Detail.meta)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2544,7 +2544,7 @@ struct DiffFileRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: rowIconName)
-                .font(.caption2)
+                .font(AppTypography.Detail.caption)
                 .foregroundStyle(iconColor)
 
             if file.isRenamed, let oldPath = file.oldPath {
@@ -2557,36 +2557,36 @@ struct DiffFileRow: View {
                         // Same directory — just show filenames inline
                         HStack(spacing: 3) {
                             Text(oldName)
-                                .font(.system(size: 10))
+                                .font(AppTypography.Detail.body)
                                 .foregroundStyle(.secondary)
                                 .strikethrough(true, color: .secondary)
                             Image(systemName: "arrow.right")
-                                .font(.system(size: 8))
+                                .font(AppTypography.Detail.caption)
                                 .foregroundStyle(.secondary)
                             Text(newName)
-                                .font(.system(size: 10))
+                                .font(AppTypography.Detail.body)
                         }
                         .lineLimit(1)
                         if !newDir.isEmpty {
                             Text(newDir)
-                                .font(.system(size: 9))
+                                .font(AppTypography.Detail.caption)
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
                         }
                     } else {
                         // Different directories — show full paths
                         Text(file.path)
-                            .font(.system(size: 10))
+                            .font(AppTypography.Detail.body)
                             .lineLimit(1)
                         Text("← \(oldPath)")
-                            .font(.system(size: 9))
+                            .font(AppTypography.Detail.caption)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                     }
                 }
             } else {
                 Text(file.path)
-                    .font(.system(size: 10))
+                    .font(AppTypography.Detail.body)
                     .lineLimit(1)
             }
 
@@ -2595,21 +2595,21 @@ struct DiffFileRow: View {
             HStack(spacing: 3) {
                 if let imageStatusLabel {
                     Text(imageStatusLabel)
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .foregroundStyle(imageStatusColor)
                 } else if file.additions > 0 {
                     Text("+\(file.additions)")
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .foregroundStyle(.green)
                 }
                 if imageStatusLabel == nil && file.deletions > 0 {
                     Text("-\(file.deletions)")
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(AppTypography.Detail.mono)
                         .foregroundStyle(.red)
                 }
                 if file.showsRenamedBadge {
                     Text("renamed")
-                        .font(.system(size: 9))
+                        .font(AppTypography.Detail.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -2665,13 +2665,13 @@ struct StagingFileRow: View, Equatable {
                     .frame(width: 6, height: 6)
 
                 Text(file.path)
-                    .font(.system(size: 10))
+                    .font(AppTypography.Detail.body)
                     .lineLimit(1)
 
                 Spacer()
 
                 Text(isStaged ? file.stagedDescription : file.unstagedDescription)
-                    .font(.system(size: 9))
+                    .font(AppTypography.Detail.caption)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2717,7 +2717,7 @@ struct CommitMessageEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let textView = ActivatingTextView()
         textView.isRichText = false
-        textView.font = NSFont.systemFont(ofSize: 11)
+        textView.font = AppTypography.Detail.textViewNS
         textView.textColor = .textColor
         textView.backgroundColor = .clear
         textView.isEditable = true
@@ -3027,7 +3027,7 @@ private struct SelectableDiffView: NSViewRepresentable {
         context.coordinator.isUncommitted = isUncommitted
         tv.onMoveSelection = onMoveSelection
 
-        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        let font = AppTypography.Detail.diffCodeNS
         let gutterSample = "0000 0000 + " as NSString
         // textContainerInset.width(4) + lineFragmentPadding(8) + gutter chars
         tv.gutterEndX = gutterSample.size(withAttributes: [.font: font]).width + 4 + 8
@@ -3092,7 +3092,7 @@ private struct SelectableDiffView: NSViewRepresentable {
 
         if let path = filePath {
             let pathBg = NSColor(white: isDark ? 0.10 : 0.94, alpha: 1.0)
-            let pathFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            let pathFont = AppTypography.Detail.diffPathNS
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: pathFont,
                 .foregroundColor: NSColor.secondaryLabelColor,

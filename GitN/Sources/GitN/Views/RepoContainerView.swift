@@ -89,7 +89,7 @@ struct RepoContainerView: View {
                     ProgressView()
                         .controlSize(.large)
                     Text(viewModel.mrMergingStatus)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(AppTypography.Chrome.toolbarBody)
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
                         .lineLimit(3)
@@ -107,7 +107,7 @@ struct RepoContainerView: View {
         }
         .onDisappear {
             activationTask?.cancel()
-            deactivateBackgroundWork()
+            viewModel.releaseRetainedResources()
         }
         .sheet(isPresented: $showStashMessage) {
             stashSheet
@@ -176,11 +176,11 @@ struct RepoContainerView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(toast.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.Chrome.toolbarTitle)
                     .foregroundStyle(.white)
                 if !toast.detail.isEmpty {
                     Text(toast.detail)
-                        .font(.system(size: 10))
+                        .font(AppTypography.Chrome.toolbarMeta)
                         .foregroundStyle(.white.opacity(0.8))
                 }
             }
@@ -295,26 +295,26 @@ struct RepoContainerView: View {
 
     private var repoSummary: some View {
         HStack(spacing: 8) {
-            Image(systemName: viewModel.isDetachedHead
+                Image(systemName: viewModel.isDetachedHead
                   ? "point.topleft.filled.down.to.point.bottomright.curvepath"
                   : "arrow.triangle.branch")
-                .font(.system(size: 12, weight: .semibold))
+                .font(AppTypography.Chrome.toolbarIcon)
                 .foregroundStyle(viewModel.isDetachedHead ? .orange : .blue)
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(viewModel.repoName)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppTypography.Chrome.toolbarTitle)
                     .lineLimit(1)
 
                 if !viewModel.currentBranch.isEmpty {
                     HStack(spacing: 4) {
                         Text(viewModel.currentBranch)
-                            .font(.system(size: 10))
+                            .font(AppTypography.Chrome.toolbarMeta)
                             .foregroundStyle(.secondary)
 
                         if viewModel.isDetachedHead {
                             Text("detached")
-                                .font(.system(size: 9, weight: .medium))
+                                .font(AppTypography.Chrome.toolbarBadge)
                                 .foregroundStyle(.orange)
                         }
                     }
@@ -360,7 +360,7 @@ struct RepoContainerView: View {
             if viewModel.isInConflict {
                 HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
+                        .font(AppTypography.Chrome.toolbarMeta)
                         .foregroundStyle(.yellow)
                     Text(conflictBadgeText)
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -375,9 +375,9 @@ struct RepoContainerView: View {
                 toolbarButtonSurface(width: 52) {
                     VStack(spacing: 2) {
                         Image(systemName: viewModel.showTerminal ? "terminal.fill" : "terminal")
-                            .font(.system(size: 12))
+                            .font(AppTypography.Chrome.toolbarIcon)
                         Text("Terminal")
-                            .font(.system(size: 8))
+                            .font(AppTypography.Chrome.toolbarMiniLabel)
                     }
                 }
             }
@@ -469,9 +469,9 @@ struct RepoContainerView: View {
             toolbarButtonSurface(width: 44, disabled: disabled) {
                 VStack(spacing: 2) {
                     Image(systemName: icon)
-                        .font(.system(size: 12))
+                        .font(AppTypography.Chrome.toolbarIcon)
                     Text(label)
-                        .font(.system(size: 8))
+                        .font(AppTypography.Chrome.toolbarMiniLabel)
                 }
             }
         }
@@ -530,7 +530,7 @@ struct RepoContainerView: View {
     private var pullToolbarMenuContent: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("点击 Pull 按钮时执行")
-                .font(.system(size: 11, weight: .semibold))
+                .font(AppTypography.Chrome.toolbarBody.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 2)
 
@@ -671,7 +671,7 @@ struct RepoContainerView: View {
     private var hostKeyBanner: some View {
         HStack(spacing: 8) {
             Text("The authenticity of host '\(viewModel.hostKeyHost)' can't be established. Answering yes will permanently add '\(viewModel.hostKeyHost)' to the list of known hosts. Are you sure you want to continue?")
-                .font(.system(size: 11, weight: .medium))
+                .font(AppTypography.Chrome.toolbarBody)
                 .foregroundStyle(.primary)
                 .lineLimit(2)
 
@@ -699,7 +699,7 @@ struct RepoContainerView: View {
     private var pushUpstreamBanner: some View {
         HStack(spacing: 8) {
             Text("What remote/branch should \"\(viewModel.currentBranch)\" push to and pull from?")
-                .font(.system(size: 11, weight: .medium))
+                .font(AppTypography.Chrome.toolbarBody)
                 .foregroundStyle(.primary)
 
             Picker("", selection: Binding(
@@ -722,7 +722,7 @@ struct RepoContainerView: View {
                 set: { viewModel.pushUpstreamBranch = $0 }
             ))
             .textFieldStyle(.roundedBorder)
-            .font(.system(size: 11))
+            .font(AppTypography.Chrome.toolbarBody)
             .frame(width: 120)
             .controlSize(.small)
 
@@ -836,20 +836,20 @@ private struct ToolbarTransferAnimationView: View {
                 icon: {
                     ZStack {
                         Image(systemName: systemImage)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.Chrome.toolbarIcon)
                             .offset(y: ghostTravel * CGFloat(progress))
                             .opacity(ghostOpacity)
                             .blur(radius: 0.2)
 
                         Image(systemName: systemImage)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(AppTypography.Chrome.toolbarIcon)
                             .offset(y: iconOffset)
                             .scaleEffect(iconScale)
                     }
                 }
             ) {
                 Text(title)
-                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+                    .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }
     }
@@ -875,20 +875,20 @@ private struct ToolbarFetchAnimationView: View {
                 icon: {
                     ZStack {
                         Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(AppTypography.Chrome.toolbarIcon)
                             .offset(y: -4 + 6 * CGFloat(progress))
                             .opacity(ghostOpacity)
                             .blur(radius: 0.25)
 
                         Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 11.5, weight: .semibold))
+                            .font(AppTypography.Chrome.toolbarIcon)
                             .offset(y: iconOffset)
                             .scaleEffect(iconScale)
                     }
                 }
             ) {
                 Text(title)
-                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+                    .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }
     }
@@ -912,14 +912,14 @@ private struct ToolbarRefreshAnimationView: View {
                 showsShimmer: false,
                 icon: {
                     Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(AppTypography.Chrome.toolbarIcon)
                         .rotationEffect(.degrees(rotation))
                         .scaleEffect(iconScale)
                         .drawingGroup()
                 }
             ) {
                 Text(title)
-                    .font(.system(size: 8, weight: isActive ? .semibold : .regular))
+                    .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }
     }

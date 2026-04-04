@@ -192,9 +192,16 @@ final class CommitWalker: @unchecked Sendable {
     private let repoPath: String
     private var finished = false
     private let queue = DispatchQueue(label: "com.gitn.commitWalker", qos: .userInitiated)
+    private let parseQueue = DispatchQueue(label: "com.gitn.commitWalker.parse", qos: .userInitiated, attributes: .concurrent)
+    private static let parallelDecodeThreshold = 160
+    private static let maxParallelDecoders = 6
 
     /// Total number of commits yielded so far.
     private(set) var totalYielded: Int = 0
+
+    private var isCancelled: Bool {
+        queue.sync { finished && walker == nil }
+    }
 
     init?(repoPath: String, refMap: [String: [String]]) {
         self.repoPath = repoPath
@@ -234,61 +241,39 @@ final class CommitWalker: @unchecked Sendable {
     /// Read the next `count` commits from the rev-walker.
     /// Returns an empty array once all commits have been exhausted.
     func nextBatch(count: Int) -> [CommitInfo] {
-        queue.sync {
-            guard !finished, let repo, let walker else { return [] }
+        let oids: [git_oid] = queue.sync {
+            guard !finished, repo != nil, let walker else { return [] }
 
-            var batch: [CommitInfo] = []
-            batch.reserveCapacity(count)
+            var collected: [git_oid] = []
+            collected.reserveCapacity(count)
             var oid = git_oid()
 
-            while batch.count < count, git_revwalk_next(&oid, walker) == 0 {
-                var commit: OpaquePointer?
-                guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else { continue }
-                defer { git_commit_free(commit) }
-
-                let hash = Self.oidStr(&oid)
-                let shortHash = Self.shortOidStr(&oid)
-
-                let parentCount = git_commit_parentcount(commit)
-                var parentHashes: [String] = []
-                for pi in 0..<parentCount {
-                    if let pid = git_commit_parent_id(commit, pi) {
-                        parentHashes.append(Self.oidStr(pid))
-                    }
-                }
-
-                let authorName: String
-                let authorEmail: String
-                let date: String
-                if let sig = git_commit_author(commit) {
-                    authorName = String(cString: sig.pointee.name)
-                    authorEmail = String(cString: sig.pointee.email)
-                    date = Self.fmtTime(sig.pointee.when)
-                } else {
-                    authorName = ""; authorEmail = ""; date = ""
-                }
-
-                let message = git_commit_message(commit).map(String.init(cString:))?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let firstLine = message.components(separatedBy: .newlines).first ?? message
-
-                batch.append(CommitInfo(
-                    hash: hash, shortHash: shortHash,
-                    parentHashes: parentHashes,
-                    authorName: authorName, authorEmail: authorEmail,
-                    date: date, message: firstLine,
-                    refs: refMap[hash] ?? []
-                ))
+            while collected.count < count, git_revwalk_next(&oid, walker) == 0 {
+                collected.append(oid)
             }
 
-            if batch.count < count {
+            if collected.count < count {
                 finished = true
             }
-            totalYielded += batch.count
-            if finished || batch.isEmpty {
+            totalYielded += collected.count
+            if finished || collected.isEmpty {
                 print("[CommitWalker] finished for '\(repoPath)', total commits=\(totalYielded)")
             }
-            return batch
+            return collected
+        }
+
+        guard !oids.isEmpty else { return [] }
+
+        return loadCommitInfos(for: oids)
+    }
+
+    func cancel() {
+        queue.sync {
+            finished = true
+            if let walker {
+                git_revwalk_free(walker)
+                self.walker = nil
+            }
         }
     }
 
@@ -311,15 +296,138 @@ final class CommitWalker: @unchecked Sendable {
         return String(cString: buf)
     }
 
+    private func loadCommitInfos(for oids: [git_oid]) -> [CommitInfo] {
+        let workerCount = min(
+            Self.maxParallelDecoders,
+            max(1, ProcessInfo.processInfo.processorCount),
+            oids.count
+        )
+
+        guard oids.count >= Self.parallelDecodeThreshold, workerCount > 1 else {
+            return decodeChunk(oids)
+        }
+
+        let chunkSize = (oids.count + workerCount - 1) / workerCount
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var partialResults: [Int: [CommitInfo]] = [:]
+
+        for workerIndex in 0..<workerCount {
+            let start = workerIndex * chunkSize
+            guard start < oids.count else { break }
+            let end = min(start + chunkSize, oids.count)
+            let chunk = Array(oids[start..<end])
+
+            group.enter()
+            parseQueue.async {
+                let decoded = self.decodeChunk(chunk)
+                lock.lock()
+                partialResults[workerIndex] = decoded
+                lock.unlock()
+                group.leave()
+            }
+        }
+
+        group.wait()
+        return (0..<workerCount).flatMap { partialResults[$0] ?? [] }
+    }
+
+    private func decodeChunk(_ oids: [git_oid]) -> [CommitInfo] {
+        guard !oids.isEmpty else { return [] }
+
+        var repoHandle: OpaquePointer?
+        guard git_repository_open(&repoHandle, repoPath) == 0, let repoHandle else {
+            return []
+        }
+        defer { git_repository_free(repoHandle) }
+
+        var decoded: [CommitInfo] = []
+        decoded.reserveCapacity(oids.count)
+
+        for oid in oids {
+            if isCancelled { break }
+            if let info = Self.decodeCommit(oid: oid, repo: repoHandle, refMap: refMap) {
+                decoded.append(info)
+            }
+        }
+
+        return decoded
+    }
+
+    private static func decodeCommit(
+        oid: git_oid,
+        repo: OpaquePointer,
+        refMap: [String: [String]]
+    ) -> CommitInfo? {
+        var oidCopy = oid
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oidCopy) == 0, let commit else { return nil }
+        defer { git_commit_free(commit) }
+
+        let hash = oidStr(&oidCopy)
+        let shortHash = shortOidStr(&oidCopy)
+
+        let parentCount = git_commit_parentcount(commit)
+        var parentHashes: [String] = []
+        parentHashes.reserveCapacity(Int(parentCount))
+        for parentIndex in 0..<parentCount {
+            if let parentID = git_commit_parent_id(commit, parentIndex) {
+                parentHashes.append(oidStr(parentID))
+            }
+        }
+
+        let authorName: String
+        let authorEmail: String
+        let date: String
+        if let sig = git_commit_author(commit) {
+            authorName = sig.pointee.name != nil ? String(cString: sig.pointee.name) : ""
+            authorEmail = sig.pointee.email != nil ? String(cString: sig.pointee.email) : ""
+            date = fmtTime(sig.pointee.when)
+        } else {
+            authorName = ""
+            authorEmail = ""
+            date = ""
+        }
+
+        let message = git_commit_message(commit).map(String.init(cString:)) ?? ""
+        let firstLine = firstLineSummary(from: message)
+
+        return CommitInfo(
+            hash: hash,
+            shortHash: shortHash,
+            parentHashes: parentHashes,
+            authorName: authorName,
+            authorEmail: authorEmail,
+            date: date,
+            message: firstLine,
+            refs: refMap[hash] ?? []
+        )
+    }
+
+    private static func firstLineSummary(from message: String) -> String {
+        let trimmedPrefix = message.drop(while: \.isWhitespaceOrNewline)
+        guard !trimmedPrefix.isEmpty else { return "" }
+        let firstLine = trimmedPrefix.prefix { !$0.isNewline }
+        return String(firstLine).trimmingCharacters(in: .whitespaces)
+    }
+
     private static func fmtTime(_ time: git_time) -> String {
+        let totalMinutes = Int(time.offset)
         let date = Date(timeIntervalSince1970: TimeInterval(time.time))
         let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.calendar = Calendar(identifier: .gregorian)
         fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let totalMinutes = Int(time.offset)
         fmt.timeZone = TimeZone(secondsFromGMT: totalMinutes * 60)
         let sign = totalMinutes >= 0 ? "+" : "-"
         let absMin = Swift.abs(totalMinutes)
         return fmt.string(from: date) + " " + String(format: "%@%02d%02d", sign, absMin / 60, absMin % 60)
+    }
+}
+
+private extension Character {
+    var isWhitespaceOrNewline: Bool {
+        unicodeScalars.allSatisfy(CharacterSet.whitespacesAndNewlines.contains)
     }
 }
 

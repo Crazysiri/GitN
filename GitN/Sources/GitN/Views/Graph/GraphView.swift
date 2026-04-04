@@ -60,6 +60,16 @@ struct GraphView: View {
                     .transition(.opacity)
                     .zIndex(10)
             }
+
+            if viewModel.isNavigatingToCommit {
+                VStack {
+                    commitNavigationOverlay
+                        .padding(.top, 18)
+                    Spacer()
+                }
+                .zIndex(9)
+                .transition(.opacity)
+            }
         }
         .background(Color(.textBackgroundColor))
         .sheet(isPresented: $showCreateTagSheet) { createTagSheet }
@@ -90,7 +100,9 @@ struct GraphView: View {
     @ViewBuilder
     private var graphContent: some View {
         Group {
-            if viewModel.graphDisplayCommits.isEmpty && !viewModel.isLoading {
+            if viewModel.graphDisplayCommits.isEmpty && viewModel.isLoading {
+                loadingState
+            } else if viewModel.graphDisplayCommits.isEmpty && !viewModel.isLoading {
                 emptyState
             } else {
                 ZStack(alignment: .topTrailing) {
@@ -135,9 +147,9 @@ struct GraphView: View {
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.up")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(AppTypography.Graph.header)
                                 Text("Uncommitted")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(AppTypography.Detail.bodyMedium)
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -225,11 +237,11 @@ struct GraphView: View {
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.Graph.header)
                         .scaleEffect(x: 0.82, y: 1.0)
                         .foregroundStyle(.secondary)
                     Text("Graph(\(viewModel.graphDisplayMode.title))")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppTypography.Graph.header)
                         .foregroundStyle(.secondary)
                 }
                 .frame(width: graphAreaWidth - 10, alignment: .leading)
@@ -311,7 +323,7 @@ struct GraphView: View {
             .onHover { isHoveringReflogToggle = $0 }
             .padding(.trailing, 8)
         }
-        .font(.system(size: 10, weight: .semibold))
+        .font(AppTypography.Graph.header)
         .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -328,6 +340,45 @@ struct GraphView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var loadingState: some View {
+        GraphLoadingStateView()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var commitNavigationOverlay: some View {
+        HStack(spacing: 14) {
+            CompactCommitLoadingWave()
+                .frame(width: 54, height: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(viewModel.commitNavigationTitle.isEmpty ? "Loading Commit History" : viewModel.commitNavigationTitle)
+                    .font(AppTypography.Graph.overlayTitle)
+                    .foregroundStyle(.primary)
+                Text("Scanning older commits to find the target")
+                    .font(AppTypography.Graph.overlayBody)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+                .frame(height: 22)
+
+            Button("Cancel") {
+                viewModel.cancelCommitNavigation()
+            }
+            .buttonStyle(.plain)
+            .font(AppTypography.Graph.overlayAction)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.6)
+        )
+        .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
     }
 
     // MARK: - Sheets
@@ -392,7 +443,7 @@ struct GraphView: View {
             Text("Edit Commit Message")
                 .font(.headline)
             TextEditor(text: $editedMessage)
-                .font(.system(size: 12, design: .monospaced))
+                .font(AppTypography.Graph.editor)
                 .frame(width: 400, height: 120)
                 .border(Color(.separatorColor))
             HStack {
@@ -443,6 +494,107 @@ struct GraphView: View {
     }
 }
 
+private struct GraphLoadingStateView: View {
+    var body: some View {
+        VStack(spacing: 22) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 26)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.accentColor.opacity(0.10),
+                                Color.blue.opacity(0.07),
+                                Color.clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 220, height: 124)
+                    .blur(radius: 1)
+
+                CommitLoadingWave()
+                    .frame(width: 180, height: 72)
+            }
+
+            VStack(spacing: 6) {
+                Text("Loading History")
+                    .font(AppTypography.Graph.loadingTitle)
+                    .foregroundStyle(.primary)
+                Text("Preparing the first slice of commits")
+                    .font(AppTypography.Graph.loadingBody)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct CommitLoadingWave: View {
+    private let barCount = 7
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+
+            HStack(alignment: .center, spacing: 8) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    let phase = t * 2.2 - Double(index) * 0.22
+                    let normalized = (sin(phase) + 1) / 2
+                    let height = 18 + normalized * 36
+                    let hueShift = Double(index) * 0.02
+
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.accentColor.opacity(0.38 + normalized * 0.22),
+                                    Color.blue.opacity(0.24 + normalized * 0.20 + hueShift * 0.1)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 12, height: height)
+                        .shadow(color: Color.accentColor.opacity(0.12 + normalized * 0.10), radius: 8, y: 2)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+}
+
+private struct CompactCommitLoadingWave: View {
+    private let barCount = 4
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+
+            HStack(alignment: .center, spacing: 5) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    let phase = t * 2.4 - Double(index) * 0.28
+                    let normalized = (sin(phase) + 1) / 2
+                    let height = 8 + normalized * 10
+
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.accentColor.opacity(0.52 + normalized * 0.12),
+                                    Color.blue.opacity(0.28 + normalized * 0.10)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 7, height: height)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+}
+
 // MARK: - Context Action Enum
 
 enum CommitContextAction {
@@ -476,6 +628,8 @@ enum CommitContextAction {
 // 3. No @Observable cascading invalidation — only visible cells are updated
 
 struct CommitTableView: NSViewRepresentable {
+    private static let animatedScrollDistanceLimit = 120
+
     let commits: [CommitInfo]
     let graphCommits: [CommitInfo]
     let selectedCommitHash: String?
@@ -601,26 +755,34 @@ struct CommitTableView: NSViewRepresentable {
             if isAppend {
                 // Streaming append — keep existing graph state, just extend commits
                 coordinator.lazyGraph.updateCommits(graphCommits)
+                let insertedRows = IndexSet(integersIn: oldCommitIDs.count..<newCommitIDs.count)
+
+                // Reset multi-selection when data changes (commits reloaded/appended)
+                if let hash = selectedCommitHash {
+                    coordinator.selectedRowHashes = [hash]
+                } else {
+                    coordinator.selectedRowHashes = []
+                }
+
+                tableView.beginUpdates()
+                tableView.insertRows(at: insertedRows, withAnimation: [])
+                tableView.endUpdates()
+                coordinator.refreshVisibleRows()
             } else {
                 // Full change (reload, repo switch, etc.) — dismiss any stale tooltip
                 RefTooltipPanel.shared.cancelAndHide()
                 coordinator.lazyGraph.reset(commits: graphCommits)
+                // Reset multi-selection when data changes (commits reloaded)
+                if let hash = selectedCommitHash {
+                    coordinator.selectedRowHashes = [hash]
+                } else {
+                    coordinator.selectedRowHashes = []
+                }
+                tableView.reloadData()
             }
-
-            // Reset multi-selection when data changes (commits reloaded)
-            if let hash = selectedCommitHash {
-                coordinator.selectedRowHashes = [hash]
-            } else {
-                coordinator.selectedRowHashes = []
-            }
-            tableView.reloadData()
         } else {
             // Just refresh visible cells (selection change, etc.)
-            tableView.enumerateAvailableRowViews { rowView, row in
-                if let cellView = rowView.view(atColumn: 0) as? CommitRowCellView {
-                    coordinator.configureCell(cellView, row: row)
-                }
-            }
+            coordinator.refreshVisibleRows()
         }
 
         // Update selection — only force single selection when NOT in a multi-select state
@@ -644,16 +806,26 @@ struct CommitTableView: NSViewRepresentable {
 
         // Scroll to hash
         if let hash = scrollToHash, let row = commits.firstIndex(where: { $0.hash == hash }) {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.allowsImplicitAnimation = true
-                tableView.scrollRowToVisible(row)
-            }
-            // Center the row
             if let clipView = tableView.enclosingScrollView?.contentView {
                 let rowRect = tableView.rect(ofRow: row)
                 let visH = clipView.bounds.height
-                let y = rowRect.midY - visH / 2
-                clipView.setBoundsOrigin(NSPoint(x: 0, y: max(0, y)))
+                let maxY = max(0, tableView.bounds.height - visH)
+                let targetY = min(max(0, rowRect.midY - visH / 2), maxY)
+                let targetPoint = NSPoint(x: clipView.bounds.origin.x, y: targetY)
+                let currentMidY = clipView.bounds.midY
+                let rowDistance = abs(rowRect.midY - currentMidY) / max(rowHeight, 1)
+
+                if rowDistance > CGFloat(Self.animatedScrollDistanceLimit) {
+                    clipView.setBoundsOrigin(targetPoint)
+                } else {
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.18
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        clipView.animator().setBoundsOrigin(targetPoint)
+                    }
+                }
+            } else {
+                tableView.scrollRowToVisible(row)
             }
             onConsumeScrollToHash()
         }
@@ -848,11 +1020,13 @@ struct CommitTableView: NSViewRepresentable {
             }
 
             // Refresh visible rows for selection highlight
-            tableView.enumerateAvailableRowViews { rowView, r in
+            refreshVisibleRows()
+        }
+
+        func refreshVisibleRows() {
+            tableView?.enumerateAvailableRowViews { rowView, row in
                 if let cellView = rowView.view(atColumn: 0) as? CommitRowCellView {
-                    guard r >= 0, r < self.commits.count else { return }
-                    cellView.isSelectedRow = self.selectedRowHashes.contains(self.commits[r].hash)
-                    cellView.needsDisplay = true
+                    self.configureCell(cellView, row: row)
                 }
             }
         }
@@ -1334,7 +1508,7 @@ final class CommitRowCellView: NSView {
 
         let text = "A file conflict was found when attempting to merge into HEAD"
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .font: AppTypography.Graph.conflictBannerNS,
             .foregroundColor: NSColor.white.withAlphaComponent(0.9)
         ]
         let textRect = NSRect(x: 28, y: (bounds.height - 14) / 2, width: bounds.width - 36, height: 14)
@@ -1373,7 +1547,7 @@ final class CommitRowCellView: NSView {
             let maxBadgeW: CGFloat
             if commit.refs.count > 1 {
                 let countStr = "+\(commit.refs.count - 1)"
-                let pillAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9, weight: .semibold)]
+                let pillAttrs: [NSAttributedString.Key: Any] = [.font: AppTypography.Graph.refBadgeStrongNS]
                 let pillW = countStr.size(withAttributes: pillAttrs).width + 8
                 maxBadgeW = rect.width - pillW - 3
             } else {
@@ -1386,7 +1560,7 @@ final class CommitRowCellView: NSView {
         if commit.refs.count > 1 {
             let countStr = "+\(commit.refs.count - 1)"
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                .font: AppTypography.Graph.refBadgeStrongNS,
                 .foregroundColor: NSColor.secondaryLabelColor
             ]
             let size = countStr.size(withAttributes: attrs)
@@ -1450,7 +1624,7 @@ final class CommitRowCellView: NSView {
         let color = RefBadgeHelper.badgeNSColor(for: ref)
 
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+            .font: AppTypography.Graph.refBadgeNS,
             .foregroundColor: color
         ]
         let textSize = name.size(withAttributes: attrs)
@@ -1599,7 +1773,7 @@ final class CommitRowCellView: NSView {
         if commit.isUncommitted {
             // "Uncommitted Changes" label
             let titleAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .font: AppTypography.Graph.messageStrongNS,
                 .foregroundColor: NSColor.systemOrange
             ]
             let title = "Uncommitted Changes"
@@ -1608,13 +1782,17 @@ final class CommitRowCellView: NSView {
 
             // Detail
             let detailAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10),
+                .font: AppTypography.Graph.metaNS,
                 .foregroundColor: NSColor.secondaryLabelColor
             ]
             let detailX = rect.minX + 6 + titleSize.width + 4
             let detailW = max(0, rect.maxX - detailX - 8)
             let detailRect = NSRect(x: detailX, y: midY - 6, width: detailW, height: 12)
-            commit.message.draw(with: detailRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: detailAttrs)
+            commit.message.draw(
+                with: detailRect,
+                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                attributes: detailAttrs
+            )
         } else {
             var contentX = rect.minX + 6
 
@@ -1624,7 +1802,7 @@ final class CommitRowCellView: NSView {
 
             // Commit message
             let msgAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 11),
+                .font: AppTypography.Graph.messageNS,
                 .foregroundColor: NSColor.labelColor
             ]
             let msgSize = commit.message.size(withAttributes: msgAttrs)
@@ -1633,7 +1811,7 @@ final class CommitRowCellView: NSView {
             var dateWidth: CGFloat = 0
             if let ds = BriefDateFormatter.format(commit.date) {
                 let dateAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 9),
+                    .font: AppTypography.Graph.metaNS,
                     .foregroundColor: NSColor.tertiaryLabelColor
                 ]
                 let dSize = ds.size(withAttributes: dateAttrs)
@@ -1643,11 +1821,17 @@ final class CommitRowCellView: NSView {
             }
 
             let msgMaxW = max(0, rect.maxX - contentX - 8 - dateWidth)
-            let msgRect = NSRect(x: contentX, y: midY - msgSize.height / 2,
-                                 width: msgMaxW, height: msgSize.height)
-            commit.message.draw(with: msgRect,
-                                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                                attributes: msgAttrs)
+            let msgRect = NSRect(
+                x: contentX,
+                y: midY - msgSize.height / 2,
+                width: msgMaxW,
+                height: msgSize.height
+            )
+            commit.message.draw(
+                with: msgRect,
+                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                attributes: msgAttrs
+            )
         }
     }
 
@@ -1659,7 +1843,7 @@ final class CommitRowCellView: NSView {
         for entry in reflogBadgeEntries.prefix(3) {
             let color = ReflogBadgeHelper.badgeColor(for: entry.kind)
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                .font: AppTypography.Graph.metaStrongNS,
                 .foregroundColor: color
             ]
             let label = entry.kind.label
@@ -1686,7 +1870,7 @@ final class CommitRowCellView: NSView {
         if reflogBadgeEntries.count > 3 {
             let more = "+\(reflogBadgeEntries.count - 3)"
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                .font: AppTypography.Graph.metaMediumNS,
                 .foregroundColor: NSColor.secondaryLabelColor
             ]
             let size = more.size(withAttributes: attrs)
@@ -1757,7 +1941,7 @@ private final class RefTooltipPanel: NSPanel {
     private func present(fullName: String, color: NSColor, at origin: NSPoint) {
         badgeView.configure(name: fullName, color: color)
 
-        let textSize = fullName.size(withAttributes: [.font: NSFont.systemFont(ofSize: 9, weight: .medium)])
+        let textSize = fullName.size(withAttributes: [.font: AppTypography.Graph.refBadgeNS])
         let width = textSize.width + 8
         let height: CGFloat = 14
 
@@ -1781,7 +1965,7 @@ private final class RefTooltipBadgeView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+            .font: AppTypography.Graph.refBadgeNS,
             .foregroundColor: color
         ]
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.25, dy: 0.25), xRadius: 3, yRadius: 3)

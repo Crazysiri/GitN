@@ -170,6 +170,9 @@ final class RepoViewModel {
     var showReflogOverlay = false {
         didSet {
             UserDefaults.standard.set(showReflogOverlay, forKey: "GitN.showReflogOverlay.\(repoPath)")
+            if showReflogOverlay, reflogEntries.isEmpty, reflogRecoveredCommits.isEmpty {
+                Task { await loadReflog() }
+            }
             guard !showReflogOverlay,
                   let selectedCommit,
                   !selectedCommit.isUncommitted,
@@ -228,11 +231,20 @@ final class RepoViewModel {
     }
 
     // MARK: - Pagination (pull-based via CommitWalker)
+    private static let initialCommitLoadCount = 200
+    private static let initialCommitWarmTarget = 1000
+
     private var commitWalker: CommitWalker?
     private(set) var allCommitsLoaded = false
     private(set) var isLoadingMore = false
     private let commitPageSize: Int
     private var isEnsuringCurrentGraphVisibility = false
+    private var commitPreloadTask: Task<Void, Never>?
+    private var postInitialCommitLoadTask: Task<Void, Never>?
+    private var commitNavigationGeneration = 0
+
+    var isNavigatingToCommit = false
+    var commitNavigationTitle = ""
 
     var selectedCommit: CommitInfo?
     var selectedStash: StashInfo?
@@ -2043,7 +2055,7 @@ final class RepoViewModel {
         codeHostingProvider.mergeActionTitle
     }
 
-    init(path: String, name: String, commitPageSize: Int = 2000) {
+    init(path: String, name: String, commitPageSize: Int = 500) {
         self.repoPath = path
         self.repoName = name
         self.commitPageSize = commitPageSize
@@ -2127,7 +2139,9 @@ final class RepoViewModel {
             return
         }
 
-        await revealCommit(hash: hash)
+        let navigationGeneration = beginCommitNavigation(title: "Loading commit history")
+        defer { finishCommitNavigation(navigationGeneration) }
+        await revealCommit(hash: hash, navigationGeneration: navigationGeneration)
     }
 
     func loadReflog() async {
@@ -2367,6 +2381,12 @@ final class RepoViewModel {
     }
 
     func loadAll() async {
+        commitPreloadTask?.cancel()
+        commitPreloadTask = nil
+        postInitialCommitLoadTask?.cancel()
+        postInitialCommitLoadTask = nil
+        commitWalker?.cancel()
+        commitWalker = nil
         isLoading = true
         defer { isLoading = false }
 
@@ -2383,7 +2403,6 @@ final class RepoViewModel {
             async let stat = git.status()
             async let hch = git.headCommitHash()
             async let detached = git.isDetachedHead()
-            async let branchHashes = git.commitHashesOnCurrentBranch()
 
             let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh) = try await (
                 b, rb, r, t, st, sub, cur, stat, hch, detached
@@ -2398,12 +2417,20 @@ final class RepoViewModel {
             fileStatuses = sts
             headCommitHash = hc
             isDetachedHead = dh
-            currentBranchHashes = await branchHashes
             normalizeGraphDisplayMode()
             if selectedReflogRef != "HEAD", selectedReflogRef != "refs/heads/\(cb)" {
                 selectedReflogRef = "HEAD"
             }
-            await loadReflog()
+            if graphDisplayMode == .current {
+                currentBranchHashes = await git.commitHashesOnCurrentBranch()
+            } else {
+                currentBranchHashes = []
+            }
+            if showReflogOverlay {
+                await loadReflog()
+            } else {
+                applyReflogSnapshot(.empty)
+            }
 
             // Refresh remote tags in background (best-effort, doesn't block UI load)
             Task { await refreshKnownRemoteTags() }
@@ -2452,7 +2479,7 @@ final class RepoViewModel {
 
             // Load first page on background thread
             if let walker {
-                let pageSize = commitPageSize
+                let pageSize = Self.initialCommitLoadCount
                 let batch = await Task.detached(priority: .userInitiated) {
                     walker.nextBatch(count: pageSize)
                 }.value
@@ -2467,7 +2494,16 @@ final class RepoViewModel {
 
             commits = loadedCommits
             syncSelectionWithGraphDisplay()
-            await ensureCurrentGraphCommitsAreLoaded()
+            schedulePostInitialCommitLoadWork()
+            if graphDisplayMode != .current {
+                Task { [weak self] in
+                    guard let self else { return }
+                    let hashes = await self.git.commitHashesOnCurrentBranch()
+                    await MainActor.run {
+                        self.currentBranchHashes = hashes
+                    }
+                }
+            }
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -2476,24 +2512,152 @@ final class RepoViewModel {
     /// Load the next page of commits as the user scrolls down.
     /// Only walks `commitPageSize` commits via git_revwalk – no eager traversal.
     func loadMoreCommits() async {
-        guard !allCommitsLoaded, !isLoadingMore, let walker = commitWalker else { return }
+        _ = await loadNextCommitPage()
+        scheduleCommitPreloadIfNeeded()
+    }
+
+    private func loadNextCommitPage(pageSize: Int? = nil) async -> Int {
+        guard !allCommitsLoaded, !isLoadingMore, let walker = commitWalker else { return 0 }
 
         isLoadingMore = true
         defer { isLoadingMore = false }
 
-        let pageSize = commitPageSize
+        let batchSize = pageSize ?? commitPageSize
         let batch = await Task.detached(priority: .userInitiated) {
-            walker.nextBatch(count: pageSize)
+            walker.nextBatch(count: batchSize)
         }.value
 
         if !batch.isEmpty {
             commits.append(contentsOf: batch)
         }
-        if batch.count < pageSize {
+        if batch.count < batchSize {
             allCommitsLoaded = true
             commitWalker = nil
             print("[RepoViewModel] All commits loaded, total=\(commits.count)")
         }
+
+        return batch.count
+    }
+
+    private func scheduleCommitPreloadIfNeeded() {
+        guard commitPreloadTask == nil, !allCommitsLoaded else { return }
+        guard loadedCommitCountExcludingUncommitted < Self.initialCommitWarmTarget else { return }
+
+        commitPreloadTask = Task { [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                let loaded = self.loadedCommitCountExcludingUncommitted
+                guard loaded < Self.initialCommitWarmTarget else { break }
+
+                let added = await self.loadNextCommitPage()
+                guard added > 0 else { break }
+            }
+
+            await MainActor.run {
+                self.commitPreloadTask = nil
+            }
+        }
+    }
+
+    private func schedulePostInitialCommitLoadWork() {
+        guard postInitialCommitLoadTask == nil else { return }
+
+        postInitialCommitLoadTask = Task { [weak self] in
+            guard let self else { return }
+
+            // Let the first 200-row frame commit before we continue warming data.
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+
+            await self.ensureCurrentGraphCommitsAreLoaded()
+            guard !Task.isCancelled else { return }
+
+            self.scheduleCommitPreloadIfNeeded()
+            await MainActor.run {
+                self.postInitialCommitLoadTask = nil
+            }
+        }
+    }
+
+    private var loadedCommitCountExcludingUncommitted: Int {
+        commits.reduce(into: 0) { count, commit in
+            if !commit.isUncommitted {
+                count += 1
+            }
+        }
+    }
+
+    private func beginCommitNavigation(title: String) -> Int {
+        commitNavigationGeneration += 1
+        let generation = commitNavigationGeneration
+        isNavigatingToCommit = true
+        commitNavigationTitle = title
+        return generation
+    }
+
+    private func finishCommitNavigation(_ generation: Int) {
+        guard generation == commitNavigationGeneration else { return }
+        isNavigatingToCommit = false
+        commitNavigationTitle = ""
+    }
+
+    private func isCommitNavigationActive(_ generation: Int) -> Bool {
+        generation == commitNavigationGeneration
+    }
+
+    func cancelCommitNavigation() {
+        commitNavigationGeneration += 1
+        isNavigatingToCommit = false
+        commitNavigationTitle = ""
+    }
+
+    func cancelLongRunningTasks() {
+        cancelCommitNavigation()
+        commitPreloadTask?.cancel()
+        commitPreloadTask = nil
+        postInitialCommitLoadTask?.cancel()
+        postInitialCommitLoadTask = nil
+        commitWalker?.cancel()
+        commitWalker = nil
+        allCommitsLoaded = true
+    }
+
+    func releaseRetainedResources() {
+        stopWatching()
+        stopPeriodicRefresh()
+        cancelLongRunningTasks()
+
+        fileInspectorRebuildTask?.cancel()
+        fileInspectorRebuildTask = nil
+        fileInspectorBlameTask?.cancel()
+        fileInspectorBlameTask = nil
+        committedDiffStatsTask?.cancel()
+        committedDiffStatsTask = nil
+        toastAutoDismissTask?.cancel()
+        toastAutoDismissTask = nil
+
+        commits = []
+        localBranches = []
+        remoteBranches = []
+        remotes = []
+        tags = []
+        knownRemoteTags = []
+        stashes = []
+        submodules = []
+        diffFiles = []
+        fileDiffContent = ""
+        diffBaseText = ""
+        parsedDiff = nil
+        selectedDiffVisualContent = nil
+        selectedCommit = nil
+        selectedStash = nil
+        selectedDiffFile = nil
+        fileInspectorContent = ""
+        fileInspectorInitialContent = ""
+        fileInspectorDisplayContent = ""
+        fileInspectorDiffBaseText = ""
+        fileInspectorBlameCache = [:]
     }
 
     func selectCommit(_ commit: CommitInfo) async {
@@ -3775,7 +3939,10 @@ final class RepoViewModel {
         selectedDiffFile = nil
     }
 
-    private func revealCommit(hash: String) async {
+    private func revealCommit(hash: String, navigationGeneration: Int? = nil) async {
+        if let navigationGeneration, !isCommitNavigationActive(navigationGeneration) {
+            return
+        }
         ensureCommitVisibleForNavigation(hash: hash)
         scrollToCommitHash = hash
 
@@ -3785,6 +3952,9 @@ final class RepoViewModel {
         }
 
         while !allCommitsLoaded {
+            if let navigationGeneration, !isCommitNavigationActive(navigationGeneration) {
+                return
+            }
             await loadMoreCommits()
             if let commit = loadedCommit(matching: hash) {
                 scrollToCommitHash = commit.hash
@@ -3800,9 +3970,12 @@ final class RepoViewModel {
             return
         }
 
+        let navigationGeneration = beginCommitNavigation(title: "Loading branch history")
+        defer { finishCommitNavigation(navigationGeneration) }
+
         do {
             let fullHash = try await git.branchCommitHash(branch.name, isRemote: branch.isRemote)
-            await revealCommit(hash: fullHash)
+            await revealCommit(hash: fullHash, navigationGeneration: navigationGeneration)
         } catch {}
     }
 
@@ -3817,9 +3990,12 @@ final class RepoViewModel {
             return
         }
 
+        let navigationGeneration = beginCommitNavigation(title: "Loading tag history")
+        defer { finishCommitNavigation(navigationGeneration) }
+
         do {
             let fullHash = try await git.tagCommitHash(name: tagName)
-            await revealCommit(hash: fullHash)
+            await revealCommit(hash: fullHash, navigationGeneration: navigationGeneration)
         } catch {}
     }
     
