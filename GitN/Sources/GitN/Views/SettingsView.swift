@@ -259,8 +259,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("CURSOR_API_KEY", text: $cursorAPIKey)
-                    .textFieldStyle(.roundedBorder)
+                FocusSecureField(titleKey: "CURSOR_API_KEY", text: $cursorAPIKey)
                     .font(.system(size: 11, design: .monospaced))
                     .onChange(of: cursorAPIKey) {
                         keyHasChanges = true
@@ -300,16 +299,9 @@ struct SettingsView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
-            TextEditor(text: $aiPrompt)
+            FocusTextEditor(text: $aiPrompt)
                 .font(.system(size: 11, design: .monospaced))
-                .scrollContentBackground(.hidden)
-                .padding(8)
                 .frame(minHeight: 120, maxHeight: 180)
-                .background(Color(.textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Color(.separatorColor), lineWidth: 1)
-                )
                 .onChange(of: aiPrompt) {
                     promptHasChanges = true
                 }
@@ -373,8 +365,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                TextField("https://gitlab.example.com", text: $gitlabURL)
-                    .textFieldStyle(.roundedBorder)
+                FocusTextField(titleKey: "https://gitlab.example.com", text: $gitlabURL)
                     .font(.system(size: 11, design: .monospaced))
                     .onChange(of: gitlabURL) {
                         gitlabURLHasChanges = true
@@ -415,8 +406,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("glpat-xxxxxxxxxxxxxxxxxxxx", text: $gitlabToken)
-                    .textFieldStyle(.roundedBorder)
+                FocusSecureField(titleKey: "glpat-xxxxxxxxxxxxxxxxxxxx", text: $gitlabToken)
                     .font(.system(size: 11, design: .monospaced))
                     .onChange(of: gitlabToken) {
                         gitlabTokenHasChanges = true
@@ -480,8 +470,7 @@ struct SettingsView: View {
                 .font(.system(size: 11))
 
             HStack(spacing: 8) {
-                SecureField("github_pat_xxxxxxxxxxxxxxxxxxxx", text: $githubToken)
-                    .textFieldStyle(.roundedBorder)
+                FocusSecureField(titleKey: "github_pat_xxxxxxxxxxxxxxxxxxxx", text: $githubToken)
                     .font(.system(size: 11, design: .monospaced))
                     .onChange(of: githubToken) {
                         githubTokenHasChanges = true
@@ -600,8 +589,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                TextField("https://updates.example.com/appcast.xml", text: $updateFeedURL)
-                    .textFieldStyle(.roundedBorder)
+                FocusTextField(titleKey: "https://updates.example.com/appcast.xml", text: $updateFeedURL)
                     .font(.system(size: 11, design: .monospaced))
                     .onChange(of: updateFeedURL) {
                         updateFeedURLHasChanges = updateFeedURL != updateCoordinator.currentFeedURLString
@@ -692,8 +680,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                TextField("", value: $maxDiffFileSizeMB, formatter: NumberFormatter())
-                    .textFieldStyle(.roundedBorder)
+                FocusValueField(titleKey: "", value: $maxDiffFileSizeMB, formatter: NumberFormatter())
                     .font(.system(size: 11, design: .monospaced))
                     .frame(width: 60)
                     .onChange(of: maxDiffFileSizeMB) {

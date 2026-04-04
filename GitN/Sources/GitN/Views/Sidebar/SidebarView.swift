@@ -89,7 +89,7 @@ struct SidebarView: View {
         }
 
         if animate {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.easeInOut(duration: 0.2)) {
                 update()
             }
         } else {
@@ -170,11 +170,9 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Add Remote")
                 .font(.headline)
-            TextField("Remote name (e.g. origin)", text: $newRemoteName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote name (e.g. origin)", text: $newRemoteName)
                 .frame(width: 300)
-            TextField("Remote URL", text: $newRemoteURL)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote URL", text: $newRemoteURL)
                 .frame(width: 300)
             HStack {
                 Button("Cancel") {
@@ -381,8 +379,7 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Rename Branch")
                 .font(.headline)
-            TextField("New name", text: $renamedBranchName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "New name", text: $renamedBranchName)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showRenameBranch = false }
@@ -404,8 +401,7 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Create Tag")
                 .font(.headline)
-            TextField("Tag name", text: $tagAtBranchName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Tag name", text: $tagAtBranchName)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showCreateTagAtBranch = false }
@@ -427,8 +423,7 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Create Branch")
                 .font(.headline)
-            TextField("Branch name", text: $newBranchFromName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch name", text: $newBranchFromName)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showCreateBranchFrom = false }
@@ -459,11 +454,9 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Set Upstream")
                 .font(.headline)
-            TextField("Remote", text: $upstreamRemote)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote", text: $upstreamRemote)
                 .frame(width: 280)
-            TextField("Branch", text: $upstreamBranch)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch", text: $upstreamBranch)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showSetUpstream = false }
@@ -491,11 +484,9 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Edit Remote")
                 .font(.headline)
-            TextField("Remote name", text: $editRemoteName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote name", text: $editRemoteName)
                 .frame(width: 300)
-            TextField("Remote URL", text: $editRemoteURL)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote URL", text: $editRemoteURL)
                 .frame(width: 300)
             HStack {
                 Button("Cancel") {
@@ -670,7 +661,14 @@ struct SidebarView: View {
                                 }
                             }
                         }
-                        .transition(shouldAnimate ? .move(edge: .top).combined(with: .opacity) : .identity)
+                        .transition(
+                            shouldAnimate
+                                ? .asymmetric(
+                                    insertion: .opacity.combined(with: .scale(scale: 0.985, anchor: .top)),
+                                    removal: .opacity
+                                  )
+                                : .identity
+                        )
                     }
                 }
             }
@@ -772,8 +770,7 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Annotate Tag \"\(annotatingTagName)\"")
                 .font(.headline)
-            TextField("Annotation message", text: $annotateTagMessage, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Annotation message", text: $annotateTagMessage, axis: .vertical)
                 .frame(width: 320)
                 .lineLimit(4, reservesSpace: true)
             HStack {
@@ -797,8 +794,7 @@ struct SidebarView: View {
         VStack(spacing: 12) {
             Text("Create Branch from \"\(branchFromTagName)\"")
                 .font(.headline)
-            TextField("Branch name", text: $newBranchFromTagName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch name", text: $newBranchFromTagName)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showCreateBranchFromTag = false }
@@ -1122,7 +1118,7 @@ struct SidebarSection<Content: View>: View {
                 }
                 .transition(
                     animateCollapse
-                        ? .move(edge: .top).combined(with: .opacity)
+                        ? .opacity
                         : .identity
                 )
                 .clipped()

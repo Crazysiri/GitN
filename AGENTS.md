@@ -27,3 +27,10 @@
 - Treat ViewModel and service-layer logic as testable code. New behavior in `RepoViewModel` or other view models should be structured so it can be exercised by unit tests, and business/state-transition logic should not depend on SwiftUI views to run.
 - Keep SwiftUI views as thin presentation layers where practical. UI-only rendering details may not need direct tests, but logic that can be moved out of the view should be moved into testable view-model/service helpers instead of staying embedded in the UI layer.
 - If UI behavior is difficult to test directly, cover the underlying state, transformation, validation, and action-routing logic with tests at the ViewModel/service boundary.
+
+# Engineering Workflow
+
+- Use `docs/ENGINEERING_GUIDELINES.md` as the default decision framework for new architecture and testability work.
+- Write an RFC in `docs/rfcs/` before implementing cross-cutting changes, new services/coordinators, or non-trivial additions to `RepoViewModel` / `GitService`.
+- Write an ADR in `docs/adr/` for long-lived architecture decisions and repository-wide policy changes.
+- In PRs, explain why new logic lives in its chosen layer and what part of the change is directly unit-testable.

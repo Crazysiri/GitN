@@ -255,6 +255,7 @@ final class RepoViewModel {
     var selectedDiffVisualContent: VisualFileContent?
     var selectedDiffFile: DiffFile?
     var isLoadingDiff = false
+    var isFileInspectorLoading = false
     /// True when the selected file exceeds maxDiffFileSize.
     var isFileTooLarge = false
     var fileTooLargeSizeMB: String = ""
@@ -397,6 +398,14 @@ final class RepoViewModel {
         context: DiffContext = .committed,
         preferredMode: FileInspectorMode = .diff
     ) async {
+        isFileInspectorLoading = true
+        fileInspectorPath = file.path
+        fileInspectorOldPath = file.oldPath
+        fileInspectorContext = context
+        fileInspectorMode = preferredMode
+        isFileInspectorPresented = true
+        defer { isFileInspectorLoading = false }
+
         await selectDiffFile(file, context: context)
         do {
             let loaded = try await loadInspectableFileContent(path: file.path, context: context)
@@ -436,9 +445,6 @@ final class RepoViewModel {
                     inspectorDisplayContent
                 }
             }
-            fileInspectorPath = file.path
-            fileInspectorOldPath = file.oldPath
-            fileInspectorContext = context
             fileInspectorContent = loadedText
             fileInspectorInitialContent = loadedText
             fileInspectorDiffBaseText = inspectorBaseText
@@ -457,8 +463,6 @@ final class RepoViewModel {
             isFileInspectorEditable = canEditInspectorContent
             fileInspectorEncodingName = loaded.content.encodingName
             fileInspectorMessage = loaded.message
-            fileInspectorMode = preferredMode
-            isFileInspectorPresented = true
             rebuildFileInspectorArtifacts(
                 diffBaseText: fileInspectorDiffBaseText,
                 currentText: fileInspectorContent,
@@ -1791,7 +1795,9 @@ final class RepoViewModel {
     }
 
     func copyFilePaths(_ paths: [String]) {
-        let text = paths.joined(separator: "\n")
+        let text = paths
+            .map { (repoPath as NSString).appendingPathComponent($0) }
+            .joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -1899,11 +1905,14 @@ final class RepoViewModel {
     }
 
     // MARK: - File History
-    var showFileHistory = false
     var isLoadingFileHistory = false
     var fileHistoryPath: String = ""
     var fileHistoryCommits: [CommitInfo] = []
+    var fileHistoryPathsByCommitHash: [String: String] = [:]
+    var fileHistoryWorkingTreePrefix: String = ""
     var fileHistorySelectedCommit: CommitInfo?
+    var fileHistoryBaseText: String = ""
+    var fileHistoryCurrentText: String = ""
     var fileHistoryDiff: String = ""
     var fileHistoryParsedDiff: ParsedDiff?
 
@@ -1912,16 +1921,29 @@ final class RepoViewModel {
         fileInspectorContext = context
         fileInspectorMode = .history
         isFileInspectorPresented = true
-        showFileHistory = false
         isLoadingFileHistory = true
         fileHistoryPath = path
         fileHistoryCommits = []
+        fileHistoryPathsByCommitHash = [:]
+        fileHistoryWorkingTreePrefix = ""
         fileHistorySelectedCommit = nil
+        fileHistoryBaseText = ""
+        fileHistoryCurrentText = ""
         fileHistoryDiff = ""
         fileHistoryParsedDiff = nil
         defer { isLoadingFileHistory = false }
         do {
-            fileHistoryCommits = try await git.fileLog(path: path)
+            fileHistoryWorkingTreePrefix = (try? await git.currentWorkingTreePrefix()) ?? ""
+            let revision: String? = if context == .committed, let selectedCommit, !selectedCommit.isUncommitted {
+                selectedCommit.hash
+            } else {
+                nil
+            }
+            let entries = try await git.fileLogEntries(path: path, revision: revision)
+            fileHistoryCommits = entries.map { $0.commit }
+            fileHistoryPathsByCommitHash = Dictionary(
+                uniqueKeysWithValues: entries.map { ($0.commit.hash, $0.pathAtCommit) }
+            )
         } catch {
             showToast(title: "Failed to load file history", detail: error.localizedDescription, style: .error)
         }
@@ -1930,23 +1952,50 @@ final class RepoViewModel {
     func selectFileHistoryCommit(_ commit: CommitInfo) async {
         fileHistorySelectedCommit = commit
         do {
-            let diff = try await git.fileLogDiff(hash: commit.hash, path: fileHistoryPath)
+            let resolvedPath = fileHistoryPathsByCommitHash[commit.hash] ?? fileHistoryPath
+            let diff = try await git.fileLogDiff(hash: commit.hash, path: resolvedPath)
+            let parsedDiff = DiffParserEngine.parse(diff)
+            let newPath = normalizeFileHistoryPath(parsedDiff.newPath ?? resolvedPath)
+            let oldPath = normalizeFileHistoryPath(parsedDiff.oldPath ?? resolvedPath)
+            let currentText = try? await git.decodedFileContent(atCommit: commit.hash, path: newPath).text
+            let baseText: String
+            if let parentHash = commit.parentHashes.first {
+                baseText = (try? await git.decodedFileContent(atCommit: parentHash, path: oldPath).text) ?? ""
+            } else {
+                baseText = ""
+            }
+
             fileHistoryDiff = diff
-            fileHistoryParsedDiff = DiffParserEngine.parse(diff)
+            fileHistoryParsedDiff = parsedDiff
+            fileHistoryCurrentText = currentText ?? ""
+            fileHistoryBaseText = baseText
         } catch {
+            fileHistoryBaseText = ""
+            fileHistoryCurrentText = ""
             fileHistoryDiff = ""
             fileHistoryParsedDiff = nil
         }
     }
 
     func closeFileHistory() {
-        showFileHistory = false
         isLoadingFileHistory = false
         fileHistoryPath = ""
         fileHistoryCommits = []
+        fileHistoryPathsByCommitHash = [:]
+        fileHistoryWorkingTreePrefix = ""
         fileHistorySelectedCommit = nil
+        fileHistoryBaseText = ""
+        fileHistoryCurrentText = ""
         fileHistoryDiff = ""
         fileHistoryParsedDiff = nil
+    }
+
+    private func normalizeFileHistoryPath(_ path: String) -> String {
+        guard !fileHistoryWorkingTreePrefix.isEmpty,
+              path.hasPrefix(fileHistoryWorkingTreePrefix) else {
+            return path
+        }
+        return String(path.dropFirst(fileHistoryWorkingTreePrefix.count))
     }
 
     // MARK: - Hosted Code Review

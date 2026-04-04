@@ -2581,35 +2581,88 @@ actor GitService {
 
     // MARK: - File History (git log --follow, kept as CLI - libgit2 has no --follow)
 
-    func fileLog(path: String, maxCount: Int = 200) async throws -> [CommitInfo] {
-        let raw = try await runGitOutput([
-            "log", "--follow", "--format=%H%n%h%n%P%n%an%n%ae%n%ai%n%s", "-n", "\(maxCount)", "--", path
-        ])
-        var result: [CommitInfo] = []
+    func currentWorkingTreePrefix() async throws -> String {
+        try await runGitOutput(["rev-parse", "--show-prefix"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func fileLogEntries(path: String, revision: String? = nil, maxCount: Int = 200) async throws -> [FileLogEntry] {
+        let prefix = try await currentWorkingTreePrefix()
+        var arguments = [
+            "log",
+            "--follow",
+            "--name-status",
+            "--format=__COMMIT__%n%H%n%h%n%P%n%an%n%ae%n%ai%n%s",
+            "-n", "\(maxCount)"
+        ]
+        if let revision, !revision.isEmpty {
+            arguments.append(revision)
+        }
+        arguments.append(contentsOf: ["--", path])
+        let raw = try await runGitOutput(arguments)
+        var result: [FileLogEntry] = []
         let lines = raw.components(separatedBy: "\n")
         var i = 0
-        while i + 6 < lines.count {
-            let hash = lines[i]
-            let shortHash = lines[i + 1]
-            let parentStr = lines[i + 2]
-            let authorName = lines[i + 3]
-            let authorEmail = lines[i + 4]
-            let date = lines[i + 5]
-            let message = lines[i + 6]
+        while i < lines.count {
+            guard lines[i] == "__COMMIT__" else {
+                i += 1
+                continue
+            }
+            guard i + 7 < lines.count else { break }
+
+            let hash = lines[i + 1]
+            let shortHash = lines[i + 2]
+            let parentStr = lines[i + 3]
+            let authorName = lines[i + 4]
+            let authorEmail = lines[i + 5]
+            let date = lines[i + 6]
+            let message = lines[i + 7]
             let parentHashes = parentStr.isEmpty ? [] : parentStr.components(separatedBy: " ")
-            result.append(CommitInfo(
+
+            i += 8
+            while i < lines.count, lines[i].isEmpty {
+                i += 1
+            }
+
+            var resolvedPath = path
+            if i < lines.count, lines[i] != "__COMMIT__" {
+                let parts = lines[i].split(separator: "\t")
+                if let rawPath = if parts.count >= 3 && (parts[0].hasPrefix("R") || parts[0].hasPrefix("C")) {
+                    parts.last.map(String.init)
+                } else if parts.count >= 2 {
+                    parts[1...].last.map(String.init)
+                } else {
+                    nil
+                } {
+                    resolvedPath = Self.normalizeLogPath(rawPath, prefix: prefix)
+                }
+                while i < lines.count, !lines[i].isEmpty, lines[i] != "__COMMIT__" {
+                    i += 1
+                }
+            }
+
+            let commit = CommitInfo(
                 hash: hash, shortHash: shortHash, parentHashes: parentHashes,
                 authorName: authorName, authorEmail: authorEmail,
                 date: date, message: message, refs: []
-            ))
-            i += 7
+            )
+            result.append(FileLogEntry(commit: commit, pathAtCommit: resolvedPath))
         }
         return result
+    }
+
+    func fileLog(path: String, revision: String? = nil, maxCount: Int = 200) async throws -> [CommitInfo] {
+        try await fileLogEntries(path: path, revision: revision, maxCount: maxCount).map(\.commit)
     }
 
     /// Get the diff for a specific file at a specific commit
     func fileLogDiff(hash: String, path: String) async throws -> String {
         try await runGitOutput(["log", "-1", "-p", "--follow", "--format=", hash, "--", path])
+    }
+
+    private static func normalizeLogPath(_ rawPath: String, prefix: String) -> String {
+        guard !prefix.isEmpty, rawPath.hasPrefix(prefix) else { return rawPath }
+        return String(rawPath.dropFirst(prefix.count))
     }
 
     enum ResetMode: String {

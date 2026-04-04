@@ -1009,7 +1009,7 @@ struct ConflictEditorDocument: Equatable, Sendable {
                 case nil:
                     break
                 }
-                if let side {
+                if side != nil {
                     let insertionLine = min(
                         min(max(block.anchor.preferredLine, 0), max(range.lowerBound, 0)),
                         outputLines.count

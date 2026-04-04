@@ -278,8 +278,7 @@ struct CloneSheetView: View {
                     Text("Repository URL")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                    TextField("https://github.com/user/repo.git", text: $urlString)
-                        .textFieldStyle(.roundedBorder)
+                    FocusTextField(titleKey: "https://github.com/user/repo.git", text: $urlString)
                         .onChange(of: urlString) { _, newURL in
                             let name = repoName(from: newURL)
                             if !name.isEmpty {
@@ -317,8 +316,7 @@ struct CloneSheetView: View {
                     Text("Folder name")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
-                    TextField("repo-name", text: $folderName)
-                        .textFieldStyle(.roundedBorder)
+                    FocusTextField(titleKey: "repo-name", text: $folderName)
                 }
 
                 // Full path preview

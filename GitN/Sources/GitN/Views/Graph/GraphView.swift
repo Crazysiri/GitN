@@ -16,6 +16,8 @@ struct GraphView: View {
     @State private var upstreamBranch = ""
     @State private var pendingRemoteBranchDelete: (remote: String, branch: String)?
     @State private var uncommittedScrolledAway = false
+    @State private var uncommittedRevealAccent = false
+    @State private var isEditCommitMessageFocused = false
     @State private var isHoveringReflogToggle = false
     @State private var isHoveringGraphMode = false
     @State private var showGraphModeMenu = false
@@ -42,6 +44,26 @@ struct GraphView: View {
 
     private var graphModeFill: Color {
         isHoveringGraphMode ? ChromePalette.chromeButtonHoverFill : .clear
+    }
+
+    private var uncommittedChipFill: Color {
+        uncommittedRevealAccent ? ChromePalette.chromeButtonHoverFill.opacity(0.98) : ChromePalette.panelMutedBackground.opacity(0.96)
+    }
+
+    private var uncommittedChipBorder: Color {
+        uncommittedRevealAccent ? ChromePalette.chromeButtonHoverBorder : ChromePalette.panelBorder.opacity(0.92)
+    }
+
+    private var uncommittedChipShadow: Color {
+        uncommittedRevealAccent ? .black.opacity(0.24) : .black.opacity(0.15)
+    }
+
+    private var graphModeTooltipText: String {
+        "Graph Scope\nShow all branches or only the current branch."
+    }
+
+    private var reflogTooltipText: String {
+        "Reflog\nShow reflog entries and recovered commits in the graph"
     }
 
     var body: some View {
@@ -95,6 +117,24 @@ struct GraphView: View {
                 Text("Are you sure you want to delete \(p.remote)/\(p.branch) from the remote? This cannot be undone.")
             }
         }
+        .onChange(of: uncommittedScrolledAway) { _, newValue in
+            guard newValue else {
+                uncommittedRevealAccent = false
+                return
+            }
+
+            withAnimation(.easeOut(duration: 0.28)) {
+                uncommittedRevealAccent = true
+            }
+
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 340_000_000)
+                guard uncommittedScrolledAway else { return }
+                withAnimation(.easeOut(duration: 0.42)) {
+                    uncommittedRevealAccent = false
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -145,23 +185,45 @@ struct GraphView: View {
                         Button {
                             viewModel.scrollToCommitHash = uncommitted.hash
                         } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.up")
-                                    .font(AppTypography.Graph.header)
-                                Text("Uncommitted")
-                                    .font(AppTypography.Detail.bodyMedium)
+                            VStack(spacing: 0) {
+                                Rectangle()
+                                    .fill(uncommittedRevealAccent ? ChromePalette.reflogAccent.opacity(0.72) : ChromePalette.panelBorder.opacity(0.9))
+                                    .frame(width: 52, height: 3)
+                                    .clipShape(Capsule())
+                                    .offset(y: 1)
+
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.up")
+                                        .font(AppTypography.Graph.header)
+                                        .foregroundStyle(uncommittedRevealAccent ? ChromePalette.reflogAccent : .primary.opacity(0.78))
+                                    Text("Uncommitted")
+                                        .font(AppTypography.Detail.bodyMedium)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.top, 7)
+                                .padding(.bottom, 6)
+                                .background(uncommittedChipFill, in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(uncommittedChipBorder, lineWidth: 0.95)
+                                )
+                                .shadow(color: uncommittedChipShadow, radius: uncommittedRevealAccent ? 11 : 6, y: uncommittedRevealAccent ? 5 : 3)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.regularMaterial, in: Capsule())
-                            .overlay(Capsule().strokeBorder(Color(.separatorColor), lineWidth: 0.5))
-                            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 6)
+                        .padding(.top, 4)
                         .padding(.trailing, 12)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                        .animation(.easeInOut(duration: 0.2), value: uncommittedScrolledAway)
+                        .transition(
+                            .asymmetric(
+                                insertion: .offset(y: -10)
+                                    .combined(with: .scale(scale: 0.96, anchor: .topTrailing))
+                                    .combined(with: .opacity),
+                                removal: .offset(y: -6)
+                                    .combined(with: .opacity)
+                            )
+                        )
+                        .animation(.easeOut(duration: 0.34), value: uncommittedScrolledAway)
+                        .animation(.easeOut(duration: 0.28), value: uncommittedRevealAccent)
                     }
                 }
             }
@@ -255,6 +317,7 @@ struct GraphView: View {
             }
             .buttonStyle(.plain)
             .onHover { isHoveringGraphMode = $0 }
+            .hoverTooltip(graphModeTooltipText)
             .popover(isPresented: $showGraphModeMenu, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(GraphDisplayMode.allCases, id: \.self) { mode in
@@ -321,6 +384,7 @@ struct GraphView: View {
                     .strokeBorder(reflogToggleBorder, lineWidth: 0.75)
             )
             .onHover { isHoveringReflogToggle = $0 }
+            .hoverTooltip(reflogTooltipText)
             .padding(.trailing, 8)
         }
         .font(AppTypography.Graph.header)
@@ -387,8 +451,7 @@ struct GraphView: View {
         VStack(spacing: 12) {
             Text("Create Tag")
                 .font(.headline)
-            TextField("Tag name", text: $tagName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Tag name", text: $tagName)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showCreateTagSheet = false }
@@ -418,8 +481,7 @@ struct GraphView: View {
                     .lineLimit(1)
                     .frame(width: 280)
             }
-            TextField("Branch name", text: $newBranchNameAtCommit)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch name", text: $newBranchNameAtCommit)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showCreateBranchSheet = false }
@@ -442,10 +504,11 @@ struct GraphView: View {
         VStack(spacing: 12) {
             Text("Edit Commit Message")
                 .font(.headline)
-            TextEditor(text: $editedMessage)
+            CommitMessageEditor(text: $editedMessage, isFocused: $isEditCommitMessageFocused)
                 .font(AppTypography.Graph.editor)
+                .background(Color(.textBackgroundColor))
                 .frame(width: 400, height: 120)
-                .border(Color(.separatorColor))
+                .animatedInputBorder(isFocused: isEditCommitMessageFocused, cornerRadius: 6, showsBaseBorder: true)
             HStack {
                 Button("Cancel") { showEditMessageSheet = false }
                     .keyboardShortcut(.cancelAction)
@@ -467,11 +530,9 @@ struct GraphView: View {
         VStack(spacing: 12) {
             Text("Set Upstream")
                 .font(.headline)
-            TextField("Remote", text: $upstreamRemote)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Remote", text: $upstreamRemote)
                 .frame(width: 280)
-            TextField("Branch", text: $upstreamBranch)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch", text: $upstreamBranch)
                 .frame(width: 280)
             HStack {
                 Button("Cancel") { showSetUpstreamSheet = false }

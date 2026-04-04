@@ -19,6 +19,7 @@
     currentPreviewIdentity: null,
     currentEditorPath: null,
     pendingViewState: null,
+    pendingGutterAnimationFrame: null,
   };
   
 
@@ -86,6 +87,12 @@
   }
 
   function disposeAllEditors() {
+    if (state.pendingGutterAnimationFrame !== null) {
+      try {
+        window.cancelAnimationFrame(state.pendingGutterAnimationFrame);
+      } catch (_) {}
+      state.pendingGutterAnimationFrame = null;
+    }
     if (state.zoneResizeObserver) {
       try {
         state.zoneResizeObserver.disconnect();
@@ -404,11 +411,11 @@
       });
       editor.onDidScrollChange(() => {
         syncCurrentHunkIndexToViewport(editor);
-        renderDeletionGutter(editor);
+        scheduleDeletionGutterRender(editor);
       });
       editor.onDidLayoutChange(() => {
         applyEditorMetrics(shellNode, editor);
-        renderDeletionGutter(editor);
+        scheduleDeletionGutterRender(editor);
       });
       state.currentDiffIdentity = buildDiffIdentity(item);
       state.currentEditorPath = item.path;
@@ -643,19 +650,35 @@
     };
   }
 
-  function renderVisibleGutter(editor, gutterOverlay, renderDeletions) {
+  function visibleDeletionFrames(editor, gutterOverlay, renderDeletions) {
+    const viewportTop = 0;
+    const layout = editor.getLayoutInfo();
+    const viewportHeight = layout ? layout.height : 0;
+    const viewportBottom = viewportTop + viewportHeight;
+    const overscan = Math.max(viewportHeight, 600);
+
+    return Array.isArray(renderDeletions)
+      ? renderDeletions.map((entry) => {
+          const frame = resolveDeletionBlockFrame(editor, gutterOverlay, entry);
+          return {
+            entry,
+            frame,
+            isVisible: frame.top < (viewportBottom + overscan) && (frame.top + frame.height) > (viewportTop - overscan),
+          };
+        })
+      : [];
+  }
+
+  function renderVisibleGutter(editor, gutterOverlay, deletionFrames) {
     const visibleRanges = editor.getVisibleRanges();
     const scrollTop = editor.getScrollTop();
     const seenLines = new Set();
     const lineHeight = editor.getOption(window.monaco.editor.EditorOption.lineHeight);
-    const hiddenRanges = Array.isArray(renderDeletions)
-      ? renderDeletions.map((entry) => {
-          const frame = resolveDeletionBlockFrame(editor, gutterOverlay, entry);
-          return {
-            top: frame.top,
-            bottom: frame.top + frame.height,
-          };
-        })
+    const hiddenRanges = Array.isArray(deletionFrames)
+      ? deletionFrames.filter((item) => item.isVisible).map((item) => ({
+          top: item.frame.top,
+          bottom: item.frame.top + item.frame.height,
+        }))
       : [];
 
     for (const range of visibleRanges) {
@@ -694,7 +717,22 @@
     return editor.getTopForLineNumber(anchorLine) - scrollTop - zoneHeight;
   }
 
-  function createDeletionGutterBlock(entry, top, zoneHeight) {
+  function visibleDeletionLineRange(top, zoneHeight, lineHeight, viewportHeight) {
+    const overscanLines = 12;
+    const visibleTop = Math.max(0, -top);
+    const visibleBottom = Math.min(zoneHeight, viewportHeight - top);
+    const start = Math.max(0, Math.floor(visibleTop / lineHeight) - overscanLines);
+    const end = Math.max(
+      start,
+      Math.min(
+        Math.ceil(visibleBottom / lineHeight) + overscanLines,
+        Math.ceil(zoneHeight / lineHeight)
+      )
+    );
+    return { start, end };
+  }
+
+  function createDeletionGutterBlock(entry, top, zoneHeight, lineHeight, viewportHeight) {
     const gutterBlock = document.createElement("div");
     gutterBlock.className = "gitn-deletion-gutter-block";
     gutterBlock.style.top = `${top}px`;
@@ -709,7 +747,11 @@
       gutterBlock.appendChild(createHunkActions(control));
     }
 
-    for (const line of entry.deletedLines) {
+    const range = visibleDeletionLineRange(top, zoneHeight, lineHeight, viewportHeight);
+    const rowsContainer = document.createElement("div");
+    rowsContainer.style.transform = `translateY(${range.start * lineHeight}px)`;
+
+    for (const line of entry.deletedLines.slice(range.start, range.end)) {
       const row = document.createElement("div");
       row.className = "gitn-deletion-gutter-line";
       row.appendChild(createGutterNumberContent({
@@ -717,13 +759,15 @@
         newLineNum: null,
       }));
 
-      gutterBlock.appendChild(row);
+      rowsContainer.appendChild(row);
     }
+
+    gutterBlock.appendChild(rowsContainer);
 
     return gutterBlock;
   }
 
-  function createDeletionContentBlock(entry, top, zoneHeight, scrollLeft) {
+  function createDeletionContentBlock(entry, top, zoneHeight, scrollLeft, lineHeight, viewportHeight) {
     const contentBlock = document.createElement("div");
     contentBlock.className = "gitn-deletion-content-block";
     contentBlock.style.top = `${top}px`;
@@ -734,7 +778,11 @@
     scrollContent.className = "gitn-deletion-content-scroll";
     scrollContent.style.transform = `translateX(${-scrollLeft}px)`;
 
-    for (const line of entry.deletedLines) {
+    const range = visibleDeletionLineRange(top, zoneHeight, lineHeight, viewportHeight);
+    const rowsContainer = document.createElement("div");
+    rowsContainer.style.transform = `translateY(${range.start * lineHeight}px)`;
+
+    for (const line of entry.deletedLines.slice(range.start, range.end)) {
       const row = document.createElement("div");
       row.className = "gitn-deletion-line";
 
@@ -763,9 +811,10 @@
       }
 
       row.appendChild(content);
-      scrollContent.appendChild(row);
+      rowsContainer.appendChild(row);
     }
 
+    scrollContent.appendChild(rowsContainer);
     contentBlock.appendChild(scrollContent);
     return contentBlock;
   }
@@ -778,7 +827,11 @@
     if (!isEditorAlive(editor)) {
       return;
     }
-    window.requestAnimationFrame(() => {
+    if (state.pendingGutterAnimationFrame !== null) {
+      return;
+    }
+    state.pendingGutterAnimationFrame = window.requestAnimationFrame(() => {
+      state.pendingGutterAnimationFrame = null;
       if (isEditorAlive(editor)) {
         renderDeletionGutter(editor);
       }
@@ -1245,15 +1298,21 @@
     const lineHeight = editor.getOption(window.monaco.editor.EditorOption.lineHeight);
     applyOverlayLayout(editor);
     const scrollLeft = editor.getScrollLeft();
+    const layout = editor.getLayoutInfo();
+    const viewportHeight = layout ? layout.height : 0;
     const renderDeletions = Array.isArray(state.diffModel.renderDeletions) ? state.diffModel.renderDeletions : [];
-    renderVisibleGutter(editor, gutterOverlay, renderDeletions);
+    const deletionFrames = visibleDeletionFrames(editor, gutterOverlay, renderDeletions);
+    renderVisibleGutter(editor, gutterOverlay, deletionFrames);
 
-    for (const entry of renderDeletions) {
-      const frame = resolveDeletionBlockFrame(editor, gutterOverlay, entry);
-      const zoneHeight = frame.height;
-      const top = frame.top;
-      gutterOverlay.appendChild(createDeletionGutterBlock(entry, top, zoneHeight));
-      contentOverlay.appendChild(createDeletionContentBlock(entry, top, zoneHeight, scrollLeft));
+    for (const item of deletionFrames) {
+      if (!item.isVisible) {
+        continue;
+      }
+      const entry = item.entry;
+      const zoneHeight = item.frame.height;
+      const top = item.frame.top;
+      gutterOverlay.appendChild(createDeletionGutterBlock(entry, top, zoneHeight, lineHeight, viewportHeight));
+      contentOverlay.appendChild(createDeletionContentBlock(entry, top, zoneHeight, scrollLeft, lineHeight, viewportHeight));
     }
   }
 

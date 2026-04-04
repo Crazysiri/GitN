@@ -20,20 +20,68 @@ extension EnvironmentValues {
 enum HoverTooltipPlacement {
     case above
     case below
+    case leading
+}
+
+enum HoverTooltipTextStyle {
+    case standard
+    case plain
 }
 
 struct HoverTooltipBubble: View {
     let text: String
+    let style: HoverTooltipTextStyle
+
+    private var titleLine: String {
+        let lines = normalizedLines
+        return lines.first ?? text
+    }
+
+    private var detailLines: [String] {
+        Array(normalizedLines.dropFirst())
+    }
+
+    private var normalizedLines: [String] {
+        text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0) }
+    }
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 12))
-            .foregroundStyle(.primary)
-            .lineLimit(3)
+        Group {
+            if style == .plain {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(normalizedLines.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: detailLines.isEmpty ? 0 : 4) {
+                    Text(titleLine)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    if !detailLines.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(Array(detailLines.prefix(4).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
             .multilineTextAlignment(.leading)
             .frame(maxWidth: 400, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color(.controlBackgroundColor))
@@ -70,7 +118,7 @@ private struct HoverTooltipAnchorView: NSViewRepresentable {
 // MARK: - Panel (one per `.hoverTooltip`)
 
 private final class HoverTooltipPanel: NSPanel {
-    private let hostingView = NSHostingView(rootView: HoverTooltipBubble(text: ""))
+    private let hostingView = NSHostingView(rootView: HoverTooltipBubble(text: "", style: .standard))
     private var pendingShow: DispatchWorkItem?
 
     init() {
@@ -92,12 +140,12 @@ private final class HoverTooltipPanel: NSPanel {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func scheduleShow(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
+    func scheduleShow(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
         pendingShow?.cancel()
         let item = DispatchWorkItem { [weak self, weak anchorView] in
             guard let self, let anchorView, anchorView.window != nil else { return }
             self.pendingShow = nil
-            self.present(text: text, placement: placement, from: anchorView)
+            self.present(text: text, style: style, placement: placement, from: anchorView)
         }
         pendingShow = item
         let delay: TimeInterval = isVisible ? 0.05 : 0.1
@@ -112,10 +160,10 @@ private final class HoverTooltipPanel: NSPanel {
         }
     }
 
-    private func present(text: String, placement: HoverTooltipPlacement, from anchorView: NSView) {
+    private func present(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
         guard let window = anchorView.window else { return }
 
-        hostingView.rootView = HoverTooltipBubble(text: text)
+        hostingView.rootView = HoverTooltipBubble(text: text, style: style)
         hostingView.layoutSubtreeIfNeeded()
         let fittingSize = hostingView.fittingSize
         let panelSize = CGSize(width: fittingSize.width, height: fittingSize.height)
@@ -124,13 +172,18 @@ private final class HoverTooltipPanel: NSPanel {
         let anchorRectOnScreen = window.convertToScreen(anchorRectInWindow)
         let gap: CGFloat = 6
 
-        let originX = anchorRectOnScreen.midX - panelSize.width / 2
+        let originX: CGFloat
         let originY: CGFloat
         switch placement {
         case .above:
+            originX = anchorRectOnScreen.midX - panelSize.width / 2
             originY = anchorRectOnScreen.maxY + gap
         case .below:
+            originX = anchorRectOnScreen.midX - panelSize.width / 2
             originY = anchorRectOnScreen.minY - panelSize.height - gap
+        case .leading:
+            originX = anchorRectOnScreen.minX - panelSize.width - gap
+            originY = anchorRectOnScreen.midY - panelSize.height / 2
         }
 
         setContentSize(panelSize)
@@ -157,6 +210,7 @@ private final class HoverTooltipPanelController: ObservableObject {
 
 private struct HoverTooltipModifier: ViewModifier {
     let text: String
+    let style: HoverTooltipTextStyle
     let placement: HoverTooltipPlacement
     let isEnabled: Bool
 
@@ -195,16 +249,17 @@ private struct HoverTooltipModifier: ViewModifier {
             panel.cancelAndHide()
             return
         }
-        panel.scheduleShow(text: text, placement: placement, from: anchorView)
+        panel.scheduleShow(text: text, style: style, placement: placement, from: anchorView)
     }
 }
 
 extension View {
     func hoverTooltip(
         _ text: String,
+        style: HoverTooltipTextStyle = .standard,
         placement: HoverTooltipPlacement = .above,
         isEnabled: Bool = true
     ) -> some View {
-        modifier(HoverTooltipModifier(text: text, placement: placement, isEnabled: isEnabled))
+        modifier(HoverTooltipModifier(text: text, style: style, placement: placement, isEnabled: isEnabled))
     }
 }

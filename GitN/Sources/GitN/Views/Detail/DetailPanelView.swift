@@ -42,6 +42,12 @@ struct DetailPanelView: View {
     @State private var hoveredReflogLinkID: String?
     @State private var isHoveringCommitHash = false
     @State private var hoveredParentHash: String?
+    @State private var isCommittedEditTitleFocused = false
+    @State private var isCommittedEditDescriptionFocused = false
+    @State private var isUncommittedSummaryFocused = false
+    @State private var isUncommittedDescriptionFocused = false
+    @State private var isConflictCommitMessageFocused = false
+    @State private var committedEditTitleFocusRequest = 0
 
     // MARK: - Rubber-band selection (unstaged area)
     @State private var isRubberBanding = false
@@ -326,7 +332,9 @@ struct DetailPanelView: View {
                     CommitTitleField(
                         text: $editedTitle,
                         placeholder: "Title",
-                        font: AppTypography.Detail.titleFieldNS
+                        font: AppTypography.Detail.titleFieldNS,
+                        isFocused: $isCommittedEditTitleFocused,
+                        focusRequestID: committedEditTitleFocusRequest
                     )
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
@@ -338,10 +346,7 @@ struct DetailPanelView: View {
                 }
                 .frame(height: 24)
                 .background(Color(.textBackgroundColor).opacity(0.5))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(Color.accentColor.opacity(0.6), lineWidth: 1)
-                )
+                .animatedInputBorder(isFocused: isCommittedEditTitleFocused, cornerRadius: 4, showsBaseBorder: true)
 
                 commitDescriptionField(
                     text: Binding(
@@ -426,7 +431,10 @@ struct DetailPanelView: View {
                 originalDescription = description
                 editedTitle = title
                 editedDescription = description
+                isCommittedEditDescriptionFocused = false
+                isCommittedEditTitleFocused = false
                 isEditingMessage = true
+                committedEditTitleFocusRequest += 1
             }
             .hoverTooltip("Click to edit commit message", isEnabled: isEditableCommit)
         }
@@ -1681,7 +1689,8 @@ struct DetailPanelView: View {
                         set: { viewModel.commitSummary = $0 }
                     ),
                     placeholder: "Summary",
-                    font: AppTypography.Detail.titleFieldRegularNS
+                    font: AppTypography.Detail.titleFieldRegularNS,
+                    isFocused: $isUncommittedSummaryFocused
                 )
                 .padding(.horizontal, 6)
                 .padding(.vertical, 4)
@@ -1693,10 +1702,7 @@ struct DetailPanelView: View {
             }
             .frame(height: 24)
             .background(Color(.textBackgroundColor).opacity(0.5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-            )
+            .animatedInputBorder(isFocused: isUncommittedSummaryFocused, cornerRadius: 3, showsBaseBorder: true)
             .padding(.horizontal, 8)
 
             // Description field
@@ -1745,7 +1751,10 @@ struct DetailPanelView: View {
     }
 
     private func commitDescriptionField(text: Binding<String>, placeholder: String, cornerRadius: CGFloat) -> some View {
-        CommitMessageEditor(text: text)
+        CommitMessageEditor(
+            text: text,
+            isFocused: isEditingMessage ? $isCommittedEditDescriptionFocused : $isUncommittedDescriptionFocused
+        )
             .frame(minHeight: LayoutDefaults.CommittedMessage.editingDescriptionMinHeight, maxHeight: .infinity)
             .background(Color(.textBackgroundColor).opacity(0.5))
             .overlay(alignment: .topLeading) {
@@ -1758,9 +1767,10 @@ struct DetailPanelView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
+            .animatedInputBorder(
+                isFocused: isEditingMessage ? isCommittedEditDescriptionFocused : isUncommittedDescriptionFocused,
+                cornerRadius: cornerRadius,
+                showsBaseBorder: true
             )
     }
 
@@ -1969,16 +1979,12 @@ struct DetailPanelView: View {
             }
 
             // Commit message editor
-            TextEditor(text: conflictMessageBinding(type))
-            .font(AppTypography.Detail.mono)
-            .scrollContentBackground(.hidden)
-            .padding(4)
-            .background(Color(.textBackgroundColor).opacity(0.5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(Color(.separatorColor), lineWidth: 0.5)
-            )
-            .frame(minHeight: 60, maxHeight: 100)
+            CommitMessageEditor(text: conflictMessageBinding(type), isFocused: $isConflictCommitMessageFocused)
+                .font(AppTypography.Detail.mono)
+                .padding(4)
+                .background(Color(.textBackgroundColor).opacity(0.5))
+                .animatedInputBorder(isFocused: isConflictCommitMessageFocused, cornerRadius: 3, showsBaseBorder: true)
+                .frame(minHeight: 60, maxHeight: 100)
 
             if !conflictedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
@@ -2541,6 +2547,35 @@ struct DiffFileRow: View {
 
     private var imageStatusLabel: String? { file.imageStatusText }
 
+    private var tooltipText: String {
+        if file.isRenamed, let oldPath = file.oldPath {
+            return wrappedPath(file.path) + "\n\n" + wrappedPath(oldPath)
+        }
+        return wrappedPath(file.path)
+    }
+
+    private func wrappedPath(_ path: String) -> String {
+        let limit = 60
+        var lines: [String] = []
+        var currentLine = ""
+
+        for segment in path.split(separator: "/", omittingEmptySubsequences: false) {
+            let part = currentLine.isEmpty ? String(segment) : "/\(segment)"
+            if currentLine.count + part.count > limit, !currentLine.isEmpty {
+                lines.append(currentLine)
+                currentLine = String(segment)
+            } else {
+                currentLine += part
+            }
+        }
+
+        if !currentLine.isEmpty {
+            lines.append(currentLine)
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: rowIconName)
@@ -2617,6 +2652,7 @@ struct DiffFileRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.2) : Color.clear)
+        .hoverTooltip(tooltipText, style: .plain, placement: .leading)
     }
 
     private var rowIconName: String {
@@ -2713,9 +2749,13 @@ struct CommitMessageEditor: NSViewRepresentable {
     static let verticalInset: CGFloat = 4
 
     @Binding var text: String
+    @Binding var isFocused: Bool
 
     func makeNSView(context: Context) -> NSScrollView {
         let textView = ActivatingTextView()
+        textView.onFocusChange = { isFocused in
+            context.coordinator.parent.isFocused = isFocused
+        }
         textView.isRichText = false
         textView.font = AppTypography.Detail.textViewNS
         textView.textColor = .textColor
@@ -2723,6 +2763,7 @@ struct CommitMessageEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
+        textView.focusRingType = .none
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -2746,7 +2787,10 @@ struct CommitMessageEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
+        guard let textView = scrollView.documentView as? ActivatingTextView else { return }
+        textView.onFocusChange = { isFocused in
+            context.coordinator.parent.isFocused = isFocused
+        }
         if textView.string != text {
             textView.string = text
         }
@@ -2767,6 +2811,14 @@ struct CommitMessageEditor: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
         }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+        }
     }
 }
 
@@ -2774,6 +2826,22 @@ struct CommitTitleField: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
     let font: NSFont
+    @Binding var isFocused: Bool
+    let focusRequestID: Int
+
+    init(
+        text: Binding<String>,
+        placeholder: String,
+        font: NSFont,
+        isFocused: Binding<Bool>,
+        focusRequestID: Int = 0
+    ) {
+        self._text = text
+        self.placeholder = placeholder
+        self.font = font
+        self._isFocused = isFocused
+        self.focusRequestID = focusRequestID
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -2781,6 +2849,9 @@ struct CommitTitleField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSTextField {
         let textField = ActivatingTextField(string: text)
+        textField.onFocusChange = { isFocused in
+            context.coordinator.parent.isFocused = isFocused
+        }
         textField.delegate = context.coordinator
         textField.placeholderString = placeholder
         textField.font = font
@@ -2798,6 +2869,10 @@ struct CommitTitleField: NSViewRepresentable {
     }
 
     func updateNSView(_ textField: NSTextField, context: Context) {
+        guard let textField = textField as? ActivatingTextField else { return }
+        textField.onFocusChange = { isFocused in
+            context.coordinator.parent.isFocused = isFocused
+        }
         if textField.stringValue != text {
             textField.stringValue = text
         }
@@ -2807,18 +2882,34 @@ struct CommitTitleField: NSViewRepresentable {
         if textField.font != font {
             textField.font = font
         }
+        if context.coordinator.lastFocusRequestID != focusRequestID {
+            context.coordinator.lastFocusRequestID = focusRequestID
+            DispatchQueue.main.async {
+                textField.window?.makeFirstResponder(textField)
+            }
+        }
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: CommitTitleField
+        var lastFocusRequestID: Int
 
         init(_ parent: CommitTitleField) {
             self.parent = parent
+            self.lastFocusRequestID = parent.focusRequestID
         }
 
         func controlTextDidChange(_ notification: Notification) {
             guard let textField = notification.object as? NSTextField else { return }
             parent.text = textField.stringValue
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
         }
     }
 }
@@ -2826,6 +2917,8 @@ struct CommitTitleField: NSViewRepresentable {
 /// NSTextView subclass that forces app activation on mouseDown,
 /// ensuring keyboard events go to this window immediately.
 final class ActivatingTextView: NSTextView {
+    var onFocusChange: ((Bool) -> Void)?
+
     override func mouseDown(with event: NSEvent) {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -2834,10 +2927,28 @@ final class ActivatingTextView: NSTextView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            onFocusChange?(true)
+        }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            onFocusChange?(false)
+        }
+        return resigned
     }
 }
 
 final class ActivatingTextField: NSTextField {
+    var onFocusChange: ((Bool) -> Void)?
+
     override func mouseDown(with event: NSEvent) {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
@@ -2846,6 +2957,22 @@ final class ActivatingTextField: NSTextField {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            onFocusChange?(true)
+        }
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned {
+            onFocusChange?(false)
+        }
+        return resigned
     }
 }
 

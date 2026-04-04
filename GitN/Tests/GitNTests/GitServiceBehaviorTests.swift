@@ -26,6 +26,47 @@ final class GitServiceBehaviorTests: XCTestCase {
         )
     }
 
+    func testFileLogEntriesResolveHistoricalPathAcrossRename() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.txt", contents: "one\n")
+        _ = try repo.commitAll(message: "initial notes")
+
+        try repo.run(["mv", "notes.txt", "journal.txt"])
+        _ = try repo.commitAll(message: "rename notes")
+
+        try repo.appendFile("journal.txt", contents: "two\n")
+        _ = try repo.commitAll(message: "update journal")
+
+        let service = GitService(repoPath: repo.path)
+        let entries = try await service.fileLogEntries(path: "journal.txt")
+
+        XCTAssertEqual(
+            entries.map(\.pathAtCommit),
+            ["journal.txt", "journal.txt", "notes.txt"]
+        )
+    }
+
+    func testFileLogCanBeAnchoredToSpecificRevision() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        let initialHash = try repo.commitAll(message: "initial")
+
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.appendFile("tracked.txt", contents: "two\n")
+        let topicHash = try repo.commitAll(message: "topic change")
+
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("other.txt", contents: "main\n")
+        _ = try repo.commitAll(message: "main change")
+
+        let service = GitService(repoPath: repo.path)
+        let defaultHistory = try await service.fileLog(path: "tracked.txt")
+        let anchoredHistory = try await service.fileLog(path: "tracked.txt", revision: topicHash)
+
+        XCTAssertEqual(defaultHistory.map(\.hash), [initialHash])
+        XCTAssertEqual(anchoredHistory.map(\.hash), [topicHash, initialHash])
+    }
+
     func testStatusReportsMixedStagedAndUnstagedChangesForSameFile() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("tracked.txt", contents: "one\n")

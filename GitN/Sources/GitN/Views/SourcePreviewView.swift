@@ -402,58 +402,94 @@ struct FileInspectorOverlayView: View {
 
     @ViewBuilder
     private var inspectorContent: some View {
-        switch viewModel.fileInspectorMode {
-        case .history:
-            FileHistoryPanelContent(viewModel: viewModel, showsToolbar: false)
-        case .diff:
-            if viewModel.isFileTooLarge {
-                fileTooLargeState
-            } else if let visualContent = viewModel.fileInspectorVisualContent {
-                VisualFileContentView(
-                    content: visualContent,
-                    path: viewModel.fileInspectorPath,
-                    mode: .diff,
-                    oldPath: viewModel.fileInspectorOldPath
-                )
-            } else {
-                monacoDiffContent
-            }
-        case .preview:
-            if let visualContent = viewModel.fileInspectorVisualContent {
-                VisualFileContentView(
-                    content: visualContent,
-                    path: viewModel.fileInspectorPath,
-                    mode: .preview
-                )
-            } else if viewModel.fileInspectorPath.isMarkdownFile {
-                MarkdownInspectorContentView(
-                    text: Bindable(viewModel).fileInspectorContent,
-                    isEditable: viewModel.isFileInspectorEditable
-                )
-            } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
-                unsupportedContentState
-            } else {
-                MonacoInspectorView(
-                    mode: .preview,
-                    isDark: monacoIsDark,
-                    preview: MonacoPreviewPayload(
+        ZStack {
+            switch viewModel.fileInspectorMode {
+            case .history:
+                FileHistoryPanelContent(viewModel: viewModel, showsToolbar: false)
+            case .diff:
+                if viewModel.isFileTooLarge {
+                    fileTooLargeState
+                } else if let visualContent = viewModel.fileInspectorVisualContent {
+                    VisualFileContentView(
+                        content: visualContent,
                         path: viewModel.fileInspectorPath,
-                        language: RepoViewModel.monacoLanguage(for: viewModel.fileInspectorPath.sourceLanguage),
-                        content: viewModel.fileInspectorContent,
+                        mode: .diff,
+                        oldPath: viewModel.fileInspectorOldPath
+                    )
+                } else {
+                    monacoDiffContent
+                }
+            case .preview:
+                if let visualContent = viewModel.fileInspectorVisualContent {
+                    VisualFileContentView(
+                        content: visualContent,
+                        path: viewModel.fileInspectorPath,
+                        mode: .preview
+                    )
+                } else if viewModel.fileInspectorPath.isMarkdownFile {
+                    MarkdownInspectorContentView(
+                        text: Bindable(viewModel).fileInspectorContent,
                         isEditable: viewModel.isFileInspectorEditable
-                    ),
-                    items: [],
-                    commandBridge: nil,
-                    onContentChange: { _, content in
-                        viewModel.fileInspectorContent = content
-                    },
-                    onHunkAction: nil,
-                    onSaveRequest: {
-                        Task { _ = await viewModel.saveFileInspector() }
-                    }
-                )
+                    )
+                } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
+                    unsupportedContentState
+                } else {
+                    MonacoInspectorView(
+                        mode: .preview,
+                        isDark: monacoIsDark,
+                        preview: MonacoPreviewPayload(
+                            path: viewModel.fileInspectorPath,
+                            language: RepoViewModel.monacoLanguage(for: viewModel.fileInspectorPath.sourceLanguage),
+                            content: viewModel.fileInspectorContent,
+                            isEditable: viewModel.isFileInspectorEditable
+                        ),
+                        items: [],
+                        commandBridge: nil,
+                        onContentChange: { _, content in
+                            viewModel.fileInspectorContent = content
+                        },
+                        onHunkAction: nil,
+                        onSaveRequest: {
+                            Task { _ = await viewModel.saveFileInspector() }
+                        }
+                    )
+                }
+            }
+
+            if viewModel.fileInspectorMode == .diff && viewModel.isFileInspectorLoading {
+                loadingOverlay
             }
         }
+    }
+
+    private var loadingOverlay: some View {
+        ZStack {
+            ChromePalette.panelBackground.opacity(0.82)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.regular)
+                Text("Loading diff...")
+                    .font(.system(size: 13, weight: .medium))
+                if !viewModel.fileInspectorPath.isEmpty {
+                    Text(viewModel.fileInspectorPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 480)
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
+            .background(ChromePalette.panelMutedBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(ChromePalette.panelBorder, lineWidth: 1)
+            )
+        }
+        .allowsHitTesting(false)
     }
 
     @MainActor

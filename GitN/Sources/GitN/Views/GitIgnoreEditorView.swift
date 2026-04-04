@@ -48,7 +48,7 @@ struct GitIgnoreEditorView: View {
 
             Divider()
 
-            TextEditor(text: $text)
+            FocusTextEditor(text: $text)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

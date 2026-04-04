@@ -74,6 +74,11 @@ struct CommitInfo: Identifiable, Equatable {
     }
 }
 
+struct FileLogEntry: Equatable {
+    let commit: CommitInfo
+    let pathAtCommit: String
+}
+
 enum ReflogEntryKind: String, Equatable, CaseIterable {
     case checkout
     case reset

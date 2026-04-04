@@ -115,6 +115,28 @@ struct RepoContainerView: View {
         .sheet(isPresented: $showNewBranch) {
             newBranchSheet
         }
+        .alert("Force Pull", isPresented: Binding(
+            get: { viewModel.showForcePullConfirm },
+            set: { viewModel.showForcePullConfirm = $0 }
+        )) {
+            Button("Force Pull", role: .destructive) {
+                Task { await viewModel.performForcePull() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(verbatim: "This will discard all local commits on the current branch and reset it to match the remote branch state (git fetch + git reset --hard @{u}).\n\nThis action cannot be undone. Do you want to continue?")
+        }
+        .alert("Force Push", isPresented: Binding(
+            get: { viewModel.showForcePushConfirm },
+            set: { viewModel.showForcePushConfirm = $0 }
+        )) {
+            Button("Force Push", role: .destructive) {
+                Task { await viewModel.performForcePush() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(verbatim: "Force Push will overwrite remote branch history (using the safer --force-with-lease mode).\n\nDo you want to continue?")
+        }
         .alert(
             "Branch Not Fully Merged",
             isPresented: Binding(
@@ -133,7 +155,7 @@ struct RepoContainerView: View {
                 viewModel.cancelForceDeleteBranch()
             }
         } message: {
-            Text("Branch '\(viewModel.forceDeleteBranchName)' is not fully merged. Are you sure you want to force delete it? This may cause you to lose commits.")
+            Text(verbatim: "Branch '\(viewModel.forceDeleteBranchName)' is not fully merged. Are you sure you want to force delete it? This may cause you to lose commits.")
         }
     }
 
@@ -395,6 +417,7 @@ struct RepoContainerView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isLoading)
             .foregroundStyle(viewModel.isLoading ? .secondary : .secondary)
+            .hoverTooltip("Refresh\nReload repository status, refs, and history")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -411,17 +434,6 @@ struct RepoContainerView: View {
             menuContent: { pullToolbarMenuContent }
         )
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
-        .alert("Force Pull", isPresented: Binding(
-            get: { viewModel.showForcePullConfirm },
-            set: { viewModel.showForcePullConfirm = $0 }
-        )) {
-            Button("Force Pull", role: .destructive) {
-                Task { await viewModel.performForcePull() }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("将丢弃本地分支的所有提交，重置为远程分支状态 (git fetch + git reset --hard @{u})。\n\n此操作不可撤销，确定继续？")
-        }
     }
 
     // MARK: - Fetch Toolbar Button
@@ -451,17 +463,6 @@ struct RepoContainerView: View {
             menuContent: { pushToolbarMenuContent }
         )
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
-        .alert("Force Push", isPresented: Binding(
-            get: { viewModel.showForcePushConfirm },
-            set: { viewModel.showForcePushConfirm = $0 }
-        )) {
-            Button("Force Push", role: .destructive) {
-                Task { await viewModel.performForcePush() }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("Force Push 会覆盖远程分支历史 (使用 --force-with-lease 安全模式)。\n\n确定继续？")
-        }
     }
 
     private func toolbarButton(_ label: String, icon: String, disabled: Bool, action: @escaping () -> Void) -> some View {
@@ -470,7 +471,7 @@ struct RepoContainerView: View {
                 VStack(spacing: 2) {
                     Image(systemName: icon)
                         .font(AppTypography.Chrome.toolbarIcon)
-                    Text(label)
+                    Text(verbatim: label)
                         .font(AppTypography.Chrome.toolbarMiniLabel)
                 }
             }
@@ -659,6 +660,7 @@ struct RepoContainerView: View {
             }
             .menuStyle(.borderlessButton)
             .foregroundStyle(.secondary)
+            .hoverTooltip("More\nAdditional repository actions")
             .fixedSize()
             .sheet(isPresented: $showIgnoreEditor) {
                 GitIgnoreEditorView(repoPath: viewModel.repoPath, isPresented: $showIgnoreEditor)
@@ -670,7 +672,7 @@ struct RepoContainerView: View {
 
     private var hostKeyBanner: some View {
         HStack(spacing: 8) {
-            Text("The authenticity of host '\(viewModel.hostKeyHost)' can't be established. Answering yes will permanently add '\(viewModel.hostKeyHost)' to the list of known hosts. Are you sure you want to continue?")
+            Text(verbatim: "The authenticity of host '\(viewModel.hostKeyHost)' can't be established. Answering yes will permanently add '\(viewModel.hostKeyHost)' to the list of known hosts. Are you sure you want to continue?")
                 .font(AppTypography.Chrome.toolbarBody)
                 .foregroundStyle(.primary)
                 .lineLimit(2)
@@ -698,7 +700,7 @@ struct RepoContainerView: View {
 
     private var pushUpstreamBanner: some View {
         HStack(spacing: 8) {
-            Text("What remote/branch should \"\(viewModel.currentBranch)\" push to and pull from?")
+            Text(verbatim: "What remote/branch should \"\(viewModel.currentBranch)\" push to and pull from?")
                 .font(AppTypography.Chrome.toolbarBody)
                 .foregroundStyle(.primary)
 
@@ -717,11 +719,10 @@ struct RepoContainerView: View {
             Text("/")
                 .foregroundStyle(.secondary)
 
-            TextField("branch", text: Binding(
+            FocusTextField(titleKey: "branch", text: Binding(
                 get: { viewModel.pushUpstreamBranch },
                 set: { viewModel.pushUpstreamBranch = $0 }
-            ))
-            .textFieldStyle(.roundedBorder)
+            ), cornerRadius: 6, horizontalPadding: 8, verticalPadding: 4)
             .font(AppTypography.Chrome.toolbarBody)
             .frame(width: 120)
             .controlSize(.small)
@@ -752,8 +753,7 @@ struct RepoContainerView: View {
         VStack(spacing: 12) {
             Text("New Branch")
                 .font(.headline)
-            TextField("Branch name", text: $newBranchName)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Branch name", text: $newBranchName)
                 .frame(width: 300)
             HStack {
                 Button("Cancel") {
@@ -790,8 +790,7 @@ struct RepoContainerView: View {
         VStack(spacing: 12) {
             Text("Save Stash")
                 .font(.headline)
-            TextField("Stash message (optional)", text: $stashMessage)
-                .textFieldStyle(.roundedBorder)
+            FocusTextField(titleKey: "Stash message (optional)", text: $stashMessage)
                 .frame(width: 300)
             HStack {
                 Button("Cancel") {
@@ -848,7 +847,7 @@ private struct ToolbarTransferAnimationView: View {
                     }
                 }
             ) {
-                Text(title)
+                Text(verbatim: title)
                     .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }
@@ -887,7 +886,7 @@ private struct ToolbarFetchAnimationView: View {
                     }
                 }
             ) {
-                Text(title)
+                Text(verbatim: title)
                     .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }
@@ -918,7 +917,7 @@ private struct ToolbarRefreshAnimationView: View {
                         .drawingGroup()
                 }
             ) {
-                Text(title)
+                Text(verbatim: title)
                     .font(.system(size: 9, weight: isActive ? .semibold : .regular))
             }
         }

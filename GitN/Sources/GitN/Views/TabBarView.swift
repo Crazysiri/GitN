@@ -71,6 +71,7 @@ struct TabBarView: View {
             .buttonStyle(.plain)
             .frame(width: Layout.trailingControlsWidth, height: Layout.barHeight)
             .onHover { isHoveringAddButton = $0 }
+            .hoverTooltip("New Tab", placement: .below)
         }
         .frame(width: toolbarWidth, height: Layout.barHeight, alignment: .leading)
         .background(ChromePalette.navigationBackground)

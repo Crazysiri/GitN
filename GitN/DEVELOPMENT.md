@@ -143,3 +143,17 @@ Before shipping a change, verify at least the relevant parts of this list:
 - Exercise at least one sidebar mutation path if you changed branch/remote/tag behavior
 - Confirm top chrome colors still keep navigation, selected tab, and repo toolbar visually distinct
 - Confirm hover affordances still exist on top chrome controls and New Tab primary actions
+
+## Architecture And Testability Workflow
+
+Repository-wide governance for new work now lives in:
+
+- `../docs/ENGINEERING_GUIDELINES.md`
+- `../docs/rfcs/`
+- `../docs/adr/`
+
+Use that workflow to decide when a change needs an RFC or ADR, where new logic should live, and what test coverage is expected. The default direction is:
+
+- keep SwiftUI views presentation-focused
+- keep `RepoViewModel` and `GitService` from widening further without documented reason
+- extract non-trivial logic into testable helpers, coordinators, formatters, parsers, or focused services

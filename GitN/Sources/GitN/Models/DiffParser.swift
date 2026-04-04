@@ -76,7 +76,11 @@ enum DiffParserEngine {
                 headerLines.append(line)
             } else if line.hasPrefix("diff --git") || line.hasPrefix("index ") ||
                         line.hasPrefix("--- ") || line.hasPrefix("+++ ") ||
-                        line.hasPrefix("old mode") || line.hasPrefix("new mode") {
+                        line.hasPrefix("old mode") || line.hasPrefix("new mode") ||
+                        line.hasPrefix("deleted file mode") ||
+                        line.hasPrefix("similarity index ") ||
+                        line.hasPrefix("rename from ") ||
+                        line.hasPrefix("rename to ") {
                 headerLines.append(line)
             } else {
                 break
@@ -285,6 +289,31 @@ enum TextDiffEngine {
 // MARK: - Patch Construction
 
 extension ParsedDiff {
+    var oldPath: String? {
+        headerPath(prefix: "--- ")
+    }
+
+    var newPath: String? {
+        headerPath(prefix: "+++ ")
+    }
+
+    private func headerPath(prefix: String) -> String? {
+        let line = fileHeader
+            .components(separatedBy: "\n")
+            .first { $0.hasPrefix(prefix) }
+        guard let line else { return nil }
+        let rawPath = String(line.dropFirst(prefix.count))
+        return Self.normalizeHeaderPath(rawPath)
+    }
+
+    private static func normalizeHeaderPath(_ rawPath: String) -> String? {
+        guard !rawPath.isEmpty, rawPath != "/dev/null" else { return nil }
+        if rawPath.hasPrefix("a/") || rawPath.hasPrefix("b/") {
+            return String(rawPath.dropFirst(2))
+        }
+        return rawPath
+    }
+
     /// Build a minimal file header for patch application.
     /// Falls back to the original header, stripping `index` lines.
     var minimalFileHeader: String {
