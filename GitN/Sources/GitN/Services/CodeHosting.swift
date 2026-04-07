@@ -7,9 +7,11 @@ enum CodeHostingProvider: String, Equatable {
 
     init(remoteURL: String) {
         let normalized = remoteURL.lowercased()
-        if normalized.contains("github.com") {
+        let host = CodeHostingRemote.parseHost(from: remoteURL)
+
+        if host == "github.com" || normalized.contains("github.com") {
             self = .github
-        } else if normalized.contains("gitlab") {
+        } else if host == GitLabService.configuredHost || normalized.contains("gitlab") {
             self = .gitlab
         } else {
             self = .unknown

@@ -6,6 +6,8 @@ This repository prefers lightweight governance over heavyweight process. The goa
 
 Use this document with:
 
+- [docs/README.md](/Users/user/GitN/docs/README.md) for the documentation index
+- [docs/ENGINEERING_WORKFLOW.md](/Users/user/GitN/docs/ENGINEERING_WORKFLOW.md) for the mandatory pre-implementation harness
 - [AGENTS.md](/Users/user/GitN/AGENTS.md) for active coding rules
 - [GitN/DEVELOPMENT.md](/Users/user/GitN/GitN/DEVELOPMENT.md) for codebase structure
 - [docs/adr/README.md](/Users/user/GitN/docs/adr/README.md) for long-lived architecture decisions
@@ -19,6 +21,38 @@ Use this document with:
 - Do not keep expanding `GitService` with unrelated workflow or hosting concerns. Prefer focused helpers and coordinators.
 - Prefer extracting behavior into small helpers when the code has stable inputs and outputs, branching rules, or error mapping.
 - Prefer shared abstractions over duplicated GitHub/GitLab branches when touching remote parsing, git CLI execution, or HTTP plumbing.
+
+## Layer Ownership
+
+Use these defaults unless the change documents a good reason not to:
+
+- Views own presentation, rendering-only state, and action wiring.
+- View models own screen state and orchestration, but should not become the home for parsing, provider-specific policy, or workflow-specific service logic.
+- Services, helpers, coordinators, formatters, and parsers own reusable business rules, transformation logic, request plumbing, validation, and policy.
+
+Good placement examples:
+
+- Extracting remote URL normalization into a shared helper instead of duplicating it in GitHub and GitLab paths.
+- Moving non-trivial toolbar state mapping out of a SwiftUI view into a testable formatter or view-model helper.
+- Adding a focused coordinator for hosted-review orchestration instead of widening `RepoViewModel`.
+
+Bad placement examples:
+
+- Adding more provider-specific API behavior directly into `RepoViewModel`.
+- Putting parsing or policy branches directly inside a SwiftUI view body.
+- Extending `GitService` with unrelated hosted review or general networking concerns when a dedicated service is the clearer owner.
+
+## Pre-Implementation Questions
+
+Before coding, the author should be able to answer all of these using `docs/ENGINEERING_WORKFLOW.md`:
+
+- What behavior is changing?
+- What is intentionally not changing?
+- Which layer owns the new logic?
+- Which hotspot is being protected from more responsibility?
+- What tests prove the change works?
+- What failure modes or edge cases must be covered?
+- Does the change require feature intake only, an RFC, an ADR, or both?
 
 ## Testability Standard
 
@@ -49,6 +83,12 @@ Create an RFC in [docs/rfcs](/Users/user/GitN/docs/rfcs/README.md) before implem
 
 Small bug fixes and local UI-only changes usually do not need an RFC.
 
+Concrete GitN examples:
+
+- introducing a hosted-review coordinator to keep new behavior out of `RepoViewModel`
+- refactoring GitHub/GitLab request flow behind a shared transport seam
+- changing commit-row data flow or pagination behavior across graph-related views
+
 ## When To Write An ADR
 
 Create or update an ADR in [docs/adr](/Users/user/GitN/docs/adr/README.md) when a change:
@@ -59,6 +99,12 @@ Create or update an ADR in [docs/adr](/Users/user/GitN/docs/adr/README.md) when 
 - standardizes a repository-wide policy that future work should follow
 
 An ADR records a durable decision. An RFC explains a specific change.
+
+Concrete GitN examples:
+
+- standardizing a permanent boundary between `RepoViewModel` and hosted-review services
+- defining a shared code-hosting transport abstraction used by multiple providers
+- setting a repository-wide rule for where theming policy or git command execution policy belongs
 
 ## Change Design Checklist
 

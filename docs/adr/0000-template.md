@@ -7,6 +7,11 @@
 
 What problem exists today? What current constraints in GitN matter?
 
+## Decision Drivers
+
+- Driver 1:
+- Driver 2:
+
 ## Decision
 
 State the decision clearly and concretely.

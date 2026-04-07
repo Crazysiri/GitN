@@ -148,6 +148,8 @@ Before shipping a change, verify at least the relevant parts of this list:
 
 Repository-wide governance for new work now lives in:
 
+- `../docs/README.md`
+- `../docs/ENGINEERING_WORKFLOW.md`
 - `../docs/ENGINEERING_GUIDELINES.md`
 - `../docs/rfcs/`
 - `../docs/adr/`

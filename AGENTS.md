@@ -1,4 +1,23 @@
-# GitX UI Rules
+# GitN Active Rules
+
+Use this file as the execution-time rulebook. For repo orientation, read `GitN/DEVELOPMENT.md`. For mandatory pre-implementation intake, read `docs/ENGINEERING_WORKFLOW.md`. For durable policy, read `docs/ENGINEERING_GUIDELINES.md`.
+
+## Pre-Implementation Gate
+
+Before implementing a feature, refactor, or non-trivial bug fix, write down:
+
+- what behavior is changing
+- explicit non-goals
+- the intended boundary
+- the owning layer
+- the test scope
+- whether feature intake only, RFC, ADR, or both are required
+
+Use `docs/ENGINEERING_WORKFLOW.md` and `docs/templates/feature-intake-template.md` for this step.
+
+Do not start coding until those decisions are explicit.
+
+## UI And Theme Guardrails
 
 - For top chrome, keep three layers distinct:
   - Navigation/tab bar: darkest chrome color.
@@ -12,7 +31,7 @@
 - Top chrome buttons and the primary action buttons on the New Tab page should have a visible hover state; keep that feedback consistent with the shared button/chrome language.
 - For custom hover hints, use the shared `hoverTooltip(...)` / `HoverTooltipBubble` component in `GitN/Sources/GitN/Views/HoverTooltip.swift` instead of system tooltips so timing and styling stay consistent.
 
-# GitX Architecture Notes
+## Architecture Guardrails
 
 - The middle history pane is driven by `CommitInfo -> RepoViewModel.commits -> CommitTableView -> CommitRowCellView`.
 - Commit graph layout is computed lazily in the view layer via `LazyGraphProcessor`; avoid moving graph-specific transient state into `RepoViewModel` unless necessary.
@@ -20,17 +39,20 @@
 - `RepoViewModel.loadAll()` loads repo metadata first, then creates a `CommitWalker`, loads the first commit page, and appends an uncommitted/WIP pseudo-entry at the top when needed.
 - The graph table supports append-style updates; preserving existing row identity/order allows incremental graph extension instead of full graph resets.
 - The current graph row model assumes rows represent real commits plus the single uncommitted pseudo-entry. Do not mix unrelated event rows directly into `commits` without reworking selection, pagination, diff loading, and graph layout assumptions.
-- `RepoViewModel` is already oversized. Do not add new provider-specific hosted review, authentication, remote parsing, or API request logic there. Keep it focused on UI state/orchestration, and move new hosted review behavior behind dedicated services/coordinators instead.
-- `GitService` is already overloaded. Do not keep expanding it with unrelated hosted review, code hosting, or general network/auth responsibilities. Prefer small focused services/helpers for remote resolution, git command execution, and code-hosting API access, and reuse those shared components instead of duplicating logic across GitHub/GitLab paths.
-- When touching GitHub/GitLab integration, prefer consolidating duplicated remote URL parsing, git CLI runner behavior, and HTTP request plumbing into shared abstractions before adding new provider-specific branches. Avoid parallel implementations that can drift in behavior or error handling.
+
+## Protected Hotspots
+
+Before adding logic to these areas, stop and justify why extraction is not the better default:
+
+- `RepoViewModel`: do not add new provider-specific hosted review, authentication, remote parsing, or API request logic here. Keep it focused on UI state and orchestration.
+- `GitService`: do not keep expanding it with unrelated hosted review, code hosting, or general network/auth responsibilities. Prefer focused helpers and services.
+- GitHub/GitLab integration: prefer shared abstractions for remote parsing, git CLI runner behavior, and HTTP request plumbing instead of duplicating provider-specific branches.
+
+## Testing And Documentation Obligations
+
 - New code should ship with tests by default. If a change affects non-UI logic, add or update automated tests in the same change unless there is a concrete blocker.
-- Treat ViewModel and service-layer logic as testable code. New behavior in `RepoViewModel` or other view models should be structured so it can be exercised by unit tests, and business/state-transition logic should not depend on SwiftUI views to run.
-- Keep SwiftUI views as thin presentation layers where practical. UI-only rendering details may not need direct tests, but logic that can be moved out of the view should be moved into testable view-model/service helpers instead of staying embedded in the UI layer.
-- If UI behavior is difficult to test directly, cover the underlying state, transformation, validation, and action-routing logic with tests at the ViewModel/service boundary.
-
-# Engineering Workflow
-
-- Use `docs/ENGINEERING_GUIDELINES.md` as the default decision framework for new architecture and testability work.
-- Write an RFC in `docs/rfcs/` before implementing cross-cutting changes, new services/coordinators, or non-trivial additions to `RepoViewModel` / `GitService`.
-- Write an ADR in `docs/adr/` for long-lived architecture decisions and repository-wide policy changes.
+- Treat ViewModel and service-layer logic as testable code. New behavior in these layers should be exercisable without SwiftUI views.
+- Keep SwiftUI views thin where practical. If UI behavior is hard to test directly, move the underlying logic to a testable boundary.
+- Write an RFC before implementing cross-cutting changes, new services/coordinators, or non-trivial additions to `RepoViewModel` or `GitService`.
+- Write an ADR for long-lived architecture decisions and repository-wide policy changes.
 - In PRs, explain why new logic lives in its chosen layer and what part of the change is directly unit-testable.

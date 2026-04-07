@@ -34,6 +34,30 @@ enum CodeHostingRemote {
 
         return path.isEmpty ? nil : path
     }
+
+    static func parseHost(from remoteURL: String) -> String? {
+        let normalizedURL = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let url = URL(string: normalizedURL), let host = url.host?.lowercased(), !host.isEmpty {
+            return host
+        }
+
+        if normalizedURL.contains("@"), normalizedURL.contains(":") {
+            guard
+                let atIndex = normalizedURL.firstIndex(of: "@"),
+                let colonIndex = normalizedURL[atIndex...].firstIndex(of: ":"),
+                atIndex < colonIndex
+            else {
+                return nil
+            }
+
+            let host = normalizedURL[normalizedURL.index(after: atIndex)..<colonIndex]
+                .lowercased()
+            return host.isEmpty ? nil : String(host)
+        }
+
+        return nil
+    }
 }
 
 struct CodeHostingGitRunner {

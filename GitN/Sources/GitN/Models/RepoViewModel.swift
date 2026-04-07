@@ -3830,7 +3830,21 @@ final class RepoViewModel {
     }
 
     func performDeleteRemoteBranch(remote: String, branch: String) async {
-        await performRemoteOperation { try await $0.git.deleteRemoteBranch(remote: remote, branch: branch) }
+        operationInProgress = true
+        operationError = nil
+        do {
+            let result = try await git.deleteRemoteBranch(remote: remote, branch: branch)
+            await loadAll()
+            switch result {
+            case .deleted:
+                showToast(title: "Remote Branch Deleted", detail: "\(remote)/\(branch)", style: .success)
+            case .alreadyMissing:
+                showToast(title: "Remote Branch Already Gone", detail: "\(remote)/\(branch) removed locally", style: .info)
+            }
+        } catch {
+            showToast(title: "Operation Failed", detail: error.localizedDescription, style: .error)
+        }
+        operationInProgress = false
     }
 
     func performCreateTag(name: String, at hash: String) async {

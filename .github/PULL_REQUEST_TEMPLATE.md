@@ -2,6 +2,7 @@
 
 - What changed?
 - Why was it needed?
+- Link the feature intake in `docs/intake/`.
 
 ## Architecture
 
@@ -14,3 +15,9 @@
 - What automated tests were added or updated?
 - If non-UI logic changed without tests, explain the blocker.
 - What manual verification was performed?
+
+## Harness Checklist
+
+- [ ] I added or updated a filled feature intake record in `docs/intake/` for code changes.
+- [ ] I updated tests or documented the blocker in the feature intake.
+- [ ] If this change needs an RFC or ADR, it is linked above.

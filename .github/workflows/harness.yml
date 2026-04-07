@@ -1,0 +1,23 @@
+name: Harness
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  harness:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate feature intake
+        run: bash scripts/check_harness.sh "${{ github.event.pull_request.base.sha }}"
+
+      - name: Run test suite
+        working-directory: GitN
+        env:
+          CLANG_MODULE_CACHE_PATH: /tmp/gitn-clang-module-cache
+          SWIFTPM_MODULECACHE_OVERRIDE: /tmp/gitn-swiftpm-module-cache
+        run: swift test

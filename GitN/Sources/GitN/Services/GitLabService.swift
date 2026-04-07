@@ -28,6 +28,11 @@ actor GitLabService {
     static var isConfigured: Bool {
         !gitlabURL.isEmpty && !gitlabToken.isEmpty
     }
+
+    static var configuredHost: String? {
+        let configuredURL = UserDefaults.standard.string(forKey: urlKey) ?? ""
+        return CodeHostingRemote.parseHost(from: configuredURL)
+    }
     
     // MARK: - Project ID Cache
     

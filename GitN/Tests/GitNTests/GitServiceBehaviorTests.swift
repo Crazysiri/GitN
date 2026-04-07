@@ -203,6 +203,33 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertFalse(branchesAfterDelete.contains(where: { $0.name == "renamed-topic" }))
     }
 
+    func testDeleteRemoteBranchTreatsMissingRemoteRefAsSuccess() async throws {
+        let remoteURL = try makeBareRemoteRepository()
+        defer { try? FileManager.default.removeItem(at: remoteURL) }
+
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+        try repo.run(["remote", "add", "origin", remoteURL.path])
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.appendFile("file.txt", contents: "two\n")
+        try repo.commitAll(message: "topic")
+        try repo.run(["push", "-u", "origin", "topic"])
+
+        let service = GitService(repoPath: repo.path)
+
+        let firstDeleteResult = try await service.deleteRemoteBranch(remote: "origin", branch: "topic")
+        XCTAssertEqual(firstDeleteResult, .deleted)
+        XCTAssertEqual(try gitOutput(at: repo.url, ["ls-remote", "--heads", "origin", "topic"]), "")
+        let remoteBranchesAfterFirstDelete = try await service.remoteBranches()
+        XCTAssertFalse(remoteBranchesAfterFirstDelete.contains(where: { $0.name == "origin/topic" }))
+
+        let secondDeleteResult = try await service.deleteRemoteBranch(remote: "origin", branch: "topic")
+        XCTAssertEqual(secondDeleteResult, .alreadyMissing)
+        let remoteBranchesAfterSecondDelete = try await service.remoteBranches()
+        XCTAssertFalse(remoteBranchesAfterSecondDelete.contains(where: { $0.name == "origin/topic" }))
+    }
+
     func testCommitInvalidatesCachedRefMap() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("file.txt", contents: "one\n")
@@ -504,5 +531,44 @@ final class GitServiceBehaviorTests: XCTestCase {
         } catch {
             XCTAssertFalse(error.localizedDescription.isEmpty, "expected a non-empty error from libgit2")
         }
+    }
+
+    private func makeBareRemoteRepository() throws -> URL {
+        let remoteURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "GitNRemote-\(UUID().uuidString).git",
+            isDirectory: true
+        )
+        _ = try gitOutput(
+            at: FileManager.default.temporaryDirectory,
+            ["init", "--bare", remoteURL.path]
+        )
+        return remoteURL
+    }
+
+    @discardableResult
+    private func gitOutput(at workingDirectory: URL, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = workingDirectory
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        process.waitUntilExit()
+
+        let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outputData + errorData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if process.terminationStatus != 0 {
+            XCTFail("git \(arguments.joined(separator: " ")) failed: \(output)")
+        }
+
+        return output
     }
 }

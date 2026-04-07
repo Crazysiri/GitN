@@ -440,6 +440,11 @@ actor GitService {
         let isBinary: Bool
     }
 
+    enum DeleteRemoteBranchResult: Equatable {
+        case deleted
+        case alreadyMissing
+    }
+
     struct BlameLine: Sendable {
         let finalLineNumber: Int
         let commitHash: String
@@ -2361,9 +2366,20 @@ actor GitService {
     }
 
     // deleteRemoteBranch needs push (auth), keep CLI (Xit same)
-    func deleteRemoteBranch(remote: String, branch: String) async throws {
-        try await runGit(["push", remote, "--delete", branch])
+    func deleteRemoteBranch(remote: String, branch: String) async throws -> DeleteRemoteBranchResult {
+        do {
+            try await runGit(["push", remote, "--delete", branch])
+        } catch {
+            guard !Self.isMissingRemoteBranchDeletionError(error) else {
+                deleteRemoteTrackingBranchReference(remote: remote, branch: branch)
+                invalidateRefMapCache()
+                return .alreadyMissing
+            }
+            throw error
+        }
+        deleteRemoteTrackingBranchReference(remote: remote, branch: branch)
         invalidateRefMapCache()
+        return .deleted
     }
 
     func createTag(name: String, at hash: String, message: String? = nil) throws {
@@ -2912,6 +2928,35 @@ actor GitService {
 
     private func runGitOutput(_ args: [String]) async throws -> String {
         try await cli.output(args)
+    }
+
+    private func deleteRemoteTrackingBranchReference(remote: String, branch: String) {
+        guard let repo else { return }
+
+        var remoteBranch: OpaquePointer?
+        let lookup = git_branch_lookup(&remoteBranch, repo, "\(remote)/\(branch)", GIT_BRANCH_REMOTE)
+        guard lookup == 0, let remoteBranch else { return }
+        defer { git_reference_free(remoteBranch) }
+
+        _ = git_branch_delete(remoteBranch)
+    }
+
+    private static func isMissingRemoteBranchDeletionError(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+
+        if message.contains("remote ref does not exist") {
+            return true
+        }
+
+        if message.contains("remote ref") && message.contains("not found") {
+            return true
+        }
+
+        if message.contains("unable to delete") && message.contains("not found") {
+            return true
+        }
+
+        return false
     }
 
     // MARK: - Patch Application (for hunk/line staging & discarding)
