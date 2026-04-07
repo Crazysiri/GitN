@@ -49,6 +49,16 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.reflogEntries(for: hash), [newer, older])
     }
 
+    func testFilesSectionIsCollapsedByDefault() {
+        let path = "/tmp/\(UUID().uuidString)"
+        UserDefaults.standard.removeObject(forKey: "SidebarCollapsedSections.\(path)")
+        UserDefaults.standard.removeObject(forKey: "SidebarCollapsedSections.\(path).defaultsApplied.v2")
+
+        let viewModel = RepoViewModel(path: path, name: "repo")
+
+        XCTAssertTrue(viewModel.isSectionCollapsed("files"))
+    }
+
     func testReflogBadgeEntriesDeduplicateKindsAcrossMergedEntries() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         let hash = String(repeating: "d", count: 40)
@@ -255,6 +265,66 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.toastMessage?.style, .warning)
         XCTAssertTrue(viewModel.showConflictMergeView)
         XCTAssertEqual(viewModel.conflictOutputText, document.outputText)
+    }
+
+    func testOpenWorkingTreeFilePreviewUsesWorkingTreeContentEvenWhenCommitIsSelected() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("Sources/App.swift", contents: "print(\"base\")\n")
+        try repo.commitAll(message: "Initial commit")
+        try repo.writeFile("Sources/App.swift", contents: "print(\"working-tree\")\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        guard let committed = viewModel.commits.first(where: { !$0.isUncommitted }) else {
+            return XCTFail("Expected committed history entry")
+        }
+
+        viewModel.selectedCommit = committed
+
+        await viewModel.openWorkingTreeFilePreview(path: "Sources/App.swift")
+
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+        XCTAssertEqual(viewModel.fileInspectorContext, .unstaged)
+        XCTAssertEqual(viewModel.fileInspectorContent, "print(\"working-tree\")\n")
+        XCTAssertTrue(viewModel.isFileInspectorEditable)
+        XCTAssertEqual(viewModel.selectedWorkingTreeFilePath, "Sources/App.swift")
+    }
+
+    func testWorkingTreeFilesInspectorSelectionIsPreviewOnly() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("script.sh", contents: "echo hi\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        await viewModel.openWorkingTreeFilePreview(path: "script.sh")
+
+        XCTAssertTrue(viewModel.isWorkingTreeFilesInspectorSelection)
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+
+        await viewModel.setFileInspectorMode(.diff)
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+
+        await viewModel.setFileInspectorMode(.history)
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+    }
+
+    func testHandleMissingWorkingTreePathClosesOpenWorkingTreePreview() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("script.sh", contents: "echo hi\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        await viewModel.openWorkingTreeFilePreview(path: "script.sh")
+
+        XCTAssertTrue(viewModel.isFileInspectorPresented)
+        XCTAssertEqual(viewModel.selectedWorkingTreeFilePath, "script.sh")
+
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: repo.path).appendingPathComponent("script.sh"))
+        viewModel.handleMissingWorkingTreePath("script.sh")
+
+        XCTAssertFalse(viewModel.isFileInspectorPresented)
+        XCTAssertNil(viewModel.selectedWorkingTreeFilePath)
     }
 
     func testSetAllOursSelectedChecksEveryConflictBlock() {

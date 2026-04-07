@@ -295,8 +295,14 @@ final class RepoViewModel {
     private var fileInspectorBlameCache: [String: [Int: FileInspectorBlameInfo]] = [:]
     private static let fileInspectorEditGroupingInterval: TimeInterval = 0.8
     private static let fileInspectorRebuildDebounceInterval: UInt64 = 120_000_000
-
     var fileStatuses: [FileStatus] = []
+    var workingTreeFiles: [WorkingTreeFileNode] = []
+    var workingTreeFolderContents: [String: [WorkingTreeFileNode]] = [:]
+    var selectedWorkingTreeFilePath: String?
+    private var hasLoadedWorkingTreeRoot = false
+    private var workingTreeFoldersRefreshTask: Task<Void, Never>?
+    private var workingTreeFoldersRefreshGeneration = 0
+    private var expandedWorkingTreeFolders: Set<String> = []
     var isStageOperationInProgress = false
     var selectedFilePaths: Set<String> = []
     var selectedFileListContext: DiffContext?
@@ -321,14 +327,17 @@ final class RepoViewModel {
     var collapsedSections: Set<String> = []
 
     private var collapsedSectionsKey: String { "SidebarCollapsedSections.\(repoPath)" }
+    private var collapsedSectionsDefaultsAppliedKey: String { collapsedSectionsKey + ".defaultsApplied.v2" }
 
     private func loadCollapsedSections() {
         let saved = UserDefaults.standard.stringArray(forKey: collapsedSectionsKey) ?? []
         collapsedSections = Set(saved)
-        // MR section 默认折叠
-        if !UserDefaults.standard.bool(forKey: collapsedSectionsKey + ".initialized") {
+
+        // Apply default-collapsed sections once per repo without overwriting later user choices.
+        if !UserDefaults.standard.bool(forKey: collapsedSectionsDefaultsAppliedKey) {
             collapsedSections.insert("mergeRequests")
-            UserDefaults.standard.set(true, forKey: collapsedSectionsKey + ".initialized")
+            collapsedSections.insert("files")
+            UserDefaults.standard.set(true, forKey: collapsedSectionsDefaultsAppliedKey)
             saveCollapsedSections()
         }
     }
@@ -382,6 +391,11 @@ final class RepoViewModel {
         return (activeFileInspectorPath as NSString).lastPathComponent
     }
 
+    var isWorkingTreeFilesInspectorSelection: Bool {
+        selectedWorkingTreeFilePath == fileInspectorPath &&
+        fileInspectorContext == .unstaged
+    }
+
     var activeFileInspectorPath: String {
         if fileInspectorMode == .history, !fileHistoryPath.isEmpty {
             return fileHistoryPath
@@ -404,6 +418,7 @@ final class RepoViewModel {
         fileInspectorContext = context
         fileInspectorMode = preferredMode
         isFileInspectorPresented = true
+        selectedWorkingTreeFilePath = nil
         defer { isFileInspectorLoading = false }
 
         await selectDiffFile(file, context: context)
@@ -478,6 +493,55 @@ final class RepoViewModel {
         await openFileInspector(file, context: context, preferredMode: .preview)
     }
 
+    func openWorkingTreeFilePreview(path: String) async {
+        isFileInspectorLoading = true
+        fileInspectorPath = path
+        fileInspectorOldPath = nil
+        fileInspectorContext = .unstaged
+        fileInspectorMode = .preview
+        isFileInspectorPresented = true
+        selectedWorkingTreeFilePath = path
+        defer { isFileInspectorLoading = false }
+
+        do {
+            let loaded = try await loadInspectableFileContent(path: path, context: .unstaged)
+            let loadedText = loaded.content.text ?? ""
+            let diffPayload = try await loadWorkingTreeDiffPayload(path: path, fallbackText: loadedText)
+
+            fileInspectorContent = loadedText
+            fileInspectorInitialContent = loadedText
+            fileInspectorDiffBaseText = diffPayload.baseText.isEmpty ? loadedText : diffPayload.baseText
+            fileInspectorDisplayContent = loadedText
+            fileInspectorVisualContent = loaded.visualContent
+            fileInspectorSelectedRange = NSRange(location: 0, length: 0)
+            isFileInspectorDiffEditing = false
+            showFileInspectorExternalChangePrompt = false
+            fileInspectorUndoStack.removeAll(keepingCapacity: false)
+            fileInspectorRedoStack.removeAll(keepingCapacity: false)
+            fileInspectorEditSession = nil
+            fileInspectorRebuildTask?.cancel()
+            fileInspectorRebuildTask = nil
+            fileInspectorBlameTask?.cancel()
+            fileInspectorBlameTask = nil
+            isFileInspectorEditable = loaded.isEditable
+            fileInspectorEncodingName = loaded.content.encodingName
+            fileInspectorMessage = loaded.message
+            selectedDiffFile = DiffFile(additions: 0, deletions: 0, path: path, changeKind: .unknown)
+            currentDiffContext = .committed
+            fileDiffContent = diffPayload.fileDiffContent
+            diffBaseText = diffPayload.baseText
+            parsedDiff = diffPayload.parsedDiff
+            selectedDiffVisualContent = diffPayload.visualContent
+            rebuildFileInspectorArtifacts(
+                diffBaseText: fileInspectorDiffBaseText,
+                currentText: fileInspectorContent,
+                parsedDiff: nil
+            )
+        } catch {
+            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+        }
+    }
+
     func keepFileInspectorLocalContent() {
         showFileInspectorExternalChangePrompt = false
     }
@@ -504,6 +568,17 @@ final class RepoViewModel {
         closeFileHistory()
     }
 
+    func handleMissingWorkingTreePath(_ path: String) {
+        if selectedWorkingTreeFilePath == path {
+            selectedWorkingTreeFilePath = nil
+        }
+        guard isFileInspectorPresented,
+              fileInspectorContext == .unstaged,
+              fileInspectorPath == path
+        else { return }
+        closeFileInspector()
+    }
+
     private func clearDetailSelection() {
         invalidateCommittedDiffLoading()
         closeFileInspector()
@@ -523,6 +598,14 @@ final class RepoViewModel {
               fileInspectorMode == .preview || fileInspectorMode == .diff,
               !fileInspectorPath.isEmpty
         else { return }
+
+        if fileInspectorContext == .unstaged {
+            let fullPath = (repoPath as NSString).appendingPathComponent(fileInspectorPath)
+            if !FileManager.default.fileExists(atPath: fullPath) {
+                handleMissingWorkingTreePath(fileInspectorPath)
+                return
+            }
+        }
 
         let tracksWorkingTreeContent: Bool
         if let commit = selectedCommit, !commit.isUncommitted, fileInspectorContext == .committed {
@@ -557,6 +640,24 @@ final class RepoViewModel {
 
     private func reloadCurrentFileInspectorPreservingMode() async {
         guard isFileInspectorPresented, !fileInspectorPath.isEmpty else { return }
+        if fileInspectorContext == .unstaged && selectedWorkingTreeFilePath == fileInspectorPath {
+            let fullPath = (repoPath as NSString).appendingPathComponent(fileInspectorPath)
+            guard FileManager.default.fileExists(atPath: fullPath) else {
+                handleMissingWorkingTreePath(fileInspectorPath)
+                return
+            }
+            await openWorkingTreeFilePreview(path: fileInspectorPath)
+            if fileInspectorMode == .diff {
+                fileInspectorMode = .diff
+                fileInspectorVisualContent = selectedDiffVisualContent
+                rebuildFileInspectorArtifacts(
+                    diffBaseText: fileInspectorDiffBaseText,
+                    currentText: fileInspectorContent,
+                    parsedDiff: parsedDiff
+                )
+            }
+            return
+        }
         let path = fileInspectorPath
         let context = fileInspectorContext
         let mode = fileInspectorMode
@@ -615,6 +716,17 @@ final class RepoViewModel {
 
     func setFileInspectorMode(_ mode: FileInspectorMode) async {
         guard mode != fileInspectorMode || mode == .history else { return }
+        if isWorkingTreeFilesInspectorSelection {
+            fileInspectorMode = .preview
+            fileInspectorVisualContent = nil
+            isFileInspectorDiffEditing = false
+            rebuildFileInspectorArtifacts(
+                diffBaseText: fileInspectorDiffBaseText,
+                currentText: fileInspectorContent,
+                parsedDiff: nil
+            )
+            return
+        }
         if mode == .history {
             guard !fileInspectorPath.isEmpty else { return }
             await openFileHistory(path: fileInspectorPath, context: fileInspectorContext)
@@ -761,6 +873,147 @@ final class RepoViewModel {
             message: nil,
             visualContent: nil
         )
+    }
+
+    private func loadWorkingTreeDiffPayload(path: String, fallbackText: String) async throws -> DiffLoadPayload {
+        guard let status = fileStatuses.first(where: { $0.path == path }) else {
+            return DiffLoadPayload(
+                fileDiffContent: "",
+                baseText: fallbackText,
+                parsedDiff: nil,
+                visualContent: nil
+            )
+        }
+
+        let git = self.git
+        let statusCode = status.statusCode
+        return try await Task.detached(priority: .userInitiated) {
+            try await Self.loadDiffPayload(
+                git: git,
+                path: path,
+                oldPath: nil,
+                context: .committed,
+                isUncommitted: true,
+                stashIndex: nil,
+                commitHash: nil,
+                parentCommitHash: nil,
+                statusCode: statusCode
+            )
+        }.value
+    }
+
+    func loadWorkingTreeFilesRootIfNeeded() async {
+        guard !hasLoadedWorkingTreeRoot else { return }
+        await loadWorkingTreeFolder(path: "")
+    }
+
+    func setWorkingTreeFolderExpanded(path: String, isExpanded: Bool) async {
+        if isExpanded {
+            expandedWorkingTreeFolders.insert(path)
+            await loadWorkingTreeFolder(path: path)
+        } else {
+            expandedWorkingTreeFolders.remove(path)
+        }
+    }
+
+    private func loadWorkingTreeFolder(path: String) async {
+        let repositoryPath = repoPath
+        do {
+            let nodes = try await Task.detached(priority: .utility) {
+                try WorkingTreeFileTreeBuilder().listDirectory(at: repositoryPath, relativePath: path)
+            }.value
+
+            if path.isEmpty {
+                workingTreeFiles = nodes
+                hasLoadedWorkingTreeRoot = true
+            } else {
+                workingTreeFolderContents[path] = nodes
+            }
+
+            if let selectedWorkingTreeFilePath,
+               !workingTreePathExists(selectedWorkingTreeFilePath) {
+                handleMissingWorkingTreePath(selectedWorkingTreeFilePath)
+            }
+        } catch {
+            if path.isEmpty {
+                workingTreeFiles = []
+                hasLoadedWorkingTreeRoot = true
+            } else {
+                workingTreeFolderContents[path] = []
+            }
+            if let selectedWorkingTreeFilePath,
+               !workingTreePathExists(selectedWorkingTreeFilePath) {
+                handleMissingWorkingTreePath(selectedWorkingTreeFilePath)
+            }
+        }
+    }
+
+    private func scheduleVisibleWorkingTreeFoldersRefresh() {
+        var visibleFolders = expandedWorkingTreeFolders
+        if hasLoadedWorkingTreeRoot {
+            visibleFolders.insert("")
+        }
+        guard !visibleFolders.isEmpty else { return }
+
+        workingTreeFoldersRefreshGeneration += 1
+        let generation = workingTreeFoldersRefreshGeneration
+        let repositoryPath = repoPath
+        let selectedPath = selectedWorkingTreeFilePath
+
+        workingTreeFoldersRefreshTask?.cancel()
+        workingTreeFoldersRefreshTask = Task { [weak self] in
+            guard let self else { return }
+
+            do {
+                let folders = try await Task.detached(priority: .utility) {
+                    let builder = WorkingTreeFileTreeBuilder()
+                    return try visibleFolders.reduce(into: [String: [WorkingTreeFileNode]]()) { result, folder in
+                        result[folder] = try builder.listDirectory(at: repositoryPath, relativePath: folder)
+                    }
+                }.value
+
+                guard !Task.isCancelled,
+                      generation == self.workingTreeFoldersRefreshGeneration else { return }
+
+                self.workingTreeFiles = folders[""] ?? []
+                if visibleFolders.contains("") {
+                    self.hasLoadedWorkingTreeRoot = true
+                }
+                for folder in visibleFolders where !folder.isEmpty {
+                    self.workingTreeFolderContents[folder] = folders[folder] ?? []
+                }
+                if let selectedPath,
+                   !self.workingTreePathExists(selectedPath) {
+                    self.handleMissingWorkingTreePath(selectedPath)
+                }
+            } catch {
+                guard !Task.isCancelled,
+                      generation == self.workingTreeFoldersRefreshGeneration else { return }
+                if visibleFolders.contains("") {
+                    self.workingTreeFiles = []
+                    self.hasLoadedWorkingTreeRoot = true
+                }
+                for folder in visibleFolders where !folder.isEmpty {
+                    self.workingTreeFolderContents[folder] = []
+                }
+                if let selectedPath,
+                   !self.workingTreePathExists(selectedPath) {
+                    self.handleMissingWorkingTreePath(selectedPath)
+                }
+            }
+        }
+    }
+
+    private func workingTreePathExists(_ path: String) -> Bool {
+        if workingTreeFiles.contains(where: { $0.relativePath == path }) {
+            return true
+        }
+        for nodes in workingTreeFolderContents.values {
+            if nodes.contains(where: { $0.relativePath == path }) {
+                return true
+            }
+        }
+        return false
     }
 
     private func submoduleDisplayText(path: String) async throws -> String {
@@ -2296,6 +2549,7 @@ final class RepoViewModel {
             await git.refreshRepositoryState()
             let sts = try await git.status()
             fileStatuses = sts
+            scheduleVisibleWorkingTreeFoldersRefresh()
             let hc = try await git.headCommitHash()
             headCommitHash = hc
             isDetachedHead = try await git.isDetachedHead()
@@ -2464,6 +2718,7 @@ final class RepoViewModel {
             submodules = subs
             currentBranch = cb
             fileStatuses = sts
+            scheduleVisibleWorkingTreeFoldersRefresh()
             headCommitHash = hc
             isDetachedHead = dh
             normalizeGraphDisplayMode()
@@ -2683,6 +2938,9 @@ final class RepoViewModel {
         fileInspectorBlameTask = nil
         committedDiffStatsTask?.cancel()
         committedDiffStatsTask = nil
+        workingTreeFoldersRefreshTask?.cancel()
+        workingTreeFoldersRefreshTask = nil
+        hasLoadedWorkingTreeRoot = false
         toastAutoDismissTask?.cancel()
         toastAutoDismissTask = nil
 
@@ -2695,6 +2953,9 @@ final class RepoViewModel {
         stashes = []
         submodules = []
         diffFiles = []
+        workingTreeFiles = []
+        workingTreeFolderContents = [:]
+        expandedWorkingTreeFolders = []
         fileDiffContent = ""
         diffBaseText = ""
         parsedDiff = nil
@@ -3323,6 +3584,7 @@ final class RepoViewModel {
         do {
             fileStatuses = try await git.status()
         } catch {}
+        scheduleVisibleWorkingTreeFoldersRefresh()
         if let file = selectedDiffFile {
             await selectDiffFile(file, context: currentDiffContext)
         }

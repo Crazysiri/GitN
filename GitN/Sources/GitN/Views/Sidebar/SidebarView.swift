@@ -36,6 +36,9 @@ struct SidebarView: View {
     @State private var showMergeConfirm = false
     @State private var mergingMR: CodeReviewItem?
 
+    @State private var collapsedFileFolders: Set<String> = []
+    @State private var seenFileFolders: Set<String> = []
+    @State private var expandingFileFolders: Set<String> = []
     @State private var collapsedRemotes: Set<String> = []
     @State private var collapsedLocalFolders: Set<String> = []
     @State private var collapsedRemoteFolders: Set<String> = []
@@ -52,6 +55,10 @@ struct SidebarView: View {
 
     private var localBranchesSectionShouldAnimate: Bool {
         viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0) <= Self.animatedSectionItemLimit
+    }
+
+    private var filesSectionShouldAnimate: Bool {
+        viewModel.workingTreeFiles.count <= Self.animatedSectionItemLimit
     }
 
     private var remoteSectionShouldAnimate: Bool {
@@ -107,9 +114,21 @@ struct SidebarView: View {
                     stashesSection
                     submodulesSection
                     mergeRequestsSection
+                    filesSection
                 }
                 .padding(.vertical, 8)
             }
+        }
+        .onAppear {
+            if !viewModel.isSectionCollapsed("files") {
+                Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
+            }
+        }
+        .onChange(of: viewModel.workingTreeFiles) { _, _ in
+            collapseNewLoadedFileFolders()
+        }
+        .onChange(of: viewModel.workingTreeFolderContents) { _, _ in
+            collapseNewLoadedFileFolders()
         }
         .background(Color(.controlBackgroundColor).opacity(0.5))
         .sheet(isPresented: $showAddRemote) {
@@ -166,6 +185,31 @@ struct SidebarView: View {
 
     // MARK: - Add Remote Sheet
 
+    private func collapseNewLoadedFileFolders() {
+        let loadedFolderPaths = Set(
+            viewModel.workingTreeFiles.compactMap { node -> String? in
+                if case .folder(_, let relativePath) = node {
+                    return relativePath
+                }
+                return nil
+            }
+        ).union(
+            viewModel.workingTreeFolderContents.values.flatMap { nodes in
+                nodes.compactMap { node -> String? in
+                    if case .folder(_, let relativePath) = node {
+                        return relativePath
+                    }
+                    return nil
+                }
+            }
+        )
+        let newFolderPaths = loadedFolderPaths.subtracting(seenFileFolders)
+        let autoCollapsedPaths = newFolderPaths.subtracting(expandingFileFolders)
+        collapsedFileFolders.formUnion(autoCollapsedPaths)
+        seenFileFolders.formUnion(newFolderPaths)
+        expandingFileFolders.subtract(loadedFolderPaths)
+    }
+
     private var addRemoteSheet: some View {
         VStack(spacing: 12) {
             Text("Add Remote")
@@ -198,6 +242,70 @@ struct SidebarView: View {
             }
         }
         .padding(20)
+    }
+
+    // MARK: - Files
+
+    private var filesSection: some View {
+        SidebarSection(
+            title: "FILES",
+            icon: "doc.on.doc",
+            count: nil,
+            isCollapsed: viewModel.isSectionCollapsed("files"),
+            onToggle: {
+                let wasCollapsed = viewModel.isSectionCollapsed("files")
+                viewModel.toggleSection("files")
+                if wasCollapsed {
+                    Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
+                }
+            },
+            animateCollapse: filesSectionShouldAnimate
+        ) {
+            let flatNodes = flattenWorkingTree(
+                viewModel.workingTreeFiles,
+                folderContents: viewModel.workingTreeFolderContents,
+                depth: 0,
+                collapsedFolders: collapsedFileFolders
+            )
+            if flatNodes.isEmpty {
+                Text("No files")
+                    .font(AppTypography.Sidebar.rowMeta)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 28)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(flatNodes) { node in
+                    switch node.kind {
+                    case .folder:
+                        SidebarFileFolderRow(
+                            name: node.displayName,
+                            isCollapsed: collapsedFileFolders.contains(node.relativePath),
+                            depth: node.depth
+                        )
+                        .onTapGesture {
+                            if collapsedFileFolders.contains(node.relativePath) {
+                                collapsedFileFolders.remove(node.relativePath)
+                                expandingFileFolders.insert(node.relativePath)
+                                Task { await viewModel.setWorkingTreeFolderExpanded(path: node.relativePath, isExpanded: true) }
+                            } else {
+                                collapsedFileFolders.insert(node.relativePath)
+                                expandingFileFolders.remove(node.relativePath)
+                                Task { await viewModel.setWorkingTreeFolderExpanded(path: node.relativePath, isExpanded: false) }
+                            }
+                        }
+                    case .file:
+                        SidebarFileRow(
+                            name: node.displayName,
+                            depth: node.depth,
+                            isSelected: viewModel.selectedWorkingTreeFilePath == node.relativePath
+                        )
+                        .onTapGesture {
+                            Task { await viewModel.openWorkingTreeFilePreview(path: node.relativePath) }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Local Branch Context Menu
@@ -1021,7 +1129,7 @@ struct SidebarView: View {
 struct SidebarSection<Content: View>: View {
     let title: String
     let icon: String
-    let count: Int
+    let count: Int?
     let isCollapsed: Bool
     let onToggle: () -> Void
     let animateCollapse: Bool
@@ -1032,7 +1140,7 @@ struct SidebarSection<Content: View>: View {
     init(
         title: String,
         icon: String,
-        count: Int,
+        count: Int? = nil,
         isCollapsed: Bool,
         onToggle: @escaping () -> Void,
         animateCollapse: Bool = true,
@@ -1077,12 +1185,14 @@ struct SidebarSection<Content: View>: View {
                             .font(AppTypography.Sidebar.sectionHeader)
                             .foregroundStyle(.secondary)
 
-                        Text("\(count)")
-                            .font(AppTypography.Sidebar.sectionCount)
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color(.separatorColor)))
+                        if let count {
+                            Text("\(count)")
+                                .font(AppTypography.Sidebar.sectionCount)
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color(.separatorColor)))
+                        }
                     }
                 }
                 .buttonStyle(.plain)
@@ -1505,6 +1615,143 @@ struct BranchGroupRow: View {
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Working Tree Files
+
+private struct FlatWorkingTreeNode: Identifiable {
+    enum Kind {
+        case folder
+        case file
+    }
+
+    let id: String
+    let kind: Kind
+    let displayName: String
+    let relativePath: String
+    let depth: Int
+}
+
+private func flattenWorkingTree(
+    _ nodes: [WorkingTreeFileNode],
+    folderContents: [String: [WorkingTreeFileNode]],
+    depth: Int,
+    collapsedFolders: Set<String>
+) -> [FlatWorkingTreeNode] {
+    var result: [FlatWorkingTreeNode] = []
+
+    for node in nodes {
+        switch node {
+        case .folder(let name, let relativePath):
+            result.append(
+                FlatWorkingTreeNode(
+                    id: "folder:\(relativePath)",
+                    kind: .folder,
+                    displayName: name,
+                    relativePath: relativePath,
+                    depth: depth
+                )
+            )
+            if !collapsedFolders.contains(relativePath),
+               let children = folderContents[relativePath] {
+                result += flattenWorkingTree(
+                    children,
+                    folderContents: folderContents,
+                    depth: depth + 1,
+                    collapsedFolders: collapsedFolders
+                )
+            }
+        case .file(let name, let relativePath):
+            result.append(
+                FlatWorkingTreeNode(
+                    id: "file:\(relativePath)",
+                    kind: .file,
+                    displayName: name,
+                    relativePath: relativePath,
+                    depth: depth
+                )
+            )
+        }
+    }
+
+    return result
+}
+
+private struct SidebarFileFolderRow: View {
+    let name: String
+    let isCollapsed: Bool
+    let depth: Int
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 9)
+            Image(systemName: "folder")
+                .font(AppTypography.Sidebar.rowMeta)
+                .foregroundStyle(.secondary)
+            Text(name)
+                .font(AppTypography.Sidebar.row)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.leading, CGFloat(28 + depth * 12))
+        .padding(.trailing, 12)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.12) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+}
+
+private struct SidebarFileRow: View {
+    let name: String
+    let depth: Int
+    let isSelected: Bool
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "doc.text")
+                .font(AppTypography.Sidebar.rowMeta)
+                .foregroundStyle(isSelected ? .white.opacity(0.9) : .secondary)
+
+            Text(name)
+                .font(AppTypography.Sidebar.row)
+                .foregroundStyle(isSelected ? .white : .primary)
+                .lineLimit(1)
+
+            Spacer()
+        }
+        .padding(.leading, CGFloat(28 + depth * 12))
+        .padding(.trailing, 12)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(backgroundColor)
+                .padding(.horizontal, 4)
+        )
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            return Color.accentColor.opacity(0.88)
+        }
+        if isHovering {
+            return Color(.selectedContentBackgroundColor).opacity(0.15)
+        }
+        return .clear
     }
 }
 

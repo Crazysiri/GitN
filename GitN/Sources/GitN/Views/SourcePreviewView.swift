@@ -153,6 +153,10 @@ struct FileInspectorOverlayView: View {
         ChromePalette.panelBackground
     }
 
+    private var showsModePicker: Bool {
+        !viewModel.isWorkingTreeFilesInspectorSelection
+    }
+
     private var monacoIsDark: Bool {
         colorScheme == .dark
     }
@@ -229,7 +233,9 @@ struct FileInspectorOverlayView: View {
                     Text(viewModel.fileInspectorTitle)
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
-                    modePicker
+                    if showsModePicker {
+                        modePicker
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -256,7 +262,7 @@ struct FileInspectorOverlayView: View {
                     .foregroundStyle(.orange)
             }
 
-            if viewModel.fileInspectorMode == .diff {
+            if viewModel.fileInspectorMode == .diff && showsModePicker {
                 HStack(spacing: 0) {
                     Button {
                         commandBridge.navigateDiff(next: false)

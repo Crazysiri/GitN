@@ -154,7 +154,26 @@
     if (existingModel) {
       existingModel.dispose();
     }
-    return window.monaco.editor.createModel(text, language || "plaintext", uri);
+    return window.monaco.editor.createModel(text, resolveLanguage(language, path), uri);
+  }
+
+  function resolveLanguage(language, path) {
+    const normalizedLanguage = typeof language === "string" ? language.toLowerCase() : "";
+    if (normalizedLanguage === "shellscript") {
+      return "shell";
+    }
+
+    const normalizedPath = typeof path === "string" ? path.toLowerCase() : "";
+    if (
+      normalizedPath.endsWith(".sh") ||
+      normalizedPath.endsWith(".bash") ||
+      normalizedPath.endsWith(".zsh") ||
+      normalizedPath.endsWith(".fish")
+    ) {
+      return "shell";
+    }
+
+    return normalizedLanguage || "plaintext";
   }
 
   function ensureRoot() {
