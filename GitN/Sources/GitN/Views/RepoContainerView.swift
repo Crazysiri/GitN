@@ -663,7 +663,15 @@ struct RepoContainerView: View {
             .hoverTooltip("More\nAdditional repository actions")
             .fixedSize()
             .sheet(isPresented: $showIgnoreEditor) {
-                GitIgnoreEditorView(repoPath: viewModel.repoPath, isPresented: $showIgnoreEditor)
+                GitIgnoreEditorView(
+                    repoPath: viewModel.repoPath,
+                    isPresented: $showIgnoreEditor,
+                    onSave: {
+                        Task { @MainActor in
+                            await viewModel.refreshAfterWorkingTreeMutation()
+                        }
+                    }
+                )
             }
         }
     }

@@ -55,6 +55,14 @@ enum CodeHostingProvider: String, Equatable {
         case .unknown: return nil
         }
     }
+
+    var creationActionTitle: String? {
+        switch self {
+        case .gitlab: return "Create Merge Request"
+        case .github: return "Create Pull Request"
+        case .unknown: return nil
+        }
+    }
 }
 
 enum CodeReviewFilter: String, CaseIterable, Identifiable {

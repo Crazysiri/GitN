@@ -2,6 +2,160 @@ import XCTest
 @testable import GitN
 
 final class GitServiceBehaviorTests: XCTestCase {
+    func testGitLFSSupportDetectsRootAndNestedGitattributes() throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile(".gitattributes", contents: "*.psd filter=lfs diff=lfs merge=lfs -text\n")
+        try repo.writeFile("Assets/.gitattributes", contents: "*.bin filter=lfs diff=lfs merge=lfs -text\n")
+
+        XCTAssertTrue(GitLFSSupport.repositoryUsesLFS(at: repo.url))
+    }
+
+    func testGitLFSSupportIgnoresNonLFSGitattributes() throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile(".gitattributes", contents: "*.txt text eol=lf\n# *.bin filter=lfs\n")
+
+        XCTAssertFalse(GitLFSSupport.repositoryUsesLFS(at: repo.url))
+    }
+
+    func testGitLFSSupportResolvesLocalObjectBeforeSmudgeFallback() throws {
+        let repo = try TemporaryGitRepository()
+        let oid = String(repeating: "a", count: 64)
+        let payload = Data("local-lfs-object".utf8)
+        let pointer = Data("""
+        version https://git-lfs.github.com/spec/v1
+        oid sha256:\(oid)
+        size \(payload.count)
+        """.utf8)
+        let objectURL = repo.url
+            .appendingPathComponent(".git/lfs/objects/aa/aa", isDirectory: true)
+            .appendingPathComponent(oid)
+
+        try FileManager.default.createDirectory(
+            at: objectURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try payload.write(to: objectURL)
+
+        let support = GitLFSSupport(repoPath: repo.path)
+        let resolved = support.resolveDataIfNeeded(pointer, path: "Assets/image.png")
+
+        XCTAssertEqual(resolved.data, payload)
+        XCTAssertTrue(resolved.isLFSPointer)
+        XCTAssertTrue(resolved.wasResolved)
+    }
+
+    func testGitLFSSupportParsesPointerInfo() throws {
+        let payload = Data("""
+        version https://git-lfs.github.com/spec/v1
+        oid sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        size 42
+        """.utf8)
+
+        let pointer = try XCTUnwrap(GitLFSSupport.pointerInfo(for: payload))
+
+        XCTAssertEqual(pointer.oid, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(pointer.size, 42)
+    }
+
+    func testLFSTrackedPathsReturnsOnlyPathsWithFilterLFS() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile(".gitattributes", contents: "*.png filter=lfs diff=lfs merge=lfs -text\n")
+        try repo.writeFile("icon.png", contents: "image\n")
+        try repo.writeFile("notes.txt", contents: "text\n")
+        try repo.commitAll(message: "attrs")
+
+        let service = GitService(repoPath: repo.path)
+        let tracked = try await service.lfsTrackedPaths(paths: ["icon.png", "notes.txt"])
+
+        XCTAssertEqual(tracked, ["icon.png"])
+    }
+
+    func testPushUploadsLFSObjectsWithoutPrePushHook() async throws {
+        try requireGitLFS()
+
+        let remoteURL = try makeBareRemoteRepository()
+        defer { try? FileManager.default.removeItem(at: remoteURL) }
+
+        let repo = try TemporaryGitRepository()
+        try repo.run(["lfs", "install", "--local"])
+        try repo.run(["lfs", "track", "*.bin"])
+        try repo.writeFile("asset.bin", contents: String(repeating: "A", count: 4096))
+        try repo.commitAll(message: "track binary")
+        try repo.run(["remote", "add", "origin", remoteURL.path])
+
+        let prePushHookURL = repo.url.appendingPathComponent(".git/hooks/pre-push")
+        try? FileManager.default.removeItem(at: prePushHookURL)
+
+        let service = GitService(repoPath: repo.path)
+        try await service.push()
+
+        let cloneURL = FileManager.default.temporaryDirectory.appendingPathComponent("GitNTests-lfs-clone-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cloneURL) }
+        try gitRun(["clone", remoteURL.path, cloneURL.path], at: FileManager.default.temporaryDirectory)
+        try gitRun(["lfs", "install", "--local"], at: cloneURL)
+        try gitRun(["lfs", "pull"], at: cloneURL)
+        let clonedAsset = try String(contentsOf: cloneURL.appendingPathComponent("asset.bin"), encoding: .utf8)
+        XCTAssertEqual(clonedAsset, String(repeating: "A", count: 4096))
+    }
+
+    func testPullHydratesLFSObjectsWhenSmudgeIsDisabled() async throws {
+        try requireGitLFS()
+
+        let remoteURL = try makeBareRemoteRepository()
+        defer { try? FileManager.default.removeItem(at: remoteURL) }
+
+        let sourceRepo = try TemporaryGitRepository()
+        try sourceRepo.run(["lfs", "install", "--local"])
+        try sourceRepo.run(["lfs", "track", "*.bin"])
+        try sourceRepo.writeFile("asset.bin", contents: "v1-" + String(repeating: "A", count: 2048))
+        try sourceRepo.commitAll(message: "initial asset")
+        try sourceRepo.run(["remote", "add", "origin", remoteURL.path])
+        try sourceRepo.run(["push", "-u", "origin", "main"])
+
+        let cloneURL = FileManager.default.temporaryDirectory.appendingPathComponent("GitNTests-lfs-pull-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cloneURL) }
+        try gitRun(["clone", remoteURL.path, cloneURL.path], at: FileManager.default.temporaryDirectory)
+        try gitRun(["lfs", "install", "--local", "--skip-smudge"], at: cloneURL)
+
+        try sourceRepo.writeFile("asset.bin", contents: "v2-" + String(repeating: "B", count: 2048))
+        try sourceRepo.commitAll(message: "update asset")
+        try sourceRepo.run(["push", "origin", "main"])
+
+        let service = GitService(repoPath: cloneURL.path)
+        try await service.pull()
+
+        let updatedAsset = try String(contentsOf: cloneURL.appendingPathComponent("asset.bin"), encoding: .utf8)
+        XCTAssertEqual(updatedAsset, "v2-" + String(repeating: "B", count: 2048))
+    }
+
+    func testReadConflictSidesUsesResolvedLFSTextInsteadOfPointerText() async throws {
+        try requireGitLFS()
+
+        let repo = try TemporaryGitRepository()
+        try repo.run(["lfs", "install", "--local"])
+        try repo.run(["lfs", "track", "*.txt"])
+        try repo.writeFile("notes.txt", contents: "base\n")
+        try repo.commitAll(message: "base")
+
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.writeFile("notes.txt", contents: "ours\n")
+        try repo.commitAll(message: "ours")
+
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("notes.txt", contents: "theirs\n")
+        try repo.commitAll(message: "theirs")
+
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let service = GitService(repoPath: repo.path)
+        let sides = try await service.readConflictSides(path: "notes.txt")
+
+        XCTAssertEqual(sides.baseLines, ["base", ""])
+        XCTAssertEqual(sides.oursLines, ["theirs", ""])
+        XCTAssertEqual(sides.theirsLines, ["ours", ""])
+        XCTAssertFalse(sides.mergedText.contains("version https://git-lfs.github.com/spec/v1"))
+    }
+
     func testFileLogFollowsRenameHistory() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("notes.txt", contents: "one\n")
@@ -571,4 +725,39 @@ final class GitServiceBehaviorTests: XCTestCase {
 
         return output
     }
+}
+
+private func requireGitLFS(file: StaticString = #filePath, line: UInt = #line) throws {
+    guard (try? gitRun(["lfs", "version"], at: FileManager.default.temporaryDirectory)) != nil else {
+        throw XCTSkip("git-lfs is not installed in this environment")
+    }
+}
+
+@discardableResult
+private func gitRun(_ args: [String], at directoryURL: URL) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = args
+    process.currentDirectoryURL = directoryURL
+    process.environment = GitCLI.enrichedEnvironment()
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    process.waitUntilExit()
+
+    let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+    let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+    let output = String(data: outputData + errorData, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    guard process.terminationStatus == 0 else {
+        XCTFail(output)
+        throw TemporaryGitRepository.CommandError(arguments: args, output: output)
+    }
+
+    return output
 }

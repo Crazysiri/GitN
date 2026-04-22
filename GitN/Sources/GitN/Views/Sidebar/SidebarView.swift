@@ -52,6 +52,8 @@ struct SidebarView: View {
     @State private var newBranchFromTagName = ""
 
     @State private var stashPendingDrop: StashInfo?
+    @State private var activeFileTreeEdit: FileTreeEditState?
+    @State private var pendingWorkingTreeDelete: PendingWorkingTreeDelete?
 
     private var localBranchesSectionShouldAnimate: Bool {
         viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0) <= Self.animatedSectionItemLimit
@@ -181,6 +183,23 @@ struct SidebarView: View {
                 Text("Remove \(detail)? The stashed changes will be discarded. This cannot be undone.")
             }
         }
+        .alert("Delete \(pendingWorkingTreeDelete?.isFolder == true ? "Folder" : "File")", isPresented: Binding(
+            get: { pendingWorkingTreeDelete != nil },
+            set: { if !$0 { pendingWorkingTreeDelete = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                guard let pendingWorkingTreeDelete else { return }
+                self.pendingWorkingTreeDelete = nil
+                Task { await viewModel.performDeleteWorkingTreeItem(path: pendingWorkingTreeDelete.path) }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingWorkingTreeDelete = nil
+            }
+        } message: {
+            if let pendingWorkingTreeDelete {
+                Text("Delete \(pendingWorkingTreeDelete.displayName)? This cannot be undone.")
+            }
+        }
     }
 
     // MARK: - Add Remote Sheet
@@ -259,7 +278,10 @@ struct SidebarView: View {
                     Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
                 }
             },
-            animateCollapse: filesSectionShouldAnimate
+            animateCollapse: filesSectionShouldAnimate,
+            headerContextMenu: {
+                AnyView(filesRootContextMenu)
+            }
         ) {
             let flatNodes = flattenWorkingTree(
                 viewModel.workingTreeFiles,
@@ -267,45 +289,297 @@ struct SidebarView: View {
                 depth: 0,
                 collapsedFolders: collapsedFileFolders
             )
-            if flatNodes.isEmpty {
+            let listRows = fileTreeRows(from: flatNodes)
+            if listRows.isEmpty {
                 Text("No files")
                     .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 28)
                     .padding(.vertical, 4)
             } else {
-                ForEach(flatNodes) { node in
-                    switch node.kind {
-                    case .folder:
-                        SidebarFileFolderRow(
-                            name: node.displayName,
-                            isCollapsed: collapsedFileFolders.contains(node.relativePath),
-                            depth: node.depth
-                        )
-                        .onTapGesture {
-                            if collapsedFileFolders.contains(node.relativePath) {
-                                collapsedFileFolders.remove(node.relativePath)
-                                expandingFileFolders.insert(node.relativePath)
-                                Task { await viewModel.setWorkingTreeFolderExpanded(path: node.relativePath, isExpanded: true) }
-                            } else {
-                                collapsedFileFolders.insert(node.relativePath)
-                                expandingFileFolders.remove(node.relativePath)
-                                Task { await viewModel.setWorkingTreeFolderExpanded(path: node.relativePath, isExpanded: false) }
-                            }
-                        }
-                    case .file:
-                        SidebarFileRow(
-                            name: node.displayName,
-                            depth: node.depth,
-                            isSelected: viewModel.selectedWorkingTreeFilePath == node.relativePath
-                        )
-                        .onTapGesture {
-                            Task { await viewModel.openWorkingTreeFilePreview(path: node.relativePath) }
+                ForEach(listRows) { row in
+                    switch row {
+                    case .node(let node):
+                        fileTreeNodeRow(node)
+                    case .create(let parentPath, let depth, let isFolder):
+                        SidebarFileInlineEditorRow(
+                            name: pendingNameBinding(for: parentPath, isFolder: isFolder),
+                            icon: isFolder ? "folder.badge.plus" : "doc.badge.plus",
+                            depth: depth,
+                            isFolder: isFolder,
+                            placeholder: isFolder ? "New Folder" : "New File",
+                            submitLabel: isFolder ? .done : .return
+                        ) {
+                            commitFileTreeCreate(parentPath: parentPath, isFolder: isFolder)
+                        } onCancel: {
+                            cancelActiveFileTreeEdit()
                         }
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var filesRootContextMenu: some View {
+        Button("New Folder") {
+            startCreatingNode(in: "", isFolder: true, depth: 0)
+        }
+        Button("New File") {
+            startCreatingNode(in: "", isFolder: false, depth: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func fileTreeNodeRow(_ node: FlatWorkingTreeNode) -> some View {
+        switch node.kind {
+        case .folder:
+            if case let .rename(path, _, pendingName, _) = activeFileTreeEdit, path == node.relativePath {
+                SidebarFileInlineEditorRow(
+                    name: Binding(
+                        get: { pendingName },
+                        set: { updateRenamePendingName($0, path: path, depth: node.depth) }
+                    ),
+                    icon: "folder",
+                    depth: node.depth,
+                    isFolder: true,
+                    placeholder: node.displayName
+                ) {
+                    commitFileTreeRename(path: node.relativePath)
+                } onCancel: {
+                    cancelActiveFileTreeEdit()
+                }
+            } else {
+                SidebarFileFolderRow(
+                    name: node.displayName,
+                    isCollapsed: collapsedFileFolders.contains(node.relativePath),
+                    depth: node.depth
+                )
+                .contextMenu {
+                    fileFolderContextMenu(node)
+                        .font(AppTypography.Sidebar.contextMenu)
+                }
+                .onTapGesture {
+                    toggleFolder(node.relativePath)
+                }
+            }
+        case .file:
+            if case let .rename(path, _, pendingName, _) = activeFileTreeEdit, path == node.relativePath {
+                SidebarFileInlineEditorRow(
+                    name: Binding(
+                        get: { pendingName },
+                        set: { updateRenamePendingName($0, path: path, depth: node.depth) }
+                    ),
+                    icon: "doc.text",
+                    depth: node.depth,
+                    isFolder: false,
+                    placeholder: node.displayName
+                ) {
+                    commitFileTreeRename(path: node.relativePath)
+                } onCancel: {
+                    cancelActiveFileTreeEdit()
+                }
+            } else {
+                SidebarFileRow(
+                    name: node.displayName,
+                    depth: node.depth,
+                    isSelected: viewModel.selectedWorkingTreeFilePath == node.relativePath
+                )
+                .contextMenu {
+                    fileLeafContextMenu(node)
+                        .font(AppTypography.Sidebar.contextMenu)
+                }
+                .onTapGesture {
+                    Task { await viewModel.openWorkingTreeFilePreview(path: node.relativePath) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileFolderContextMenu(_ node: FlatWorkingTreeNode) -> some View {
+        Button("New Folder") {
+            startCreatingNode(in: node.relativePath, isFolder: true, depth: node.depth + 1)
+        }
+        Button("New File") {
+            startCreatingNode(in: node.relativePath, isFolder: false, depth: node.depth + 1)
+        }
+        Divider()
+        Button("Rename") {
+            activeFileTreeEdit = .rename(
+                path: node.relativePath,
+                originalName: node.displayName,
+                pendingName: node.displayName,
+                depth: node.depth
+            )
+        }
+        Button("Delete", role: .destructive) {
+            pendingWorkingTreeDelete = PendingWorkingTreeDelete(
+                path: node.relativePath,
+                displayName: node.displayName,
+                isFolder: true
+            )
+        }
+        Divider()
+        Button("Reveal in Finder") {
+            viewModel.showInFinder(path: node.relativePath)
+        }
+        Button("Copy Path") {
+            viewModel.copyWorkingTreePath(path: node.relativePath)
+        }
+    }
+
+    @ViewBuilder
+    private func fileLeafContextMenu(_ node: FlatWorkingTreeNode) -> some View {
+        Button("Rename") {
+            activeFileTreeEdit = .rename(
+                path: node.relativePath,
+                originalName: node.displayName,
+                pendingName: node.displayName,
+                depth: node.depth
+            )
+        }
+        Button("Delete", role: .destructive) {
+            pendingWorkingTreeDelete = PendingWorkingTreeDelete(
+                path: node.relativePath,
+                displayName: node.displayName,
+                isFolder: false
+            )
+        }
+        Divider()
+        Button("Reveal in Finder") {
+            viewModel.showInFinder(path: node.relativePath)
+        }
+        Button("Copy Path") {
+            viewModel.copyWorkingTreePath(path: node.relativePath)
+        }
+    }
+
+    private func toggleFolder(_ relativePath: String) {
+        cancelActiveFileTreeEdit()
+        if collapsedFileFolders.contains(relativePath) {
+            collapsedFileFolders.remove(relativePath)
+            expandingFileFolders.insert(relativePath)
+            Task { await viewModel.setWorkingTreeFolderExpanded(path: relativePath, isExpanded: true) }
+        } else {
+            collapsedFileFolders.insert(relativePath)
+            expandingFileFolders.remove(relativePath)
+            Task { await viewModel.setWorkingTreeFolderExpanded(path: relativePath, isExpanded: false) }
+        }
+    }
+
+    private func startCreatingNode(in parentPath: String, isFolder: Bool, depth: Int) {
+        if !parentPath.isEmpty {
+            collapsedFileFolders.remove(parentPath)
+            expandingFileFolders.insert(parentPath)
+            Task { await viewModel.setWorkingTreeFolderExpanded(path: parentPath, isExpanded: true) }
+        } else if viewModel.isSectionCollapsed("files") {
+            viewModel.toggleSection("files")
+            Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
+        }
+        activeFileTreeEdit = isFolder
+            ? .createFolder(parentPath: parentPath, pendingName: "", depth: depth)
+            : .createFile(parentPath: parentPath, pendingName: "", depth: depth)
+    }
+
+    private func cancelActiveFileTreeEdit() {
+        activeFileTreeEdit = nil
+    }
+
+    private func commitFileTreeCreate(parentPath: String, isFolder: Bool) {
+        guard let currentEdit = activeFileTreeEdit else { return }
+        let pendingName: String
+        switch currentEdit {
+        case .createFolder(let currentParentPath, let currentPendingName, _),
+             .createFile(let currentParentPath, let currentPendingName, _):
+            guard currentParentPath == parentPath else { return }
+            pendingName = currentPendingName
+        case .rename:
+            return
+        }
+
+        activeFileTreeEdit = nil
+        Task {
+            if isFolder {
+                _ = await viewModel.performCreateWorkingTreeFolder(parentPath: parentPath, name: pendingName)
+            } else {
+                _ = await viewModel.performCreateWorkingTreeFile(parentPath: parentPath, name: pendingName)
+            }
+        }
+    }
+
+    private func commitFileTreeRename(path: String) {
+        guard case let .rename(currentPath, originalName, pendingName, _) = activeFileTreeEdit,
+              currentPath == path else { return }
+
+        let trimmedName = pendingName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName == originalName {
+            activeFileTreeEdit = nil
+            return
+        }
+
+        activeFileTreeEdit = nil
+        Task {
+            _ = await viewModel.performRenameWorkingTreeItem(path: path, newName: pendingName)
+        }
+    }
+
+    private func updateRenamePendingName(_ newValue: String, path: String, depth: Int) {
+        guard case let .rename(currentPath, originalName, _, currentDepth) = activeFileTreeEdit,
+              currentPath == path,
+              currentDepth == depth else { return }
+        activeFileTreeEdit = .rename(
+            path: currentPath,
+            originalName: originalName,
+            pendingName: newValue,
+            depth: currentDepth
+        )
+    }
+
+    private func pendingNameBinding(for parentPath: String, isFolder: Bool) -> Binding<String> {
+        Binding(
+            get: {
+                switch activeFileTreeEdit {
+                case .createFolder(let currentParentPath, let pendingName, _) where isFolder && currentParentPath == parentPath:
+                    return pendingName
+                case .createFile(let currentParentPath, let pendingName, _) where !isFolder && currentParentPath == parentPath:
+                    return pendingName
+                default:
+                    return ""
+                }
+            },
+            set: { newValue in
+                switch activeFileTreeEdit {
+                case .createFolder(let currentParentPath, _, let depth) where isFolder && currentParentPath == parentPath:
+                    activeFileTreeEdit = .createFolder(parentPath: currentParentPath, pendingName: newValue, depth: depth)
+                case .createFile(let currentParentPath, _, let depth) where !isFolder && currentParentPath == parentPath:
+                    activeFileTreeEdit = .createFile(parentPath: currentParentPath, pendingName: newValue, depth: depth)
+                default:
+                    break
+                }
+            }
+        )
+    }
+
+    private func fileTreeRows(from flatNodes: [FlatWorkingTreeNode]) -> [FileTreeListRow] {
+        var rows = flatNodes.map(FileTreeListRow.node)
+
+        switch activeFileTreeEdit {
+        case .createFolder(let parentPath, _, let depth):
+            rows.insert(.create(parentPath: parentPath, depth: depth, isFolder: true), at: insertionIndex(for: parentPath, in: flatNodes))
+        case .createFile(let parentPath, _, let depth):
+            rows.insert(.create(parentPath: parentPath, depth: depth, isFolder: false), at: insertionIndex(for: parentPath, in: flatNodes))
+        case .rename, .none:
+            break
+        }
+
+        return rows
+    }
+
+    private func insertionIndex(for parentPath: String, in flatNodes: [FlatWorkingTreeNode]) -> Int {
+        guard !parentPath.isEmpty else { return 0 }
+        guard let parentIndex = flatNodes.firstIndex(where: { $0.relativePath == parentPath }) else { return flatNodes.count }
+        return parentIndex + 1
     }
 
     // MARK: - Local Branch Context Menu
@@ -318,6 +592,9 @@ struct SidebarView: View {
         if branch.isCurrent {
             Button("Pull \(branch.name)") {
                 Task { await viewModel.performPull() }
+            }
+            Button("Push \(branch.name)") {
+                Task { await viewModel.performPush() }
             }
         } else {
             Button("Pull \(branch.name)") {
@@ -345,6 +622,12 @@ struct SidebarView: View {
                 upstreamRemote = "origin"
                 upstreamBranch = branch.name
                 showSetUpstream = true
+            }
+            if let createReviewTitle = viewModel.currentBranchReviewCreationActionTitle,
+               viewModel.currentBranchReviewCreationURL() != nil {
+                Button(createReviewTitle) {
+                    viewModel.openCurrentBranchReviewCreationInBrowser()
+                }
             }
             Divider()
         }
@@ -1135,6 +1418,7 @@ struct SidebarSection<Content: View>: View {
     let animateCollapse: Bool
     let onAdd: (() -> Void)?
     let onRefresh: (() -> Void)?
+    let headerContextMenu: (() -> AnyView)?
     @ViewBuilder let content: () -> Content
 
     init(
@@ -1146,6 +1430,7 @@ struct SidebarSection<Content: View>: View {
         animateCollapse: Bool = true,
         onAdd: (() -> Void)? = nil,
         onRefresh: (() -> Void)? = nil,
+        headerContextMenu: (() -> AnyView)? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
@@ -1156,6 +1441,7 @@ struct SidebarSection<Content: View>: View {
         self.animateCollapse = animateCollapse
         self.onAdd = onAdd
         self.onRefresh = onRefresh
+        self.headerContextMenu = headerContextMenu
         self.content = content
     }
 
@@ -1221,6 +1507,12 @@ struct SidebarSection<Content: View>: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .contextMenu {
+                if let headerContextMenu {
+                    headerContextMenu()
+                }
+            }
 
             if !isCollapsed {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -1633,6 +1925,34 @@ private struct FlatWorkingTreeNode: Identifiable {
     let depth: Int
 }
 
+private enum FileTreeEditState: Equatable {
+    case createFolder(parentPath: String, pendingName: String, depth: Int)
+    case createFile(parentPath: String, pendingName: String, depth: Int)
+    case rename(path: String, originalName: String, pendingName: String, depth: Int)
+}
+
+private struct PendingWorkingTreeDelete: Identifiable, Equatable {
+    let path: String
+    let displayName: String
+    let isFolder: Bool
+
+    var id: String { path }
+}
+
+private enum FileTreeListRow: Identifiable {
+    case node(FlatWorkingTreeNode)
+    case create(parentPath: String, depth: Int, isFolder: Bool)
+
+    var id: String {
+        switch self {
+        case .node(let node):
+            return node.id
+        case .create(let parentPath, _, let isFolder):
+            return "create:\(isFolder ? "folder" : "file"):\(parentPath)"
+        }
+    }
+}
+
 private func flattenWorkingTree(
     _ nodes: [WorkingTreeFileNode],
     folderContents: [String: [WorkingTreeFileNode]],
@@ -1709,6 +2029,54 @@ private struct SidebarFileFolderRow: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
+    }
+}
+
+private struct SidebarFileInlineEditorRow: View {
+    @Binding var name: String
+    let icon: String
+    let depth: Int
+    let isFolder: Bool
+    let placeholder: String
+    var submitLabel: SubmitLabel = .done
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(AppTypography.Sidebar.rowMeta)
+                .foregroundStyle(.secondary)
+
+            TextField(placeholder, text: $name)
+                .textFieldStyle(.plain)
+                .font(AppTypography.Sidebar.row)
+                .foregroundStyle(.primary)
+                .focused($isFocused)
+                .submitLabel(submitLabel)
+                .onSubmit(onSubmit)
+                .onExitCommand(perform: onCancel)
+                .onChange(of: isFocused) { _, focused in
+                    if !focused {
+                        onCancel()
+                    }
+                }
+
+            Spacer()
+        }
+        .padding(.leading, CGFloat(28 + depth * 12))
+        .padding(.trailing, 12)
+        .padding(.vertical, isFolder ? 2 : 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color(.selectedContentBackgroundColor).opacity(0.12))
+                .padding(.horizontal, 4)
+        )
+        .onAppear {
+            isFocused = true
+        }
     }
 }
 

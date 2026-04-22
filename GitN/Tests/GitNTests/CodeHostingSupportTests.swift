@@ -52,4 +52,50 @@ final class CodeHostingSupportTests: XCTestCase {
             .gitlab
         )
     }
+
+    func testReviewCreationURLBuilderBuildsGitLabURLForSSHRemote() {
+        let url = CodeHostingReviewCreationURLBuilder.buildURL(
+            provider: .gitlab,
+            remoteURL: "git@gitlab.example.com:group/sub/repo.git",
+            sourceBranch: "feature/test"
+        )
+
+        XCTAssertEqual(
+            url?.absoluteString,
+            "https://gitlab.example.com/group/sub/repo/-/merge_requests/new?merge_request%5Bsource_branch%5D=feature/test"
+        )
+    }
+
+    func testReviewCreationURLBuilderBuildsGitHubURLForHTTPSRemote() {
+        let url = CodeHostingReviewCreationURLBuilder.buildURL(
+            provider: .github,
+            remoteURL: "https://github.com/owner/repo.git",
+            sourceBranch: "feature/test"
+        )
+
+        XCTAssertEqual(
+            url?.absoluteString,
+            "https://github.com/owner/repo/compare/feature/test?expand=1"
+        )
+    }
+
+    func testReviewCreationURLBuilderReturnsNilForUnknownProvider() {
+        XCTAssertNil(
+            CodeHostingReviewCreationURLBuilder.buildURL(
+                provider: .unknown,
+                remoteURL: "https://example.com/owner/repo.git",
+                sourceBranch: "feature/test"
+            )
+        )
+    }
+
+    func testReviewCreationURLBuilderReturnsNilForEmptyBranch() {
+        XCTAssertNil(
+            CodeHostingReviewCreationURLBuilder.buildURL(
+                provider: .gitlab,
+                remoteURL: "https://gitlab.example.com/group/repo.git",
+                sourceBranch: "   "
+            )
+        )
+    }
 }

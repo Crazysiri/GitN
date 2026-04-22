@@ -2628,6 +2628,17 @@ struct DiffFileRow: View {
             Spacer()
 
             HStack(spacing: 3) {
+                if let lfsBadge = file.lfsBadgeText {
+                    Text(lfsBadge)
+                        .font(AppTypography.Detail.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule()
+                                .fill(ChromePalette.panelMutedBackground)
+                        )
+                }
                 if let imageStatusLabel {
                     Text(imageStatusLabel)
                         .font(AppTypography.Detail.mono)

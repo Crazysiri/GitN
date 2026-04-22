@@ -59,6 +59,32 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertTrue(viewModel.isSectionCollapsed("files"))
     }
 
+    func testCurrentBranchReviewCreationURLUsesPreferredHostedRemote() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        viewModel.remotes = [
+            RemoteInfo(name: "backup", url: "ssh://example.com/repo.git"),
+            RemoteInfo(name: "origin", url: "git@github.com:owner/repo.git"),
+        ]
+        viewModel.currentBranch = "feature/test"
+        viewModel.isDetachedHead = false
+
+        XCTAssertEqual(
+            viewModel.currentBranchReviewCreationURL()?.absoluteString,
+            "https://github.com/owner/repo/compare/feature/test?expand=1"
+        )
+    }
+
+    func testCurrentBranchReviewCreationURLReturnsNilWhenDetachedHead() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        viewModel.remotes = [
+            RemoteInfo(name: "origin", url: "git@gitlab.example.com:group/repo.git"),
+        ]
+        viewModel.currentBranch = "HEAD"
+        viewModel.isDetachedHead = true
+
+        XCTAssertNil(viewModel.currentBranchReviewCreationURL())
+    }
+
     func testReflogBadgeEntriesDeduplicateKindsAcrossMergedEntries() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         let hash = String(repeating: "d", count: 40)
@@ -267,6 +293,31 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.conflictOutputText, document.outputText)
     }
 
+    func testSaveConflictResolutionInFallbackModeMarksFileResolved() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.bin", contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.writeFile("file.bin", contents: "ours\n")
+        try repo.commitAll(message: "ours")
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("file.bin", contents: "theirs\n")
+        try repo.commitAll(message: "theirs")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        viewModel.conflictMergeFile = ConflictFile(path: "file.bin", conflictCount: 1)
+        viewModel.conflictFallbackMessage = "Binary conflict"
+        viewModel.showConflictMergeView = true
+
+        await viewModel.saveConflictResolution()
+
+        XCTAssertEqual(viewModel.toastMessage?.title, "Marked Resolved")
+        XCTAssertFalse(viewModel.showConflictMergeView)
+        XCTAssertNil(viewModel.conflictFallbackMessage)
+        XCTAssertNil(viewModel.conflictMergeFile)
+    }
+
     func testOpenWorkingTreeFilePreviewUsesWorkingTreeContentEvenWhenCommitIsSelected() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("Sources/App.swift", contents: "print(\"base\")\n")
@@ -291,6 +342,24 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedWorkingTreeFilePath, "Sources/App.swift")
     }
 
+    func testLFSGuidanceMessageExplainsInstallAndInit() {
+        let message = RepoViewModel.lfsGuidanceMessage(
+            for: "push",
+            errorMessage: "Repository uses Git LFS, but `git lfs` is unavailable. Install Git LFS, run `git lfs install`, and retry."
+        )
+
+        XCTAssertEqual(
+            message,
+            "Git LFS is required to push this repository. Install Git LFS, run `git lfs install`, then retry."
+        )
+    }
+
+    func testLFSGuidanceMessageIgnoresNonLFSErrors() {
+        XCTAssertNil(
+            RepoViewModel.lfsGuidanceMessage(for: "pull", errorMessage: "Host key verification failed")
+        )
+    }
+
     func testWorkingTreeFilesInspectorSelectionIsPreviewOnly() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("script.sh", contents: "echo hi\n")
@@ -307,6 +376,29 @@ final class RepoViewModelBehaviorTests: XCTestCase {
 
         await viewModel.setFileInspectorMode(.history)
         XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+    }
+
+    func testRefreshAfterWorkingTreeMutationRebuildsUncommittedDiffFiles() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile(".gitignore", contents: "DerivedData/\n")
+        try repo.writeFile("tracked.txt", contents: "base\n")
+        try repo.commitAll(message: "Initial commit")
+        try repo.writeFile("tracked.txt", contents: "tracked change\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        guard let uncommitted = viewModel.commits.first(where: \.isUncommitted) else {
+            return XCTFail("Expected uncommitted entry")
+        }
+
+        await viewModel.selectCommit(uncommitted)
+        XCTAssertEqual(Set(viewModel.diffFiles.map(\.path)), ["tracked.txt"])
+
+        try repo.writeFile(".gitignore", contents: "DerivedData/\n*.xcworkspace\n")
+        await viewModel.refreshAfterWorkingTreeMutation()
+
+        XCTAssertEqual(Set(viewModel.diffFiles.map(\.path)), [".gitignore", "tracked.txt"])
     }
 
     func testHandleMissingWorkingTreePathClosesOpenWorkingTreePreview() async throws {
@@ -851,6 +943,32 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.fileInspectorVisualContent?.kind, .image)
     }
 
+    func testSelectDiffFileUsesImagePresentationForStagedLFSImage() async throws {
+        try requireGitLFS()
+
+        let repo = try TemporaryGitRepository()
+        try repo.run(["lfs", "install", "--local"])
+        try repo.run(["lfs", "track", "*.png"])
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        try repo.commitAll(message: "initial")
+
+        let imageURL = URL(fileURLWithPath: repo.path).appendingPathComponent("staged-lfs.png")
+        try onePixelPNGData.write(to: imageURL)
+        try repo.run(["add", "staged-lfs.png"])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let uncommitted = try XCTUnwrap(viewModel.commits.first)
+        await viewModel.selectCommit(uncommitted)
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "staged-lfs.png" }))
+        await viewModel.selectDiffFile(file, context: .staged)
+
+        XCTAssertEqual(viewModel.selectedDiffVisualContent?.kind, .image)
+        XCTAssertEqual(viewModel.selectedDiffVisualContent?.newData, onePixelPNGData)
+        XCTAssertNil(viewModel.parsedDiff)
+    }
+
     func testReflogSourceOptionsIncludeCurrentBranchAfterHeadOption() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         viewModel.currentBranch = "feature/test"
@@ -1187,6 +1305,69 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertNil(viewModel.toastMessage, "No toast should appear when there is no error message")
     }
 
+    func testRenameWorkingTreeFileUpdatesSelectedPreviewPath() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("docs/readme.md", contents: "# Readme\n")
+
+        let viewModel = RepoViewModel(
+            path: repo.path,
+            name: "repo",
+            workingTreeFileOperations: WorkingTreeFileOperations(repoPath: repo.path)
+        )
+
+        await viewModel.loadWorkingTreeFilesRootIfNeeded()
+        await viewModel.setWorkingTreeFolderExpanded(path: "docs", isExpanded: true)
+        await viewModel.openWorkingTreeFilePreview(path: "docs/readme.md")
+
+        let renamedPath = await viewModel.performRenameWorkingTreeItem(path: "docs/readme.md", newName: "guide.md")
+
+        XCTAssertEqual(renamedPath, "docs/guide.md")
+        XCTAssertEqual(viewModel.selectedWorkingTreeFilePath, "docs/guide.md")
+        XCTAssertEqual(viewModel.fileInspectorPath, "docs/guide.md")
+        XCTAssertTrue(viewModel.isFileInspectorPresented)
+    }
+
+    func testDeleteWorkingTreeFileClosesSelectedPreview() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("docs/readme.md", contents: "# Readme\n")
+
+        let viewModel = RepoViewModel(
+            path: repo.path,
+            name: "repo",
+            workingTreeFileOperations: WorkingTreeFileOperations(repoPath: repo.path)
+        )
+
+        await viewModel.loadWorkingTreeFilesRootIfNeeded()
+        await viewModel.setWorkingTreeFolderExpanded(path: "docs", isExpanded: true)
+        await viewModel.openWorkingTreeFilePreview(path: "docs/readme.md")
+
+        await viewModel.performDeleteWorkingTreeItem(path: "docs/readme.md")
+
+        XCTAssertNil(viewModel.selectedWorkingTreeFilePath)
+        XCTAssertFalse(viewModel.isFileInspectorPresented)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("docs/readme.md").path))
+    }
+
+    func testDeleteExpandedWorkingTreeFolderKeepsRootListingOtherEntries() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("docs/readme.md", contents: "# Readme\n")
+        try repo.writeFile("src/app.swift", contents: "print(\"hi\")\n")
+
+        let viewModel = RepoViewModel(
+            path: repo.path,
+            name: "repo",
+            workingTreeFileOperations: WorkingTreeFileOperations(repoPath: repo.path)
+        )
+
+        await viewModel.loadWorkingTreeFilesRootIfNeeded()
+        await viewModel.setWorkingTreeFolderExpanded(path: "docs", isExpanded: true)
+
+        await viewModel.performDeleteWorkingTreeItem(path: "docs")
+
+        XCTAssertEqual(viewModel.workingTreeFiles.map(\.relativePath), ["src"])
+        XCTAssertFalse(viewModel.workingTreeFolderContents.keys.contains("docs"))
+    }
+
     private func makeCommit(hash: String, parentHashes: [String] = [], message: String) -> CommitInfo {
         CommitInfo(
             hash: hash,
@@ -1205,5 +1386,24 @@ final class RepoViewModelBehaviorTests: XCTestCase {
             "GIT_AUTHOR_DATE": iso8601,
             "GIT_COMMITTER_DATE": iso8601
         ]
+    }
+}
+
+private func requireGitLFS(file: StaticString = #filePath, line: UInt = #line) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["lfs", "version"]
+    process.currentDirectoryURL = FileManager.default.temporaryDirectory
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    process.waitUntilExit()
+
+    guard process.terminationStatus == 0 else {
+        throw XCTSkip("git-lfs is not installed in this environment")
     }
 }

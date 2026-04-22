@@ -147,6 +147,8 @@ struct ConflictMergeView: View {
     private var file: ConflictFile? { viewModel.conflictMergeFile }
     private var sides: ConflictSides? { viewModel.conflictSides }
     private var document: ConflictEditorDocument? { viewModel.conflictEditorDocument }
+    private var fallbackMessage: String? { viewModel.conflictFallbackMessage }
+    private var isFallbackMode: Bool { fallbackMessage != nil && document == nil }
     private var totalConflicts: Int { document?.blocks.count ?? sides?.markers.count ?? 0 }
     private var currentBlock: ConflictEditorBlock? {
         guard let document, currentConflictIndex >= 0, currentConflictIndex < document.blocks.count else { return nil }
@@ -157,15 +159,19 @@ struct ConflictMergeView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
-            VSplitView {
-                HSplitView {
-                    oursPanel
-                    theirsPanel
-                }
-                .frame(minHeight: 200)
+            if isFallbackMode {
+                fallbackContent
+            } else {
+                VSplitView {
+                    HSplitView {
+                        oursPanel
+                        theirsPanel
+                    }
+                    .frame(minHeight: 200)
 
-                outputPanel
-                    .frame(minHeight: 150)
+                    outputPanel
+                        .frame(minHeight: 150)
+                }
             }
         }
         .background(Color(.windowBackgroundColor))
@@ -205,9 +211,9 @@ struct ConflictMergeView: View {
 
             Button(action: { Task { await viewModel.saveConflictResolution() } }) {
                 HStack(spacing: 3) {
-                    Image(systemName: "square.and.arrow.down")
+                    Image(systemName: isFallbackMode ? "checkmark.circle" : "square.and.arrow.down")
                         .font(.system(size: 12))
-                    Text("Save")
+                    Text(isFallbackMode ? "Mark Resolved" : "Save")
                         .font(.system(size: 13, weight: .medium))
                 }
             }
@@ -224,6 +230,34 @@ struct ConflictMergeView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color(.controlBackgroundColor).opacity(0.5))
+    }
+
+    private var fallbackContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("This conflict can't be edited as text in GitN.", systemImage: "doc.fill.badge.ellipsis")
+                .font(.system(size: 16, weight: .semibold))
+
+            Text("Resolve the file externally, then return here and choose `Mark Resolved` to stage the current working tree version.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+
+            if let fallbackMessage, !fallbackMessage.isEmpty {
+                Text(fallbackMessage)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(.controlBackgroundColor).opacity(0.55))
+                    )
+            }
+
+            Spacer()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(.textBackgroundColor))
     }
 
     // MARK: - Panels

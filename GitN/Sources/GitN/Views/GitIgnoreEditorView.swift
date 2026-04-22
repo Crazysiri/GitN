@@ -3,6 +3,7 @@ import SwiftUI
 struct GitIgnoreEditorView: View {
     let repoPath: String
     @Binding var isPresented: Bool
+    let onSave: (() -> Void)?
 
     @State private var text: String = ""
     @State private var isSaving = false
@@ -83,6 +84,7 @@ struct GitIgnoreEditorView: View {
 
         do {
             try text.write(to: ignoreURL, atomically: true, encoding: .utf8)
+            onSave?()
             isPresented = false
         } catch {
             saveErrorMessage = error.localizedDescription

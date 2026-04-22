@@ -66,6 +66,28 @@ final class DiffContentLogicTests: XCTestCase {
             "committed markdown file must not be editable")
     }
 
+    func testMarkdownFileRequestedInDiffModeDefaultsInspectorToPreview() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("README.md", contents: "# Hello\n\nThis is a test.\n")
+        try repo.commitAll(message: "add readme")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let commit = try XCTUnwrap(viewModel.commits.first(where: { $0.message == "add readme" }))
+        await viewModel.selectCommit(commit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "README.md" }))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview,
+            "Markdown files should default to preview mode even when diff is the caller's default")
+        XCTAssertTrue(viewModel.fileInspectorPath.isMarkdownFile,
+            "the mode override should only apply to markdown files")
+        XCTAssertTrue(viewModel.fileInspectorContent.contains("# Hello"),
+            "Markdown preview still needs the loaded source content")
+    }
+
     func testMarkdownFilesResolveToMarkdownLanguage() {
         XCTAssertEqual("README.md".sourceLanguage, .markdown)
         XCTAssertEqual("CHANGELOG.md".sourceLanguage, .markdown)
@@ -314,6 +336,37 @@ final class DiffContentLogicTests: XCTestCase {
         XCTAssertEqual(visual.kind, .image)
         XCTAssertNotNil(visual.oldData, "oldData should hold the pre-deletion image bytes")
         XCTAssertNil(visual.newData, "newData should be nil for a deleted image")
+    }
+
+    func testCommittedDeletedLFSImageHasOnlyOldData() async throws {
+        try requireGitLFS()
+
+        let repo = try TemporaryGitRepository()
+        try repo.run(["lfs", "install", "--local"])
+        try repo.run(["lfs", "track", "*.png"])
+
+        let imageURL = URL(fileURLWithPath: repo.path).appendingPathComponent("removed-lfs.png")
+        try onePixelPNGData.write(to: imageURL)
+        try repo.commitAll(message: "add lfs image")
+
+        try repo.run(["rm", "removed-lfs.png"])
+        try repo.commitAll(message: "delete lfs image")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let deleteCommit = try XCTUnwrap(
+            viewModel.commits.first(where: { $0.message == "delete lfs image" })
+        )
+        await viewModel.selectCommit(deleteCommit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "removed-lfs.png" }))
+        XCTAssertEqual(file.changeKind, .deleted)
+
+        let visual = try XCTUnwrap(viewModel.selectedDiffVisualContent)
+        XCTAssertEqual(visual.kind, .image)
+        XCTAssertEqual(visual.oldData, onePixelPNGData)
+        XCTAssertNil(visual.newData)
     }
 
     // MARK: - Diff context: before-text source for renamed text file
@@ -725,5 +778,24 @@ final class DiffContentLogicTests: XCTestCase {
         XCTAssertFalse(viewModel.isFileInspectorEditable)
         XCTAssertFalse(viewModel.fileInspectorContent.isEmpty,
             "file content should be loaded as text when opened directly in preview mode")
+    }
+}
+
+private func requireGitLFS(file: StaticString = #filePath, line: UInt = #line) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["lfs", "version"]
+    process.currentDirectoryURL = FileManager.default.temporaryDirectory
+
+    let stdout = Pipe()
+    let stderr = Pipe()
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    try process.run()
+    process.waitUntilExit()
+
+    guard process.terminationStatus == 0 else {
+        throw XCTSkip("git-lfs is not installed in this environment")
     }
 }

@@ -161,6 +161,7 @@ struct DiffFile: Identifiable, Equatable {
     /// Non-nil when the file was renamed; contains the original path.
     let oldPath: String?
     let changeKind: DiffChangeKind
+    let isLFSTracked: Bool
 
     var isRenamed: Bool { oldPath != nil }
     var isPureRename: Bool { isRenamed && additions == 0 && deletions == 0 }
@@ -184,12 +185,15 @@ struct DiffFile: Identifiable, Equatable {
         }
     }
 
-    init(additions: Int, deletions: Int, path: String, oldPath: String? = nil, changeKind: DiffChangeKind = .modified) {
+    var lfsBadgeText: String? { isLFSTracked ? "LFS" : nil }
+
+    init(additions: Int, deletions: Int, path: String, oldPath: String? = nil, changeKind: DiffChangeKind = .modified, isLFSTracked: Bool = false) {
         self.additions = additions
         self.deletions = deletions
         self.path = path
         self.oldPath = oldPath
         self.changeKind = changeKind
+        self.isLFSTracked = isLFSTracked
     }
 }
 
@@ -211,9 +215,18 @@ struct VisualFileContent: Sendable, Equatable {
 }
 
 extension String {
+    private static let knownImageExtensions: Set<String> = [
+        "apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jpeg", "jpg",
+        "png", "svg", "tif", "tiff", "webp"
+    ]
+
     var isImageFile: Bool {
         let ext = (self as NSString).pathExtension.lowercased()
-        guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return false }
+        guard !ext.isEmpty else { return false }
+        if Self.knownImageExtensions.contains(ext) {
+            return true
+        }
+        guard let type = UTType(filenameExtension: ext) else { return false }
         return type.conforms(to: .image)
     }
 }

@@ -136,6 +136,7 @@ final class RepoViewModel {
     let repoName: String
     private let git: GitService
     private let reflogLoader: RepoReflogLoader
+    private let workingTreeFileOperations: WorkingTreeFileOperations
 
     var localBranches: [BranchInfo] = []
     var remoteBranches: [BranchInfo] = []
@@ -161,6 +162,7 @@ final class RepoViewModel {
             guard oldValue != graphDisplayMode else { return }
             UserDefaults.standard.set(graphDisplayMode.rawValue, forKey: "GitN.graphDisplayMode.\(repoPath)")
             Task {
+                await refreshCurrentBranchHashesForGraphMode()
                 await ensureCurrentGraphCommitsAreLoaded()
                 syncSelectionWithGraphDisplay()
             }
@@ -377,14 +379,79 @@ final class RepoViewModel {
     }
 
     func showInFinder(path: String) {
-        let fullPath = (repoPath as NSString).appendingPathComponent(path)
-        NSWorkspace.shared.selectFile(fullPath, inFileViewerRootedAtPath: "")
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: workingTreeFileOperations.absolutePath(for: path))])
     }
 
     func openInEditor(path: String) {
-        let fullPath = (repoPath as NSString).appendingPathComponent(path)
-        let url = URL(fileURLWithPath: fullPath)
+        let url = URL(fileURLWithPath: workingTreeFileOperations.absolutePath(for: path))
         NSWorkspace.shared.open(url)
+    }
+
+    func copyWorkingTreePath(path: String) {
+        let fullPath = workingTreeFileOperations.absolutePath(for: path)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(fullPath, forType: .string)
+        showToast(title: "Path Copied", detail: fullPath, style: .success)
+    }
+
+    func performCreateWorkingTreeFile(parentPath: String, name: String) async -> String? {
+        do {
+            let path = try workingTreeFileOperations.createFile(named: name, in: parentPath)
+            await refreshAfterPatchAction(refreshWorkingTreeSynchronously: true)
+            await openWorkingTreeFilePreview(path: path)
+            showToast(title: "File Created", detail: path, style: .success)
+            return path
+        } catch {
+            showToast(title: "Create File Failed", detail: error.localizedDescription, style: .error)
+            return nil
+        }
+    }
+
+    func performCreateWorkingTreeFolder(parentPath: String, name: String) async -> String? {
+        do {
+            let path = try workingTreeFileOperations.createFolder(named: name, in: parentPath)
+            await refreshAfterPatchAction(refreshWorkingTreeSynchronously: true)
+            showToast(title: "Folder Created", detail: path, style: .success)
+            return path
+        } catch {
+            showToast(title: "Create Folder Failed", detail: error.localizedDescription, style: .error)
+            return nil
+        }
+    }
+
+    func performRenameWorkingTreeItem(path: String, newName: String) async -> String? {
+        do {
+            let wasDirectory = workingTreeFileOperations.isDirectory(at: path)
+            let renamedPath = try workingTreeFileOperations.renameItem(at: path, to: newName)
+            if wasDirectory {
+                rewriteExpandedWorkingTreeFolders(oldPath: path, newPath: renamedPath)
+            }
+            let previewPath = rewriteWorkingTreeSelectionPaths(oldPath: path, newPath: renamedPath)
+            await refreshAfterPatchAction(refreshWorkingTreeSynchronously: true)
+            if let previewPath {
+                await openWorkingTreeFilePreview(path: previewPath)
+            }
+            showToast(title: wasDirectory ? "Folder Renamed" : "File Renamed", detail: renamedPath, style: .success)
+            return renamedPath
+        } catch {
+            showToast(title: "Rename Failed", detail: error.localizedDescription, style: .error)
+            return nil
+        }
+    }
+
+    func performDeleteWorkingTreeItem(path: String) async {
+        let wasDirectory = workingTreeFileOperations.isDirectory(at: path)
+        clearWorkingTreeSelectionIfRemoved(pathPrefix: path)
+        do {
+            try workingTreeFileOperations.deleteItem(at: path)
+            if wasDirectory {
+                removeExpandedWorkingTreeFolderTree(pathPrefix: path)
+            }
+            await refreshAfterPatchAction(refreshWorkingTreeSynchronously: true)
+            showToast(title: wasDirectory ? "Folder Deleted" : "File Deleted", detail: path, style: .success)
+        } catch {
+            showToast(title: "Delete Failed", detail: error.localizedDescription, style: .error)
+        }
     }
 
     var fileInspectorTitle: String {
@@ -412,11 +479,12 @@ final class RepoViewModel {
         context: DiffContext = .committed,
         preferredMode: FileInspectorMode = .diff
     ) async {
+        let effectiveMode = resolvedInitialFileInspectorMode(for: file.path, preferredMode: preferredMode)
         isFileInspectorLoading = true
         fileInspectorPath = file.path
         fileInspectorOldPath = file.oldPath
         fileInspectorContext = context
-        fileInspectorMode = preferredMode
+        fileInspectorMode = effectiveMode
         isFileInspectorPresented = true
         selectedWorkingTreeFilePath = nil
         defer { isFileInspectorLoading = false }
@@ -430,7 +498,7 @@ final class RepoViewModel {
             )
             let inspectorDisplayContent: String
             let inspectorBaseText: String
-            let usesRawDiffFallback = preferredMode == .diff && parsedDiff == nil
+            let usesRawDiffFallback = effectiveMode == .diff && parsedDiff == nil
             let inspectorParsedDiff: ParsedDiff?
             if let oldPath = file.oldPath,
                context == .committed,
@@ -442,7 +510,7 @@ final class RepoViewModel {
                 let oldDecoded = try await git.decodedFileContent(atCommit: parentHash, path: oldPath)
                 inspectorBaseText = oldDecoded.text ?? loadedText
                 inspectorDisplayContent = loadedText
-                inspectorParsedDiff = preferredMode == .diff ? parsedDiff : nil
+                inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
             } else if usesRawDiffFallback {
                 let fallbackText = fileDiffContent.isEmpty ? loadedText : fileDiffContent
                 let compactSubmoduleDiff = Self.compactSubmoduleDiff(fallbackText)
@@ -451,8 +519,8 @@ final class RepoViewModel {
                 inspectorParsedDiff = compactSubmoduleDiff?.parsedDiff
             } else {
                 inspectorDisplayContent = loadedText
-                inspectorParsedDiff = preferredMode == .diff ? parsedDiff : nil
-                inspectorBaseText = if let inspectorParsedDiff, preferredMode == .diff {
+                inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
+                inspectorBaseText = if let inspectorParsedDiff, effectiveMode == .diff {
                     diffBaseText.isEmpty
                         ? Self.reconstructOldText(from: inspectorParsedDiff, newText: loadedText)
                         : diffBaseText
@@ -464,7 +532,7 @@ final class RepoViewModel {
             fileInspectorInitialContent = loadedText
             fileInspectorDiffBaseText = inspectorBaseText
             fileInspectorDisplayContent = inspectorDisplayContent
-            fileInspectorVisualContent = preferredMode == .diff ? payloadVisualContent(for: inspectorParsedDiff) : loaded.visualContent
+            fileInspectorVisualContent = effectiveMode == .diff ? payloadVisualContent(for: inspectorParsedDiff) : loaded.visualContent
             fileInspectorSelectedRange = NSRange(location: 0, length: 0)
             isFileInspectorDiffEditing = false
             showFileInspectorExternalChangePrompt = false
@@ -486,6 +554,16 @@ final class RepoViewModel {
         } catch {
             showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
         }
+    }
+
+    private func resolvedInitialFileInspectorMode(
+        for path: String,
+        preferredMode: FileInspectorMode
+    ) -> FileInspectorMode {
+        guard preferredMode == .diff, path.isMarkdownFile else {
+            return preferredMode
+        }
+        return .preview
     }
 
     func openFilePreview(path: String, context: DiffContext = .committed) async {
@@ -577,6 +655,35 @@ final class RepoViewModel {
               fileInspectorPath == path
         else { return }
         closeFileInspector()
+    }
+
+    private func clearWorkingTreeSelectionIfRemoved(pathPrefix: String) {
+        if let currentSelectedWorkingTreeFilePath = selectedWorkingTreeFilePath,
+           Self.isPath(currentSelectedWorkingTreeFilePath, withinOrEqualTo: pathPrefix) {
+            selectedWorkingTreeFilePath = nil
+        }
+        if isFileInspectorPresented,
+           fileInspectorContext == .unstaged,
+           Self.isPath(fileInspectorPath, withinOrEqualTo: pathPrefix) {
+            closeFileInspector()
+        }
+    }
+
+    @discardableResult
+    private func rewriteWorkingTreeSelectionPaths(oldPath: String, newPath: String) -> String? {
+        if let selectedWorkingTreeFilePath,
+           let rewritten = Self.rewrittenPath(selectedWorkingTreeFilePath, replacing: oldPath, with: newPath) {
+            self.selectedWorkingTreeFilePath = rewritten
+        }
+
+        if isFileInspectorPresented,
+           fileInspectorContext == .unstaged,
+           let rewritten = Self.rewrittenPath(fileInspectorPath, replacing: oldPath, with: newPath) {
+            fileInspectorPath = rewritten
+            return rewritten
+        }
+
+        return selectedWorkingTreeFilePath
     }
 
     private func clearDetailSelection() {
@@ -679,6 +786,14 @@ final class RepoViewModel {
         graphDisplayMode = .all
     }
 
+    private func refreshCurrentBranchHashesForGraphMode() async {
+        if graphDisplayMode == .current {
+            currentBranchHashes = await git.commitHashesOnCurrentBranch()
+        } else if currentBranchHashes.isEmpty {
+            currentBranchHashes = await git.commitHashesOnCurrentBranch()
+        }
+    }
+
     private func ensureCommitVisibleForNavigation(hash: String) {
         guard graphDisplayMode == .current else { return }
         guard !graphDisplayCommits.contains(where: { RepoReflogState.matches($0, hash: hash) }) else { return }
@@ -690,6 +805,7 @@ final class RepoViewModel {
         guard graphDisplayMode == .current, !isEnsuringCurrentGraphVisibility else { return }
         isEnsuringCurrentGraphVisibility = true
         defer { isEnsuringCurrentGraphVisibility = false }
+        await refreshCurrentBranchHashesForGraphMode()
 
         while !hasVisibleCurrentBranchCommit, !allCommitsLoaded {
             let previousCommitCount = commits.count
@@ -949,59 +1065,92 @@ final class RepoViewModel {
     }
 
     private func scheduleVisibleWorkingTreeFoldersRefresh() {
-        var visibleFolders = expandedWorkingTreeFolders
-        if hasLoadedWorkingTreeRoot {
-            visibleFolders.insert("")
-        }
+        let visibleFolders = visibleWorkingTreeFoldersForRefresh()
         guard !visibleFolders.isEmpty else { return }
 
         workingTreeFoldersRefreshGeneration += 1
         let generation = workingTreeFoldersRefreshGeneration
-        let repositoryPath = repoPath
-        let selectedPath = selectedWorkingTreeFilePath
 
         workingTreeFoldersRefreshTask?.cancel()
         workingTreeFoldersRefreshTask = Task { [weak self] in
             guard let self else { return }
 
-            do {
-                let folders = try await Task.detached(priority: .utility) {
-                    let builder = WorkingTreeFileTreeBuilder()
-                    return try visibleFolders.reduce(into: [String: [WorkingTreeFileNode]]()) { result, folder in
-                        result[folder] = try builder.listDirectory(at: repositoryPath, relativePath: folder)
-                    }
-                }.value
+            let folders = await Self.loadWorkingTreeFoldersSnapshot(
+                visibleFolders: visibleFolders,
+                repositoryPath: self.repoPath
+            )
 
-                guard !Task.isCancelled,
-                      generation == self.workingTreeFoldersRefreshGeneration else { return }
+            guard !Task.isCancelled,
+                  generation == self.workingTreeFoldersRefreshGeneration else { return }
 
-                self.workingTreeFiles = folders[""] ?? []
-                if visibleFolders.contains("") {
-                    self.hasLoadedWorkingTreeRoot = true
-                }
-                for folder in visibleFolders where !folder.isEmpty {
-                    self.workingTreeFolderContents[folder] = folders[folder] ?? []
-                }
-                if let selectedPath,
-                   !self.workingTreePathExists(selectedPath) {
-                    self.handleMissingWorkingTreePath(selectedPath)
-                }
-            } catch {
-                guard !Task.isCancelled,
-                      generation == self.workingTreeFoldersRefreshGeneration else { return }
-                if visibleFolders.contains("") {
-                    self.workingTreeFiles = []
-                    self.hasLoadedWorkingTreeRoot = true
-                }
-                for folder in visibleFolders where !folder.isEmpty {
-                    self.workingTreeFolderContents[folder] = []
-                }
-                if let selectedPath,
-                   !self.workingTreePathExists(selectedPath) {
-                    self.handleMissingWorkingTreePath(selectedPath)
-                }
-            }
+            self.applyWorkingTreeFolderSnapshot(folders, visibleFolders: visibleFolders)
         }
+    }
+
+    private func refreshVisibleWorkingTreeFoldersNow() async {
+        let visibleFolders = visibleWorkingTreeFoldersForRefresh()
+        guard !visibleFolders.isEmpty else { return }
+
+        let folders = await Self.loadWorkingTreeFoldersSnapshot(
+            visibleFolders: visibleFolders,
+            repositoryPath: repoPath
+        )
+        applyWorkingTreeFolderSnapshot(folders, visibleFolders: visibleFolders)
+    }
+
+    private func visibleWorkingTreeFoldersForRefresh() -> Set<String> {
+        var visibleFolders = expandedWorkingTreeFolders
+        if hasLoadedWorkingTreeRoot {
+            visibleFolders.insert("")
+        }
+        return visibleFolders
+    }
+
+    private static func loadWorkingTreeFoldersSnapshot(
+        visibleFolders: Set<String>,
+        repositoryPath: String
+    ) async -> [String: [WorkingTreeFileNode]] {
+        await Task.detached(priority: .utility) {
+            let builder = WorkingTreeFileTreeBuilder()
+            return visibleFolders.reduce(into: [String: [WorkingTreeFileNode]]()) { result, folder in
+                result[folder] = (try? builder.listDirectory(at: repositoryPath, relativePath: folder)) ?? []
+            }
+        }.value
+    }
+
+    private func applyWorkingTreeFolderSnapshot(
+        _ folders: [String: [WorkingTreeFileNode]],
+        visibleFolders: Set<String>
+    ) {
+        let selectedPath = selectedWorkingTreeFilePath
+        workingTreeFiles = folders[""] ?? []
+        if visibleFolders.contains("") {
+            hasLoadedWorkingTreeRoot = true
+        }
+        for folder in visibleFolders where !folder.isEmpty {
+            workingTreeFolderContents[folder] = folders[folder] ?? []
+        }
+        if let selectedPath,
+           !workingTreePathExists(selectedPath) {
+            handleMissingWorkingTreePath(selectedPath)
+        }
+    }
+
+    private func removeExpandedWorkingTreeFolderTree(pathPrefix: String) {
+        expandedWorkingTreeFolders = expandedWorkingTreeFolders.filter { !Self.isPath($0, withinOrEqualTo: pathPrefix) }
+        workingTreeFolderContents = workingTreeFolderContents.filter { !Self.isPath($0.key, withinOrEqualTo: pathPrefix) }
+    }
+
+    private func rewriteExpandedWorkingTreeFolders(oldPath: String, newPath: String) {
+        expandedWorkingTreeFolders = Set(expandedWorkingTreeFolders.compactMap {
+            Self.rewrittenPath($0, replacing: oldPath, with: newPath) ?? $0
+        })
+        var rewrittenContents: [String: [WorkingTreeFileNode]] = [:]
+        for (folder, nodes) in workingTreeFolderContents {
+            let rewrittenFolder = Self.rewrittenPath(folder, replacing: oldPath, with: newPath) ?? folder
+            rewrittenContents[rewrittenFolder] = nodes
+        }
+        workingTreeFolderContents = rewrittenContents
     }
 
     private func workingTreePathExists(_ path: String) -> Bool {
@@ -1147,6 +1296,19 @@ final class RepoViewModel {
         }
 
         return nil
+    }
+
+    private nonisolated static func isLFSPointerDiff(_ diff: String) -> Bool {
+        let lines = diff.components(separatedBy: "\n")
+        let pointerMarkers = lines.filter {
+            $0.hasPrefix("+version https://git-lfs.github.com/spec/v1")
+                || $0.hasPrefix("-version https://git-lfs.github.com/spec/v1")
+                || $0.hasPrefix("+oid sha256:")
+                || $0.hasPrefix("-oid sha256:")
+                || $0.hasPrefix("+size ")
+                || $0.hasPrefix("-size ")
+        }
+        return pointerMarkers.count >= 3
     }
 
     private func payloadVisualContent(for parsedDiff: ParsedDiff?) -> VisualFileContent? {
@@ -2079,7 +2241,7 @@ final class RepoViewModel {
         do {
             try await git.stageFiles(paths)
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -2093,7 +2255,7 @@ final class RepoViewModel {
         do {
             try await git.unstageFiles(paths)
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -2274,6 +2436,7 @@ final class RepoViewModel {
     var conflictMergeFile: ConflictFile?
     var conflictSides: ConflictSides?
     var conflictEditorDocument: ConflictEditorDocument?
+    var conflictFallbackMessage: String?
     var conflictOutputText: String = ""
     var conflictOutputLines: [String] = []
     var showConflictMergeView = false
@@ -2357,13 +2520,23 @@ final class RepoViewModel {
         codeHostingProvider.mergeActionTitle
     }
 
-    init(path: String, name: String, commitPageSize: Int = 500) {
+    var currentBranchReviewCreationActionTitle: String? {
+        codeHostingProvider.creationActionTitle
+    }
+
+    init(
+        path: String,
+        name: String,
+        commitPageSize: Int = 500,
+        workingTreeFileOperations: WorkingTreeFileOperations? = nil
+    ) {
         self.repoPath = path
         self.repoName = name
         self.commitPageSize = commitPageSize
         let gitService = GitService(repoPath: path)
         self.git = gitService
         self.reflogLoader = RepoReflogLoader(git: gitService)
+        self.workingTreeFileOperations = workingTreeFileOperations ?? WorkingTreeFileOperations(repoPath: path)
         // 恢复上次 terminal 的打开状态
         self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
         self.graphDisplayMode = GraphDisplayMode(
@@ -2539,6 +2712,12 @@ final class RepoViewModel {
         }
     }
 
+    func refreshAfterWorkingTreeMutation() async {
+        guard !isLoading, !operationInProgress else { return }
+        await refreshStatusAndGraph()
+        await refreshFileInspectorForExternalChangeIfNeeded()
+    }
+
     /// Lightweight refresh: only file statuses + uncommitted graph entry.
     /// Does NOT reload the full commit list — only updates the uncommitted entry.
     private func refreshStatusAndGraph() async {
@@ -2549,6 +2728,13 @@ final class RepoViewModel {
             await git.refreshRepositoryState()
             let sts = try await git.status()
             fileStatuses = sts
+            if selectedCommit?.isUncommitted == true {
+                await refreshUncommittedDiffFiles()
+                if let selectedPath = selectedDiffFile?.path,
+                   let refreshedSelection = diffFiles.first(where: { $0.path == selectedPath }) {
+                    selectedDiffFile = refreshedSelection
+                }
+            }
             scheduleVisibleWorkingTreeFoldersRefresh()
             let hc = try await git.headCommitHash()
             headCommitHash = hc
@@ -2706,9 +2892,10 @@ final class RepoViewModel {
             async let stat = git.status()
             async let hch = git.headCommitHash()
             async let detached = git.isDetachedHead()
+            async let branchHashes = git.commitHashesOnCurrentBranch()
 
-            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh) = try await (
-                b, rb, r, t, st, sub, cur, stat, hch, detached
+            let (lb, rbs, rms, tgs, sth, subs, cb, sts, hc, dh, hashes) = try await (
+                b, rb, r, t, st, sub, cur, stat, hch, detached, branchHashes
             )
             localBranches = lb
             remoteBranches = rbs
@@ -2725,11 +2912,7 @@ final class RepoViewModel {
             if selectedReflogRef != "HEAD", selectedReflogRef != "refs/heads/\(cb)" {
                 selectedReflogRef = "HEAD"
             }
-            if graphDisplayMode == .current {
-                currentBranchHashes = await git.commitHashesOnCurrentBranch()
-            } else {
-                currentBranchHashes = []
-            }
+            currentBranchHashes = hashes
             if showReflogOverlay {
                 await loadReflog()
             } else {
@@ -2783,7 +2966,7 @@ final class RepoViewModel {
 
             // Load first page on background thread
             if let walker {
-                let pageSize = Self.initialCommitLoadCount
+                let pageSize = min(Self.initialCommitLoadCount, commitPageSize)
                 let batch = await Task.detached(priority: .userInitiated) {
                     walker.nextBatch(count: pageSize)
                 }.value
@@ -2799,15 +2982,6 @@ final class RepoViewModel {
             commits = loadedCommits
             syncSelectionWithGraphDisplay()
             schedulePostInitialCommitLoadWork()
-            if graphDisplayMode != .current {
-                Task { [weak self] in
-                    guard let self else { return }
-                    let hashes = await self.git.commitHashesOnCurrentBranch()
-                    await MainActor.run {
-                        self.currentBranchHashes = hashes
-                    }
-                }
-            }
         } catch {
             print("Error loading repo data: \(error)")
         }
@@ -2984,7 +3158,7 @@ final class RepoViewModel {
         selectedFileListContext = nil
         do {
             if commit.isUncommitted {
-                refreshUncommittedDiffFiles()
+                await refreshUncommittedDiffFiles()
                 // Auto-select the first unstaged file, falling back to the first staged file
                 let firstStatus = fileStatuses.first(where: \.hasUnstagedChanges)
                     ?? fileStatuses.first(where: \.hasStagedChanges)
@@ -2997,7 +3171,7 @@ final class RepoViewModel {
                     await selectDiffFile(diffFile, context: context)
                 }
             } else {
-                diffFiles = try await git.committedDiffPreview(hash: commit.hash)
+                diffFiles = await annotateLFSTracking(for: (try await git.committedDiffPreview(hash: commit.hash)))
                 if let first = diffFiles.first {
                     await selectDiffFile(first, context: .committed)
                 }
@@ -3008,9 +3182,25 @@ final class RepoViewModel {
         }
     }
 
-    private func refreshUncommittedDiffFiles() {
-        diffFiles = fileStatuses.map { status in
+    private func refreshUncommittedDiffFiles() async {
+        let files = fileStatuses.map { status in
             DiffFile(additions: 0, deletions: 0, path: status.path, changeKind: status.diffChangeKind)
+        }
+        diffFiles = await annotateLFSTracking(for: files)
+    }
+
+    private func annotateLFSTracking(for files: [DiffFile]) async -> [DiffFile] {
+        guard !files.isEmpty else { return files }
+        let tracked = (try? await git.lfsTrackedPaths(paths: files.map(\.path))) ?? []
+        return files.map { file in
+            DiffFile(
+                additions: file.additions,
+                deletions: file.deletions,
+                path: file.path,
+                oldPath: file.oldPath,
+                changeKind: file.changeKind,
+                isLFSTracked: tracked.contains(file.path)
+            )
         }
     }
 
@@ -3044,9 +3234,9 @@ final class RepoViewModel {
                   !self.isCompareMode
             else { return }
 
-            self.diffFiles = files
+            self.diffFiles = await self.annotateLFSTracking(for: files)
             if let selectedPath = self.selectedDiffFile?.path,
-               let updatedSelection = files.first(where: { $0.path == selectedPath }) {
+               let updatedSelection = self.diffFiles.first(where: { $0.path == selectedPath }) {
                 self.selectedDiffFile = updatedSelection
             }
             self.committedDiffStatsTask = nil
@@ -3272,12 +3462,20 @@ final class RepoViewModel {
                 return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic, visualContent: nil)
             }
         }
-        let visualContent = parsed.hunks.isEmpty ? Self.makeVisualDiffContent(path: path, oldData: oldBinaryData, newData: newBinaryData) : nil
+        let visualContent = Self.makeVisualDiffContent(path: path, oldData: oldBinaryData, newData: newBinaryData)
+        if let visualContent, Self.isLFSPointerDiff(content) {
+            return DiffLoadPayload(
+                fileDiffContent: content,
+                baseText: baseText,
+                parsedDiff: nil,
+                visualContent: visualContent
+            )
+        }
         return DiffLoadPayload(
             fileDiffContent: content,
             baseText: baseText,
             parsedDiff: parsed.hunks.isEmpty ? nil : parsed,
-            visualContent: visualContent
+            visualContent: parsed.hunks.isEmpty ? visualContent : nil
         )
     }
 
@@ -3420,7 +3618,7 @@ final class RepoViewModel {
         do {
             try await git.stageFile(path)
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -3433,7 +3631,7 @@ final class RepoViewModel {
         do {
             try await git.unstageFile(path)
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -3447,7 +3645,7 @@ final class RepoViewModel {
         do {
             try await git.stageFiles(unstaged.map(\.path))
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Stage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -3462,7 +3660,7 @@ final class RepoViewModel {
         do {
             try await git.unstageFiles(staged.map(\.path))
             fileStatuses = try await git.status()
-            refreshUncommittedDiffFiles()
+            await refreshUncommittedDiffFiles()
         } catch {
             showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
         }
@@ -3580,11 +3778,15 @@ final class RepoViewModel {
         await refreshAfterPatchAction()
     }
 
-    private func refreshAfterPatchAction() async {
+    private func refreshAfterPatchAction(refreshWorkingTreeSynchronously: Bool = false) async {
         do {
             fileStatuses = try await git.status()
         } catch {}
-        scheduleVisibleWorkingTreeFoldersRefresh()
+        if refreshWorkingTreeSynchronously {
+            await refreshVisibleWorkingTreeFoldersNow()
+        } else {
+            scheduleVisibleWorkingTreeFoldersRefresh()
+        }
         if let file = selectedDiffFile {
             await selectDiffFile(file, context: currentDiffContext)
         }
@@ -3695,7 +3897,7 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                showToast(title: "Pull Failed", detail: msg, style: .error)
+                showToast(title: pullPushFailureTitle(for: msg, operation: "pull"), detail: pullPushFailureDetail(for: msg, operation: "pull"), style: .error)
             }
         }
     }
@@ -3725,7 +3927,7 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                showToast(title: "Pull Failed", detail: msg, style: .error)
+                showToast(title: pullPushFailureTitle(for: msg, operation: "pull"), detail: pullPushFailureDetail(for: msg, operation: "pull"), style: .error)
             }
         }
     }
@@ -3763,7 +3965,7 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                showToast(title: "Push Failed", detail: msg, style: .error)
+                showToast(title: pullPushFailureTitle(for: msg, operation: "push"), detail: pullPushFailureDetail(for: msg, operation: "push"), style: .error)
             }
         }
     }
@@ -3793,7 +3995,7 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                showToast(title: "Push Failed", detail: msg, style: .error)
+                showToast(title: pullPushFailureTitle(for: msg, operation: "push"), detail: pullPushFailureDetail(for: msg, operation: "push"), style: .error)
             }
         }
     }
@@ -3824,9 +4026,28 @@ final class RepoViewModel {
                 }
                 showHostKeyPrompt = true
             } else {
-                showToast(title: "Push Failed", detail: msg, style: .error)
+                showToast(title: pullPushFailureTitle(for: msg, operation: "push"), detail: pullPushFailureDetail(for: msg, operation: "push"), style: .error)
             }
         }
+    }
+
+    static func lfsGuidanceMessage(for operation: String, errorMessage: String) -> String? {
+        guard errorMessage.contains("Repository uses Git LFS"),
+              errorMessage.contains("`git lfs` is unavailable") else {
+            return nil
+        }
+
+        return "Git LFS is required to \(operation) this repository. Install Git LFS, run `git lfs install`, then retry."
+    }
+
+    private func pullPushFailureTitle(for message: String, operation: String) -> String {
+        Self.lfsGuidanceMessage(for: operation, errorMessage: message) != nil
+            ? "Git LFS Required"
+            : "\(operation.capitalized) Failed"
+    }
+
+    private func pullPushFailureDetail(for message: String, operation: String) -> String {
+        Self.lfsGuidanceMessage(for: operation, errorMessage: message) ?? message
     }
 
     func cancelPushUpstreamPrompt() {
@@ -4233,7 +4454,7 @@ final class RepoViewModel {
         fileDiffContent = ""
         parsedDiff = nil
         do {
-            diffFiles = try await git.compareFileList(commit.hash)
+            diffFiles = await annotateLFSTracking(for: (try await git.compareFileList(commit.hash)))
         } catch {
             diffFiles = []
             operationError = "Compare failed: \(error.localizedDescription)"
@@ -4268,6 +4489,7 @@ final class RepoViewModel {
         if let navigationGeneration, !isCommitNavigationActive(navigationGeneration) {
             return
         }
+        await refreshCurrentBranchHashesForGraphMode()
         ensureCommitVisibleForNavigation(hash: hash)
         scrollToCommitHash = hash
 
@@ -4338,7 +4560,7 @@ final class RepoViewModel {
         fileDiffContent = ""
         parsedDiff = nil
         do {
-            diffFiles = try await git.stashDiffFiles(stash.index)
+            diffFiles = await annotateLFSTracking(for: (try await git.stashDiffFiles(stash.index)))
         } catch {
             diffFiles = []
             showToast(title: "Failed to load stash diff", detail: error.localizedDescription, style: .error)
@@ -4659,6 +4881,7 @@ final class RepoViewModel {
         mergeResolvedFiles = []
         conflictMergeFile = nil
         showConflictMergeView = false
+        conflictFallbackMessage = nil
     }
 
     func openConflictMerge(_ file: ConflictFile) async {
@@ -4667,13 +4890,19 @@ final class RepoViewModel {
             conflictUndoManager.removeAllActions()
             let sides = try await git.readConflictSides(path: file.path)
             conflictSides = sides
+            conflictFallbackMessage = nil
             let document = ConflictEditorDocument(sides: sides)
             conflictEditorDocument = document
             conflictOutputText = document.outputText
             conflictOutputLines = document.outputLines
             showConflictMergeView = true
         } catch {
-            showToast(title: "Cannot Open Conflict", detail: error.localizedDescription, style: .error)
+            conflictSides = nil
+            conflictEditorDocument = nil
+            conflictOutputText = ""
+            conflictOutputLines = []
+            conflictFallbackMessage = error.localizedDescription
+            showConflictMergeView = true
         }
     }
 
@@ -4682,6 +4911,7 @@ final class RepoViewModel {
         conflictMergeFile = nil
         conflictSides = nil
         conflictEditorDocument = nil
+        conflictFallbackMessage = nil
         conflictOutputText = ""
         conflictOutputLines = []
         conflictUndoManager.removeAllActions()
@@ -4858,6 +5088,27 @@ final class RepoViewModel {
 
     func saveConflictResolution() async {
         guard let file = conflictMergeFile else { return }
+        if conflictEditorDocument == nil {
+            do {
+                try await git.markConflictResolved(path: file.path)
+                showToast(title: "Marked Resolved", detail: "\(file.path) marked as resolved", style: .success)
+                showConflictMergeView = false
+                conflictMergeFile = nil
+                conflictSides = nil
+                conflictEditorDocument = nil
+                conflictFallbackMessage = nil
+                conflictOutputText = ""
+                conflictOutputLines = []
+                conflictUndoManager.removeAllActions()
+                await refreshConflictState()
+                if !isInConflict {
+                    await loadAll()
+                }
+            } catch {
+                showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
+            }
+            return
+        }
         guard let document = conflictEditorDocument,
               document.blocks.contains(where: { $0.selectedSources.hasSelection }) else {
             showToast(title: "No Hunks Selected", detail: "Select at least one conflict hunk before saving", style: .warning)
@@ -4872,6 +5123,7 @@ final class RepoViewModel {
             conflictMergeFile = nil
             conflictSides = nil
             conflictEditorDocument = nil
+            conflictFallbackMessage = nil
             conflictOutputText = ""
             conflictOutputLines = []
             conflictUndoManager.removeAllActions()
@@ -5007,5 +5259,37 @@ final class RepoViewModel {
         if let url = URL(string: mr.webURL) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    func currentBranchReviewCreationURL() -> URL? {
+        guard !isDetachedHead else { return nil }
+        guard let remote = preferredCodeHostingRemote else { return nil }
+        return CodeHostingReviewCreationURLBuilder.buildURL(
+            provider: codeHostingProvider,
+            remoteURL: remote.url,
+            sourceBranch: currentBranch
+        )
+    }
+
+    func openCurrentBranchReviewCreationInBrowser() {
+        guard let url = currentBranchReviewCreationURL() else {
+            showToast(
+                title: "Create \(codeHostingProvider.singularDisplayName) Failed",
+                detail: "Unable to build a review creation link for the current branch and remote.",
+                style: .error
+            )
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private static func isPath(_ path: String, withinOrEqualTo prefix: String) -> Bool {
+        path == prefix || path.hasPrefix(prefix + "/")
+    }
+
+    private static func rewrittenPath(_ path: String, replacing oldPath: String, with newPath: String) -> String? {
+        guard isPath(path, withinOrEqualTo: oldPath) else { return nil }
+        guard path != oldPath else { return newPath }
+        return newPath + path.dropFirst(oldPath.count)
     }
 }

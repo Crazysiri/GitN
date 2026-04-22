@@ -456,6 +456,7 @@ actor GitService {
 
     let repoPath: String
     private let cli: GitCLI
+    private let lfsSupport: GitLFSSupport
     private var repo: OpaquePointer?
     private var committedDiffSession: CommittedDiffSession?
     private var cachedRefMap: [String: [String]]?
@@ -463,6 +464,7 @@ actor GitService {
     init(repoPath: String) {
         self.repoPath = repoPath
         self.cli = GitCLI(repoPath: repoPath)
+        self.lfsSupport = GitLFSSupport(repoPath: repoPath)
         git_libgit2_init()
         var r: OpaquePointer?
         if git_repository_open(&r, repoPath) == 0 {
@@ -1585,7 +1587,8 @@ actor GitService {
 
     func workingTreeFileData(path: String) throws -> Data? {
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
-        return FileManager.default.contents(atPath: fullPath)
+        guard let data = FileManager.default.contents(atPath: fullPath) else { return nil }
+        return resolvedFileData(data, path: path)
     }
 
     func headFileData(path: String) throws -> Data? {
@@ -1611,24 +1614,13 @@ actor GitService {
         guard git_tree_entry_to_object(&object, repo, entry) == 0, let object else { return nil }
         defer { git_object_free(object) }
 
-        return Self.blobData(forBlobObject: object)
+        guard let data = Self.blobData(forBlobObject: object) else { return nil }
+        return resolvedFileData(data, path: path)
     }
 
     func stagedFileData(path: String) throws -> Data? {
-        guard let repo else { throw GitError.repoNotOpen }
-
-        var index: OpaquePointer?
-        guard git_repository_index(&index, repo) == 0, let index else { return nil }
-        defer { git_index_free(index) }
-
-        guard let entry = git_index_get_bypath(index, path, 0) else { return nil }
-
-        var blob: OpaquePointer?
-        var oid = entry.pointee.id
-        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return nil }
-        defer { git_blob_free(blob) }
-
-        return Self.blobData(forBlobObject: blob)
+        guard let data = try rawStagedFileData(path: path) else { return nil }
+        return resolvedFileData(data, path: path)
     }
 
     func decodedWorkingTreeFileContent(path: String) throws -> DecodedFileContent {
@@ -1636,12 +1628,14 @@ actor GitService {
         guard let data = FileManager.default.contents(atPath: fullPath) else {
             return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
         }
-        return Self.decodeFileData(data)
+        return decodeResolvedFileData(data, path: path)
     }
 
     func decodedStagedFileContent(path: String) throws -> DecodedFileContent {
-        let data = try stagedFileData(path: path) ?? Data()
-        return Self.decodeFileData(data)
+        guard let data = try rawStagedFileData(path: path) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        return decodeResolvedFileData(data, path: path)
     }
 
     func isDirectory(path: String) -> Bool {
@@ -1983,6 +1977,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
         invalidateRefMapCache()
     }
 
@@ -1993,6 +1988,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
         invalidateRefMapCache()
     }
 
@@ -2003,6 +1999,7 @@ actor GitService {
             if let branchName { args.append(branchName) }
         }
         try await runGit(args)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
         invalidateRefMapCache()
     }
 
@@ -2012,6 +2009,7 @@ actor GitService {
     func pullForce() async throws {
         try await runGit(["fetch", "--all"])
         try await runGit(["reset", "--hard", "@{u}"])
+        try await lfsSupport.pull()
         invalidateRefMapCache()
     }
 
@@ -2024,6 +2022,14 @@ actor GitService {
         } else {
             args.append(contentsOf: ["-u", "origin", "HEAD"])
         }
+        let resolvedRemote = remoteName ?? "origin"
+        let resolvedBranch: String?
+        if let branchName {
+            resolvedBranch = branchName
+        } else {
+            resolvedBranch = try? currentBranch()
+        }
+        try await lfsSupport.push(remoteName: resolvedRemote, branchName: resolvedBranch)
         try await runGit(args)
         invalidateRefMapCache()
     }
@@ -2034,8 +2040,36 @@ actor GitService {
             args.append(remoteName)
             if let branchName { args.append(branchName) }
         }
+        let resolvedRemote = remoteName ?? "origin"
+        let resolvedBranch: String?
+        if let branchName {
+            resolvedBranch = branchName
+        } else {
+            resolvedBranch = try? currentBranch()
+        }
+        try await lfsSupport.push(remoteName: resolvedRemote, branchName: resolvedBranch)
         try await runGit(args)
         invalidateRefMapCache()
+    }
+
+    func lfsTrackedPaths(paths: [String]) async throws -> Set<String> {
+        let uniquePaths = Array(Set(paths)).sorted()
+        guard !uniquePaths.isEmpty else { return [] }
+
+        let input = uniquePaths.joined(separator: "\n") + "\n"
+        let output = try await cli.output(["check-attr", "--stdin", "filter"], input: input)
+
+        var tracked: Set<String> = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 2).map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard parts.count == 3 else { continue }
+            if parts[1] == "filter", parts[2] == "lfs" {
+                tracked.insert(parts[0])
+            }
+        }
+        return tracked
     }
 
     // MARK: - Branch Operations (libgit2, following Xit's approach)
@@ -3299,7 +3333,7 @@ actor GitService {
         defer { git_blob_free(blob) }
 
         let data = Self.blobData(forBlobObject: blob) ?? Data()
-        let decoded = Self.decodeFileData(data)
+        let decoded = decodeResolvedFileData(data, path: path)
         guard let text = decoded.text else {
             throw GitError.operationFailed("Conflict base is not UTF-8 text")
         }
@@ -3811,11 +3845,18 @@ actor GitService {
     }
 
     func decodedFileContent(atCommit hash: String, path: String) throws -> DecodedFileContent {
-        let data = try fileData(atCommit: hash, path: path) ?? Data()
-        return Self.decodeFileData(data)
+        guard let data = try rawFileData(atCommit: hash, path: path) else {
+            return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        return decodeResolvedFileData(data, path: path)
     }
 
     func fileData(atCommit hash: String, path: String) throws -> Data? {
+        guard let data = try rawFileData(atCommit: hash, path: path) else { return nil }
+        return resolvedFileData(data, path: path)
+    }
+
+    private func rawFileData(atCommit hash: String, path: String) throws -> Data? {
         guard let repo else { throw GitError.repoNotOpen }
         var oid = git_oid()
         guard git_oid_fromstr(&oid, hash) == 0 else {
@@ -3844,6 +3885,35 @@ actor GitService {
         defer { git_object_free(object) }
 
         return Self.blobData(forBlobObject: object)
+    }
+
+    private func rawStagedFileData(path: String) throws -> Data? {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else { return nil }
+        defer { git_index_free(index) }
+
+        guard let entry = git_index_get_bypath(index, path, 0) else { return nil }
+
+        var blob: OpaquePointer?
+        var oid = entry.pointee.id
+        guard git_blob_lookup(&blob, repo, &oid) == 0, let blob else { return nil }
+        defer { git_blob_free(blob) }
+
+        return Self.blobData(forBlobObject: blob)
+    }
+
+    private func resolvedFileData(_ data: Data, path: String) -> Data? {
+        lfsSupport.resolveDataIfNeeded(data, path: path).data
+    }
+
+    private func decodeResolvedFileData(_ data: Data, path: String) -> DecodedFileContent {
+        let resolved = lfsSupport.resolveDataIfNeeded(data, path: path)
+        guard let materialized = resolved.data else {
+            return DecodedFileContent(text: nil, encodingName: nil, isBinary: true)
+        }
+        return Self.decodeFileData(materialized)
     }
 
     private nonisolated static func decodeFileData(_ data: Data) -> DecodedFileContent {

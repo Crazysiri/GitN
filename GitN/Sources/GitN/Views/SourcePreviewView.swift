@@ -697,11 +697,6 @@ struct ImageCardView: View {
     /// Maximum space available for the image itself (excluding card chrome).
     var availableSize: CGSize = CGSize(width: CGFloat.infinity, height: 600)
 
-    private var image: NSImage? {
-        guard let data else { return nil }
-        return NSImage(data: data)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
@@ -713,19 +708,11 @@ struct ImageCardView: View {
                 .truncationMode(.middle)
 
             Group {
-                if let image {
-                    scaledImageView(image)
-                } else {
-                    VStack(spacing: 10) {
-                        Image(systemName: "photo")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.secondary)
-                        Text("Image unavailable")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 180)
-                }
+                CachedDataImageView(
+                    data: data,
+                    viewID: "\(title)\u{1F}\(subtitle)\u{1F}\((data.map { DecodedImageCache.shared.cacheKey(for: $0) }) ?? "nil")",
+                    availableSize: availableSize
+                )
             }
             .padding(12)
             .background(ChromePalette.panelMutedBackground, in: RoundedRectangle(cornerRadius: 12))
@@ -735,26 +722,6 @@ struct ImageCardView: View {
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func scaledImageView(_ image: NSImage) -> some View {
-        let size = displaySize(for: image)
-        Image(nsImage: image)
-            .resizable()
-            .frame(width: size.width, height: size.height)
-    }
-
-    /// Computes the display size: scale down to fit availableSize if needed, never scale up.
-    private func displaySize(for image: NSImage) -> CGSize {
-        let nw = image.size.width
-        let nh = image.size.height
-        guard nw > 0, nh > 0 else { return CGSize(width: nw, height: nh) }
-        if nw <= availableSize.width && nh <= availableSize.height {
-            return CGSize(width: nw, height: nh)
-        }
-        let scale = min(availableSize.width / nw, availableSize.height / nh)
-        return CGSize(width: (nw * scale).rounded(), height: (nh * scale).rounded())
     }
 }
 

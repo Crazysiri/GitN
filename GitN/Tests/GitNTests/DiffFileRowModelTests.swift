@@ -208,6 +208,16 @@ final class DiffFileRowModelTests: XCTestCase {
         XCTAssertNil(file.imageStatusText, "non-image files have no image status label")
     }
 
+    func testLFSTrackedFileExposesLFSBadgeText() {
+        let file = DiffFile(additions: 0, deletions: 0, path: "large.psd", changeKind: .modified, isLFSTracked: true)
+        XCTAssertEqual(file.lfsBadgeText, "LFS")
+    }
+
+    func testNonLFSTrackedFileHasNoLFSBadgeText() {
+        let file = DiffFile(additions: 0, deletions: 0, path: "main.swift", changeKind: .modified)
+        XCTAssertNil(file.lfsBadgeText)
+    }
+
     func testModifiedImageStatusTextIsNotMinusImage() {
         let file = DiffFile(additions: 0, deletions: 0, path: "icon.png", changeKind: .modified)
         XCTAssertNotEqual(file.imageStatusText, "- image",

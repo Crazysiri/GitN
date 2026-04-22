@@ -35,6 +35,11 @@ struct GitCLI: Sendable {
         return String(data: result.stdout, encoding: .utf8) ?? ""
     }
 
+    func output(_ args: [String], input: String, env: [String: String]? = nil) async throws -> String {
+        let result = try await execute(args, env: env, input: input)
+        return String(data: result.stdout, encoding: .utf8) ?? ""
+    }
+
     func run(_ args: [String], input: String, env: [String: String]? = nil) async throws {
         _ = try await execute(args, env: env, input: input)
     }

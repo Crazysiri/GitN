@@ -731,7 +731,7 @@
       return editor.getScrollHeight() - scrollTop - zoneHeight;
     }
     if (anchorLine <= 1) {
-      return 0;
+      return -scrollTop;
     }
     return editor.getTopForLineNumber(anchorLine) - scrollTop - zoneHeight;
   }
