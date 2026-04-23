@@ -7,6 +7,9 @@ enum GitNResources {
         .deletingLastPathComponent()
 
     private static let featuresSourceURL = sourceRootURL.appendingPathComponent("FEATURES.md")
+    private static let markdownPreviewSourceDirectoryURL = sourceRootURL
+        .appendingPathComponent("Resources", isDirectory: true)
+        .appendingPathComponent("MarkdownPreview", isDirectory: true)
     private static let monacoSourceDirectoryURL = sourceRootURL
         .appendingPathComponent("Resources", isDirectory: true)
         .appendingPathComponent("Monaco", isDirectory: true)
@@ -58,6 +61,48 @@ enum GitNResources {
         }
 
         return firstExistingDirectoryURL([monacoSourceDirectoryURL])
+    }
+
+    static var markdownPreviewDirectoryURL: URL? {
+        if let directURL = firstExistingDirectoryURL([
+            Bundle.main.resourceURL?.appendingPathComponent("MarkdownPreview", isDirectory: true),
+        ]) {
+            return directURL
+        }
+
+        for bundle in appResourceBundles {
+            if let url = firstExistingDirectoryURL([
+                bundle.resourceURL?.appendingPathComponent("MarkdownPreview", isDirectory: true),
+            ]) {
+                return url
+            }
+        }
+
+        return firstExistingDirectoryURL([markdownPreviewSourceDirectoryURL])
+    }
+
+    static var mermaidScriptURL: URL? {
+        if let directURL = firstExistingFileURL([
+            Bundle.main.resourceURL?
+                .appendingPathComponent("MarkdownPreview", isDirectory: true)
+                .appendingPathComponent("mermaid.min.js"),
+        ]) {
+            return directURL
+        }
+
+        for bundle in appResourceBundles {
+            if let url = bundle.url(
+                forResource: "mermaid.min",
+                withExtension: "js",
+                subdirectory: "MarkdownPreview"
+            ) {
+                return url
+            }
+        }
+
+        return firstExistingFileURL([
+            markdownPreviewSourceDirectoryURL.appendingPathComponent("mermaid.min.js"),
+        ])
     }
 
     static var monacoIndexURL: URL? {

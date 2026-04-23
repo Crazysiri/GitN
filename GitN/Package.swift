@@ -115,6 +115,7 @@ let package = Package(
             path: "Sources/GitN",
             resources: [
                 .copy("FEATURES.md"),
+                .copy("Resources/MarkdownPreview"),
                 .copy("Resources/Monaco"),
             ],
             linkerSettings: [

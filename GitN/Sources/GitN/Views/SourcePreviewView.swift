@@ -69,6 +69,7 @@ struct FileInspectorOverlayView: View {
     private struct PendingHunkAction {
         let path: String
         let hunkIndex: Int
+        let lineIDs: [Int]
         let action: String
     }
 
@@ -104,32 +105,21 @@ struct FileInspectorOverlayView: View {
         guard supportsHunkActions else { return [] }
 
         return viewModel.fileInspectorHunkControls.keys.sorted().compactMap { row in
-            guard let hunkIndex = viewModel.fileInspectorHunkControls[row] else { return nil }
+            guard let control = viewModel.fileInspectorHunkControls[row] else { return nil }
             let linePair = viewModel.fileInspectorLinePairs[row]
-            let hunk = viewModel.parsedDiff?.hunks.indices.contains(hunkIndex) == true
-                ? viewModel.parsedDiff?.hunks[hunkIndex]
-                : nil
-            let anchorKind: String
-            switch hunk?.lines.first(where: { $0.kind != .context })?.kind {
-            case .addition:
-                anchorKind = "addition"
-            case .deletion:
-                anchorKind = "deletion"
-            default:
-                anchorKind = "addition"
-            }
             return MonacoDiffHunkControlPayload(
                 row: row,
-                hunkIndex: hunkIndex,
+                hunkIndex: control.actionHunkIndex,
+                lineIDs: control.actionLineIDs,
                 tooltip: viewModel.fileInspectorHunkToolTips[row],
-                anchorKind: anchorKind,
+                anchorKind: control.anchorKind,
                 oldLineNumber: linePair?.old,
                 newLineNumber: linePair?.new,
-                oldStartLine: hunk.map { $0.oldCount > 0 ? $0.oldStart : nil } ?? nil,
-                oldEndLine: hunk.map { $0.oldCount > 0 ? ($0.oldStart + $0.oldCount - 1) : nil } ?? nil,
-                newStartLine: hunk.map { $0.newCount > 0 ? $0.newStart : nil } ?? nil,
-                newEndLine: hunk.map { $0.newCount > 0 ? ($0.newStart + $0.newCount - 1) : nil } ?? nil,
-                hasDeletionLines: hunk?.lines.contains(where: { $0.kind == .deletion }) ?? false
+                oldStartLine: control.oldStartLine,
+                oldEndLine: control.oldEndLine,
+                newStartLine: control.newStartLine,
+                newEndLine: control.newEndLine,
+                hasDeletionLines: control.hasDeletionLines
             )
         }
     }
@@ -373,10 +363,11 @@ struct FileInspectorOverlayView: View {
                 viewModel.fileInspectorDisplayContent = content
                 viewModel.isFileInspectorDiffEditing = false
             },
-            onHunkAction: { _, hunkIndex, action in
+            onHunkAction: { _, hunkIndex, lineIDs, action in
                 let pending = PendingHunkAction(
                     path: viewModel.fileInspectorPath,
                     hunkIndex: hunkIndex,
+                    lineIDs: lineIDs,
                     action: action
                 )
                 if action == "discard" {
@@ -394,13 +385,26 @@ struct FileInspectorOverlayView: View {
 
     @MainActor
     private func performHunkAction(_ pending: PendingHunkAction) async {
+        let lineIDs = Set(pending.lineIDs)
         switch pending.action {
         case "stage":
-            await viewModel.stageHunk(pending.hunkIndex)
+            if lineIDs.isEmpty {
+                await viewModel.stageHunk(pending.hunkIndex)
+            } else {
+                await viewModel.stageLines(pending.hunkIndex, lineIndices: lineIDs)
+            }
         case "unstage":
-            await viewModel.unstageHunk(pending.hunkIndex)
+            if lineIDs.isEmpty {
+                await viewModel.unstageHunk(pending.hunkIndex)
+            } else {
+                await viewModel.unstageLines(pending.hunkIndex, lineIndices: lineIDs)
+            }
         case "discard":
-            await viewModel.discardHunk(pending.hunkIndex)
+            if lineIDs.isEmpty {
+                await viewModel.discardHunk(pending.hunkIndex)
+            } else {
+                await viewModel.discardLines(pending.hunkIndex, lineIndices: lineIDs)
+            }
         default:
             break
         }

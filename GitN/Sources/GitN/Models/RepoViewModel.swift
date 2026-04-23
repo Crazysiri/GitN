@@ -121,9 +121,20 @@ final class RepoViewModel {
         let lineHighlights: [Int: FileInspectorChangeKind]
         let inlineHighlights: [FileInspectorInlineHighlight]
         let linePairs: [Int: FileInspectorLinePair]
-        let hunkControls: [Int: Int]
+        let hunkControls: [Int: FileInspectorHunkControl]
         let hunkToolTips: [Int: String]
         let overviewSegments: [FileInspectorOverviewSegment]
+    }
+
+    struct FileInspectorHunkControl: Sendable {
+        let actionHunkIndex: Int
+        let actionLineIDs: [Int]
+        let anchorKind: String
+        let oldStartLine: Int?
+        let oldEndLine: Int?
+        let newStartLine: Int?
+        let newEndLine: Int?
+        let hasDeletionLines: Bool
     }
 
     private struct ConflictUndoSnapshot {
@@ -279,7 +290,7 @@ final class RepoViewModel {
     var fileInspectorLineHighlights: [Int: FileInspectorChangeKind] = [:]
     var fileInspectorInlineHighlights: [FileInspectorInlineHighlight] = []
     var fileInspectorLinePairs: [Int: FileInspectorLinePair] = [:]
-    var fileInspectorHunkControls: [Int: Int] = [:]
+    var fileInspectorHunkControls: [Int: FileInspectorHunkControl] = [:]
     var fileInspectorHunkToolTips: [Int: String] = [:]
     var fileInspectorOverviewSegments: [FileInspectorOverviewSegment] = []
     var fileInspectorLineBlames: [Int: FileInspectorBlameInfo] = [:]
@@ -1484,6 +1495,9 @@ final class RepoViewModel {
         let currentLines = textLines(currentText)
         let normalizedTotalLines = max(currentLines.count, 1)
         let effectiveDiff = parsedDiff.map { _ in TextDiffEngine.diff(old: diffBaseText, new: currentText) }
+        let actionHunkMap = effectiveDiff.flatMap { displayDiff in
+            parsedDiff.map { DiffHunkMapper.mapDisplayHunksToActionHunks(displayHunks: displayDiff.hunks, actionHunks: $0.hunks) }
+        } ?? [:]
         let lineRangesInCurrentText = lineContentRanges(for: currentLines)
 
         guard let diff = effectiveDiff ?? parsedDiff else {
@@ -1527,7 +1541,7 @@ final class RepoViewModel {
         var rows: [DiffEditorRow] = []
         var highlights: [Int: FileInspectorChangeKind] = [:]
         var linePairs: [Int: FileInspectorLinePair] = [:]
-        var hunkControls: [Int: Int] = [:]
+        var hunkControls: [Int: FileInspectorHunkControl] = [:]
         var hunkToolTips: [Int: String] = [:]
         var oldLine = 1
         var newLine = 1
@@ -1565,7 +1579,7 @@ final class RepoViewModel {
             }
         }
 
-        for (hunkIndex, hunk) in diff.hunks.enumerated() {
+        for (displayHunkIndex, hunk) in diff.hunks.enumerated() {
             while newLine < hunk.newStart && baseIndex <= currentLines.count {
                 let lineText = currentLines[baseIndex - 1]
                 appendRow(
@@ -1626,7 +1640,39 @@ final class RepoViewModel {
             }
             if rows.count >= hunkStartRow {
                 let anchorRow = firstChangedRow ?? hunkStartRow
-                hunkControls[anchorRow] = hunkIndex
+                let firstChangedKind = hunk.lines.first(where: { $0.kind != .context })?.kind
+                let anchorKind: String
+                switch firstChangedKind {
+                case .addition:
+                    anchorKind = "addition"
+                case .deletion:
+                    anchorKind = "deletion"
+                default:
+                    anchorKind = "addition"
+                }
+                let actionHunkIndex = actionHunkMap[displayHunkIndex] ?? displayHunkIndex
+                let actionLineIDs: [Int]
+                if let parsedDiff,
+                   parsedDiff.hunks.indices.contains(actionHunkIndex) {
+                    actionLineIDs = Array(
+                        DiffHunkMapper.actionLineIDs(
+                            for: hunk,
+                            in: parsedDiff.hunks[actionHunkIndex]
+                        )
+                    ).sorted()
+                } else {
+                    actionLineIDs = []
+                }
+                hunkControls[anchorRow] = FileInspectorHunkControl(
+                    actionHunkIndex: actionHunkIndex,
+                    actionLineIDs: actionLineIDs,
+                    anchorKind: anchorKind,
+                    oldStartLine: hunk.oldCount > 0 ? hunk.oldStart : nil,
+                    oldEndLine: hunk.oldCount > 0 ? (hunk.oldStart + hunk.oldCount - 1) : nil,
+                    newStartLine: hunk.newCount > 0 ? hunk.newStart : nil,
+                    newEndLine: hunk.newCount > 0 ? (hunk.newStart + hunk.newCount - 1) : nil,
+                    hasDeletionLines: hunk.lines.contains(where: { $0.kind == .deletion })
+                )
                 hunkToolTips[anchorRow] = hunk.changeDisplayRange
             }
         }
@@ -3731,11 +3777,15 @@ final class RepoViewModel {
 
     func discardLines(_ hunkIndex: Int, lineIndices: Set<Int>) async {
         guard let diff = parsedDiff else { return }
-        let patch = diff.patchForLines(hunkIndex, lineIndices: lineIndices)
+        let patch = diff.reversed().patchForLines(hunkIndex, lineIndices: lineIndices)
         guard !patch.isEmpty else { return }
         do {
-            try await git.applyPatch(patch, reverse: true)
-        } catch { print("Discard lines failed: \(error)"); return }
+            try await git.applyPatch(patch)
+        } catch {
+            showToast(title: "Discard Failed", detail: error.localizedDescription, style: .error)
+            print("Discard lines failed: \(error)")
+            return
+        }
         await refreshAfterPatchAction()
     }
 
@@ -3770,11 +3820,15 @@ final class RepoViewModel {
 
     func unstageLines(_ hunkIndex: Int, lineIndices: Set<Int>) async {
         guard let diff = parsedDiff else { return }
-        let patch = diff.patchForLines(hunkIndex, lineIndices: lineIndices)
+        let patch = diff.reversed().patchForLines(hunkIndex, lineIndices: lineIndices)
         guard !patch.isEmpty else { return }
         do {
-            try await git.applyPatch(patch, cached: true, reverse: true)
-        } catch { print("Unstage lines failed: \(error)"); return }
+            try await git.applyPatch(patch, cached: true)
+        } catch {
+            showToast(title: "Unstage Failed", detail: error.localizedDescription, style: .error)
+            print("Unstage lines failed: \(error)")
+            return
+        }
         await refreshAfterPatchAction()
     }
 
@@ -3782,13 +3836,44 @@ final class RepoViewModel {
         do {
             fileStatuses = try await git.status()
         } catch {}
+        await refreshUncommittedDiffFiles()
         if refreshWorkingTreeSynchronously {
             await refreshVisibleWorkingTreeFoldersNow()
         } else {
             scheduleVisibleWorkingTreeFoldersRefresh()
         }
         if let file = selectedDiffFile {
-            await selectDiffFile(file, context: currentDiffContext)
+            let nextContext: DiffContext
+            if let status = fileStatuses.first(where: { $0.path == file.path }) {
+                switch currentDiffContext {
+                case .staged:
+                    if status.hasStagedChanges {
+                        nextContext = .staged
+                    } else if status.hasUnstagedChanges {
+                        nextContext = .unstaged
+                    } else {
+                        nextContext = .staged
+                    }
+                case .unstaged:
+                    if status.hasUnstagedChanges {
+                        nextContext = .unstaged
+                    } else if status.hasStagedChanges {
+                        nextContext = .staged
+                    } else {
+                        nextContext = .unstaged
+                    }
+                case .committed:
+                    nextContext = .committed
+                }
+                if nextContext != currentDiffContext {
+                    currentDiffContext = nextContext
+                }
+                await selectDiffFile(file, context: nextContext)
+                if isFileInspectorPresented, fileInspectorPath == file.path {
+                    fileInspectorContext = nextContext
+                    await reloadCurrentFileInspectorPreservingMode()
+                }
+            }
         }
         // Update uncommitted entry counts without reloading all commits
         let hadUncommitted = commits.first?.isUncommitted == true

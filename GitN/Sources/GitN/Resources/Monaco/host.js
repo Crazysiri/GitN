@@ -580,6 +580,7 @@
       path: control.path,
       action,
       hunkIndex: control.hunkIndex,
+      lineIDs: Array.isArray(control.lineIDs) ? control.lineIDs : [],
     });
   }
 
@@ -1116,6 +1117,7 @@
       path: item.path,
       row: control.row,
       hunkIndex: control.hunkIndex,
+      lineIDs: Array.isArray(control.lineIDs) ? control.lineIDs : [],
       tooltip: control.tooltip || "",
       anchorKind: control.anchorKind === "deletion" ? "deletion" : "addition",
       oldLineNumber: typeof control.oldLineNumber === "number" ? control.oldLineNumber : null,

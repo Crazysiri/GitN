@@ -56,6 +56,145 @@ struct HunkLine: Identifiable, Sendable {
     }
 }
 
+enum DiffHunkMapper {
+    static func mapDisplayHunksToActionHunks(
+        displayHunks: [ParsedHunk],
+        actionHunks: [ParsedHunk]
+    ) -> [Int: Int] {
+        guard !displayHunks.isEmpty, !actionHunks.isEmpty else { return [:] }
+
+        var mapping: [Int: Int] = [:]
+
+        for (displayIndex, displayHunk) in displayHunks.enumerated() {
+            if let exactMatch = actionHunks.enumerated().first(where: { _, actionHunk in
+                actionHunk.contains(displayHunk)
+            }) {
+                mapping[displayIndex] = exactMatch.offset
+                continue
+            }
+
+            if let overlappingMatch = actionHunks.enumerated().first(where: { _, actionHunk in
+                actionHunk.overlaps(displayHunk)
+            }) {
+                mapping[displayIndex] = overlappingMatch.offset
+            }
+        }
+
+        return mapping
+    }
+
+    static func actionLineIDs(
+        for displayHunk: ParsedHunk,
+        in actionHunk: ParsedHunk
+    ) -> Set<Int> {
+        let displayAddedLines = displayHunk.addedNewLines
+        let displayDeletedLines = displayHunk.deletedOldLines
+        let displayAddedContents = displayHunk.addedContents
+        let displayDeletedContents = displayHunk.deletedContents
+
+        var matchedIDs = Set<Int>()
+
+        for line in actionHunk.lines {
+            switch line.kind {
+            case .addition:
+                if let newLineNum = line.newLineNum,
+                   displayAddedLines.contains(newLineNum) {
+                    matchedIDs.insert(line.id)
+                    continue
+                }
+                if displayAddedLines.isEmpty,
+                   displayAddedContents.contains(line.content) {
+                    matchedIDs.insert(line.id)
+                }
+            case .deletion:
+                if let oldLineNum = line.oldLineNum,
+                   displayDeletedLines.contains(oldLineNum) {
+                    matchedIDs.insert(line.id)
+                    continue
+                }
+                if displayDeletedLines.isEmpty,
+                   displayDeletedContents.contains(line.content) {
+                    matchedIDs.insert(line.id)
+                }
+            case .context:
+                continue
+            }
+        }
+
+        return matchedIDs
+    }
+}
+
+private extension ParsedHunk {
+    var addedNewLines: Set<Int> {
+        Set(lines.compactMap(\.newLineNum))
+    }
+
+    var deletedOldLines: Set<Int> {
+        Set(lines.compactMap(\.oldLineNum))
+    }
+
+    var addedContents: [String] {
+        lines.filter { $0.kind == .addition }.map(\.content)
+    }
+
+    var deletedContents: [String] {
+        lines.filter { $0.kind == .deletion }.map(\.content)
+    }
+
+    func contains(_ other: ParsedHunk) -> Bool {
+        let otherAddedLines = other.addedNewLines
+        let otherDeletedLines = other.deletedOldLines
+
+        let lineNumbersContain =
+            (!otherAddedLines.isEmpty && otherAddedLines.isSubset(of: addedNewLines)) ||
+            (!otherDeletedLines.isEmpty && otherDeletedLines.isSubset(of: deletedOldLines))
+
+        if lineNumbersContain {
+            return true
+        }
+
+        let otherAddedContents = other.addedContents
+        if !otherAddedContents.isEmpty &&
+            Self.isOrderedSubset(candidate: otherAddedContents, of: addedContents) {
+            return true
+        }
+
+        let otherDeletedContents = other.deletedContents
+        if !otherDeletedContents.isEmpty &&
+            Self.isOrderedSubset(candidate: otherDeletedContents, of: deletedContents) {
+            return true
+        }
+
+        return false
+    }
+
+    func overlaps(_ other: ParsedHunk) -> Bool {
+        !addedNewLines.isDisjoint(with: other.addedNewLines) ||
+        !deletedOldLines.isDisjoint(with: other.deletedOldLines)
+    }
+
+    static func isOrderedSubset(candidate: [String], of source: [String]) -> Bool {
+        guard !candidate.isEmpty else { return false }
+
+        var sourceIndex = 0
+        for item in candidate {
+            var found = false
+            while sourceIndex < source.count {
+                defer { sourceIndex += 1 }
+                if source[sourceIndex] == item {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                return false
+            }
+        }
+        return true
+    }
+}
+
 // MARK: - Parser
 
 enum DiffParserEngine {
@@ -321,6 +460,27 @@ extension ParsedDiff {
         return lines.filter { !$0.hasPrefix("index ") }.joined(separator: "\n")
     }
 
+    func reversed() -> ParsedDiff {
+        ParsedDiff(
+            fileHeader: reversedFileHeader,
+            hunks: hunks.map(\.reversed),
+            isNewFile: false
+        )
+    }
+
+    private var reversedFileHeader: String {
+        let lines = fileHeader.components(separatedBy: "\n")
+        return lines.map { line in
+            if line.hasPrefix("--- ") {
+                return "+++ " + String(line.dropFirst(4))
+            }
+            if line.hasPrefix("+++ ") {
+                return "--- " + String(line.dropFirst(4))
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
     /// Construct a full patch for a single hunk.
     func patchForHunk(_ hunkIndex: Int) -> String {
         guard hunkIndex < hunks.count else { return "" }
@@ -373,5 +533,51 @@ extension ParsedDiff {
         patch += header + "\n"
         patch += patchLines.joined(separator: "\n") + "\n"
         return patch
+    }
+}
+
+private extension ParsedHunk {
+    var reversed: ParsedHunk {
+        let reversedLines = lines.map { line in
+            switch line.kind {
+            case .context:
+                return HunkLine(
+                    id: line.id,
+                    kind: .context,
+                    rawText: " " + line.content,
+                    content: line.content,
+                    oldLineNum: line.newLineNum,
+                    newLineNum: line.oldLineNum
+                )
+            case .addition:
+                return HunkLine(
+                    id: line.id,
+                    kind: .deletion,
+                    rawText: "-" + line.content,
+                    content: line.content,
+                    oldLineNum: line.newLineNum,
+                    newLineNum: nil
+                )
+            case .deletion:
+                return HunkLine(
+                    id: line.id,
+                    kind: .addition,
+                    rawText: "+" + line.content,
+                    content: line.content,
+                    oldLineNum: nil,
+                    newLineNum: line.oldLineNum
+                )
+            }
+        }
+
+        let reversedHeader = "@@ -\(newStart),\(newCount) +\(oldStart),\(oldCount) @@"
+        return ParsedHunk(
+            rawHeader: reversedHeader,
+            oldStart: newStart,
+            oldCount: newCount,
+            newStart: oldStart,
+            newCount: oldCount,
+            lines: reversedLines
+        )
     }
 }

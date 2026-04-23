@@ -11,6 +11,7 @@ struct MonacoPreviewPayload: Encodable, Equatable {
 struct MonacoDiffHunkControlPayload: Encodable, Equatable {
     let row: Int
     let hunkIndex: Int
+    let lineIDs: [Int]
     let tooltip: String?
     let anchorKind: String
     let oldLineNumber: Int?
@@ -66,7 +67,7 @@ struct MonacoInspectorView: NSViewRepresentable {
     let items: [MonacoDiffPayload]
     let commandBridge: MonacoCommandBridge?
     let onContentChange: (String, String) -> Void
-    let onHunkAction: ((String, Int, String) -> Void)?
+    let onHunkAction: ((String, Int, [Int], String) -> Void)?
     let onSaveRequest: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -126,7 +127,7 @@ extension MonacoInspectorView {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var onContentChange: (String, String) -> Void
-        var onHunkAction: ((String, Int, String) -> Void)?
+        var onHunkAction: ((String, Int, [Int], String) -> Void)?
         var onSaveRequest: (() -> Void)?
         weak var webView: WKWebView?
         var pendingPayload: MonacoHostPayload?
@@ -138,7 +139,7 @@ extension MonacoInspectorView {
 
         init(
             onContentChange: @escaping (String, String) -> Void,
-            onHunkAction: ((String, Int, String) -> Void)?,
+            onHunkAction: ((String, Int, [Int], String) -> Void)?,
             onSaveRequest: (() -> Void)?
         ) {
             self.onContentChange = onContentChange
@@ -190,7 +191,7 @@ extension MonacoInspectorView {
                let path = body["path"] as? String,
                let action = body["action"] as? String,
                let hunkIndex = body["hunkIndex"] as? Int {
-                onHunkAction?(path, hunkIndex, action)
+                onHunkAction?(path, hunkIndex, body["lineIDs"] as? [Int] ?? [], action)
                 return
             }
 
