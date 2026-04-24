@@ -119,7 +119,7 @@ struct FileHistoryPanelContent: View {
 
     private var diffView: some View {
         Group {
-            if let diff = viewModel.fileHistoryParsedDiff, !diff.hunks.isEmpty {
+            if let diff = viewModel.fileHistoryParsedDiff, hasDisplayableTextContent {
                 MonacoInspectorView(
                     mode: .diff,
                     isDark: colorScheme == .dark,
@@ -159,6 +159,10 @@ struct FileHistoryPanelContent: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+
+    private var hasDisplayableTextContent: Bool {
+        !viewModel.fileHistoryBaseText.isEmpty || !viewModel.fileHistoryCurrentText.isEmpty
     }
 
     private func briefDate(_ dateStr: String) -> String {

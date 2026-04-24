@@ -200,6 +200,41 @@ final class GitServiceBehaviorTests: XCTestCase {
         )
     }
 
+    func testDecodedFileContentIfExistsDiscoversRepositoryFromSubdirectory() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("app/Manager/AppClipLock.swift", contents: "lock\n")
+        let hash = try repo.commitAll(message: "add lock")
+
+        let service = GitService(repoPath: repo.path + "/app")
+        let content = try await service.decodedFileContentIfExists(
+            atCommit: hash,
+            path: "app/Manager/AppClipLock.swift"
+        )
+        let missing = try await service.decodedFileContentIfExists(
+            atCommit: hash,
+            path: "Manager/AppClipLock.swift"
+        )
+
+        XCTAssertEqual(content?.text, "lock\n")
+        XCTAssertNil(missing)
+    }
+
+    func testFileLogDiffFallsBackWhenFollowPatchOnlyContainsRenameMetadata() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.txt", contents: "one\n")
+        _ = try repo.commitAll(message: "initial notes")
+
+        try repo.run(["mv", "notes.txt", "journal.txt"])
+        let renameHash = try repo.commitAll(message: "rename notes")
+
+        let service = GitService(repoPath: repo.path)
+        let diff = try await service.fileLogDiff(hash: renameHash, path: "journal.txt")
+
+        XCTAssertTrue(diff.contains("@@ -0,0 +1 @@"))
+        XCTAssertTrue(diff.contains("+++ b/journal.txt"))
+        XCTAssertTrue(diff.contains("+one"))
+    }
+
     func testFileLogCanBeAnchoredToSpecificRevision() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("tracked.txt", contents: "one\n")

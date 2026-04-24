@@ -378,6 +378,67 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.fileInspectorMode, .preview)
     }
 
+    func testOpenFileHistorySupportsWorkingTreeFileContext() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("script.sh", contents: "echo base\n")
+        try repo.commitAll(message: "Initial commit")
+        try repo.writeFile("script.sh", contents: "echo changed\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        await viewModel.openFileHistory(path: "script.sh", context: .unstaged)
+
+        XCTAssertTrue(viewModel.isFileInspectorPresented)
+        XCTAssertEqual(viewModel.fileInspectorMode, .history)
+        XCTAssertEqual(viewModel.fileInspectorContext, .unstaged)
+        XCTAssertEqual(viewModel.fileHistoryPath, "script.sh")
+        XCTAssertFalse(viewModel.fileHistoryCommits.isEmpty)
+        XCTAssertEqual(viewModel.fileHistoryCommits.first?.message, "Initial commit")
+    }
+
+    func testFileHistoryComparesRenameEntryAgainstPreviousHistoryEntry() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.txt", contents: "one\n")
+        _ = try repo.commitAll(message: "initial notes")
+
+        try repo.run(["mv", "notes.txt", "journal.txt"])
+        let renameHash = try repo.commitAll(message: "rename notes")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.openFileHistory(path: "journal.txt", context: .unstaged)
+
+        guard let renameCommit = viewModel.fileHistoryCommits.first(where: { $0.hash == renameHash }) else {
+            return XCTFail("Expected rename history entry")
+        }
+
+        await viewModel.selectFileHistoryCommit(renameCommit)
+
+        XCTAssertEqual(viewModel.fileHistoryBaseText, "one\n")
+        XCTAssertEqual(viewModel.fileHistoryCurrentText, "one\n")
+        XCTAssertTrue(viewModel.fileHistoryParsedDiff?.hunks.isEmpty ?? false)
+        XCTAssertEqual(viewModel.fileHistoryDiff, "__synthetic__")
+    }
+
+    func testRepositoryFileHistoryPathPreservesRepoRootPathAndPrefixesRelativePath() {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        viewModel.fileHistoryWorkingTreePrefix = "mxz_ios_appclip/"
+        viewModel.fileHistoryPath = "Manager/AppClipLock.swift"
+
+        XCTAssertEqual(
+            viewModel.repositoryFileHistoryPath("mxz_ios_appclip/Manager/AppClipLock.swift"),
+            "mxz_ios_appclip/Manager/AppClipLock.swift"
+        )
+        XCTAssertEqual(
+            viewModel.repositoryFileHistoryPath("Manager/AppClipLock.swift"),
+            "mxz_ios_appclip/Manager/AppClipLock.swift"
+        )
+        XCTAssertEqual(
+            viewModel.repositoryFileHistoryPath("Modules/MGFoundation/Sources/MGFoundation/MultiThread/MGProtect.swift"),
+            "Modules/MGFoundation/Sources/MGFoundation/MultiThread/MGProtect.swift"
+        )
+    }
+
     func testRefreshAfterWorkingTreeMutationRebuildsUncommittedDiffFiles() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile(".gitignore", contents: "DerivedData/\n")
@@ -1167,33 +1228,75 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(refOwner.hash, secondHash)
     }
 
-    func testPerformCompareWithWorkingDirectoryLoadsCompareDiffAndExitClearsState() async throws {
+    func testPerformCompareWithWorkingDirectoryLoadsChangesAfterSelectedCommitAndExitClearsState() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("tracked.txt", contents: "one\n")
         try repo.commitAll(message: "initial")
         try repo.appendFile("tracked.txt", contents: "two\n")
+        let selectedHash = try repo.commitAll(message: "selected")
+        try repo.writeFile("later.txt", contents: "later\n")
+        try repo.commitAll(message: "later")
 
         let viewModel = RepoViewModel(path: repo.path, name: "repo")
         await viewModel.loadAll()
-        let baseCommit = try XCTUnwrap(viewModel.commits.first(where: { !$0.isUncommitted }))
+        let selectedCommit = try XCTUnwrap(viewModel.commits.first(where: { $0.hash == selectedHash }))
 
-        await viewModel.performCompareWithWorkingDirectory(baseCommit)
+        await viewModel.performCompareWithWorkingDirectory(selectedCommit)
 
         XCTAssertTrue(viewModel.isCompareMode)
-        XCTAssertEqual(viewModel.compareBaseHash, baseCommit.hash)
-        XCTAssertEqual(viewModel.diffFiles.map(\.path), ["tracked.txt"])
+        XCTAssertEqual(viewModel.compareBaseHash, selectedHash)
+        XCTAssertNil(viewModel.compareTargetHash)
+        XCTAssertEqual(viewModel.diffFiles.map(\.path), ["later.txt"])
 
         let file = try XCTUnwrap(viewModel.diffFiles.first)
         await viewModel.selectCompareFile(file)
-        XCTAssertEqual(viewModel.selectedDiffFile?.path, "tracked.txt")
-        XCTAssertTrue(viewModel.fileDiffContent.contains("+two"))
+        XCTAssertEqual(viewModel.selectedDiffFile?.path, "later.txt")
+        XCTAssertTrue(viewModel.fileDiffContent.contains("+later"))
+        XCTAssertFalse(viewModel.fileDiffContent.contains("+two"))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "")
+        XCTAssertEqual(viewModel.fileInspectorContent, "later\n")
+        XCTAssertTrue(viewModel.fileDiffContent.contains("+later"))
 
         viewModel.exitCompareMode()
         XCTAssertFalse(viewModel.isCompareMode)
         XCTAssertNil(viewModel.compareBaseHash)
+        XCTAssertNil(viewModel.compareTargetHash)
         XCTAssertTrue(viewModel.diffFiles.isEmpty)
         XCTAssertNil(viewModel.selectedDiffFile)
         XCTAssertEqual(viewModel.fileDiffContent, "")
+    }
+
+    func testPerformCompareBetweenCommitsUsesProvidedSelectionOrder() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("ordered.txt", contents: "one\n")
+        let firstHash = try repo.commitAll(message: "first")
+        try repo.appendFile("ordered.txt", contents: "two\n")
+        try repo.commitAll(message: "second")
+        try repo.appendFile("ordered.txt", contents: "three\n")
+        let thirdHash = try repo.commitAll(message: "third")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let firstCommit = try XCTUnwrap(viewModel.commits.first(where: { $0.hash == firstHash }))
+        let thirdCommit = try XCTUnwrap(viewModel.commits.first(where: { $0.hash == thirdHash }))
+
+        await viewModel.performCompareBetweenCommits(base: thirdCommit, target: firstCommit)
+
+        XCTAssertTrue(viewModel.isCompareMode)
+        XCTAssertEqual(viewModel.compareBaseHash, thirdHash)
+        XCTAssertEqual(viewModel.compareTargetHash, firstHash)
+        XCTAssertEqual(viewModel.diffFiles.map(\.path), ["ordered.txt"])
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first)
+        await viewModel.selectCompareFile(file)
+        XCTAssertTrue(viewModel.fileDiffContent.contains("-two"))
+        XCTAssertTrue(viewModel.fileDiffContent.contains("-three"))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "one\ntwo\nthree\n")
+        XCTAssertEqual(viewModel.fileInspectorContent, "one\n")
+        XCTAssertTrue(viewModel.fileDiffContent.contains("-two"))
+        XCTAssertTrue(viewModel.fileDiffContent.contains("-three"))
     }
 
     func testHidingReflogOverlayClearsRecoveredSelectionNotPresentInCommits() {

@@ -277,6 +277,8 @@ struct GraphView: View {
             NSPasteboard.general.setString(hash, forType: .string)
         case .compareWithWorkingDir:
             Task { await viewModel.performCompareWithWorkingDirectory(commit) }
+        case .compareCommits(let base, let target):
+            Task { await viewModel.performCompareBetweenCommits(base: base, target: target) }
         case .createTag:
             contextCommit = commit
             tagName = ""
@@ -675,6 +677,7 @@ enum CommitContextAction {
     case deleteRemoteBranch(remote: String, branch: String)
     case copySHA(String)
     case compareWithWorkingDir
+    case compareCommits(base: CommitInfo, target: CommitInfo)
     case createTag
     case squashCommits([String])
 }
@@ -821,8 +824,10 @@ struct CommitTableView: NSViewRepresentable {
                 // Reset multi-selection when data changes (commits reloaded/appended)
                 if let hash = selectedCommitHash {
                     coordinator.selectedRowHashes = [hash]
+                    coordinator.selectedHashOrder = [hash]
                 } else {
                     coordinator.selectedRowHashes = []
+                    coordinator.selectedHashOrder = []
                 }
 
                 tableView.beginUpdates()
@@ -836,8 +841,10 @@ struct CommitTableView: NSViewRepresentable {
                 // Reset multi-selection when data changes (commits reloaded)
                 if let hash = selectedCommitHash {
                     coordinator.selectedRowHashes = [hash]
+                    coordinator.selectedHashOrder = [hash]
                 } else {
                     coordinator.selectedRowHashes = []
+                    coordinator.selectedHashOrder = []
                 }
                 tableView.reloadData()
             }
@@ -853,6 +860,7 @@ struct CommitTableView: NSViewRepresentable {
                     if tableView.selectedRow != row {
                         coordinator.isUpdatingSelection = true
                         coordinator.selectedRowHashes = [selectedHash]
+                        coordinator.selectedHashOrder = [selectedHash]
                         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
                         coordinator.isUpdatingSelection = false
                     }
@@ -860,6 +868,7 @@ struct CommitTableView: NSViewRepresentable {
             } else if !tableView.selectedRowIndexes.isEmpty {
                 coordinator.isUpdatingSelection = true
                 coordinator.selectedRowHashes = []
+                coordinator.selectedHashOrder = []
                 tableView.deselectAll(nil)
                 coordinator.isUpdatingSelection = false
             }
@@ -935,6 +944,7 @@ struct CommitTableView: NSViewRepresentable {
         fileprivate weak var tableView: CommitNSTableView?
         var isUpdatingSelection = false
         var selectedRowHashes: Set<String> = []
+        var selectedHashOrder: [String] = []
         let graphHScroll = GraphHScrollStateNS()
         private var loadMoreScheduled = false
 
@@ -962,6 +972,7 @@ struct CommitTableView: NSViewRepresentable {
             self.refsColumnWidth = parent.refsColumnWidth
             if let hash = parent.selectedCommitHash {
                 self.selectedRowHashes = [hash]
+                self.selectedHashOrder = [hash]
             }
             lazyGraph.reset(commits: parent.graphCommits)
         }
@@ -1070,10 +1081,18 @@ struct CommitTableView: NSViewRepresentable {
             let selectedRows = tableView.selectedRowIndexes
 
             // Update tracked selection hashes
-            selectedRowHashes = Set(selectedRows.compactMap { row -> String? in
+            let rowOrderedHashes = selectedRows.compactMap { row -> String? in
                 guard row >= 0, row < commits.count else { return nil }
                 return commits[row].hash
-            })
+            }
+            selectedRowHashes = Set(rowOrderedHashes)
+            selectedHashOrder.removeAll { !selectedRowHashes.contains($0) }
+            for hash in rowOrderedHashes where !selectedHashOrder.contains(hash) {
+                selectedHashOrder.append(hash)
+            }
+            if selectedHashOrder.count != selectedRowHashes.count {
+                selectedHashOrder = rowOrderedHashes
+            }
 
             // Determine the "primary" selected row for commit detail display
             if let lastRow = selectedRows.last, lastRow >= 0, lastRow < commits.count {
@@ -1247,14 +1266,26 @@ struct CommitTableView: NSViewRepresentable {
         private func buildMultiSelectContextMenu() -> NSMenu? {
             guard let tableView else { return nil }
             let selectedRows = tableView.selectedRowIndexes
-            let selectedCommits = selectedRows.compactMap { row -> CommitInfo? in
+            let rowOrderedCommits = selectedRows.compactMap { row -> CommitInfo? in
                 guard row >= 0, row < commits.count else { return nil }
                 let c = commits[row]
                 return c.isUncommitted ? nil : c
             }
+            let commitsByHash = Dictionary(uniqueKeysWithValues: rowOrderedCommits.map { ($0.hash, $0) })
+            let selectedCommits = selectedHashOrder.compactMap { commitsByHash[$0] }
             guard selectedCommits.count >= 2 else { return nil }
 
             let menu = NSMenu()
+
+            if selectedCommits.count == 2 {
+                let base = selectedCommits[0]
+                let target = selectedCommits[1]
+                menu.addItem(menuItem("Compare \(base.shortHash) → \(target.shortHash)") {
+                    [weak self] in
+                    self?.onContextAction?(target, .compareCommits(base: base, target: target))
+                })
+                menu.addItem(.separator())
+            }
 
             // Squash commits
             let hashes = selectedCommits.map(\.hash)

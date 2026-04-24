@@ -500,6 +500,11 @@ final class RepoViewModel {
         selectedWorkingTreeFilePath = nil
         defer { isFileInspectorLoading = false }
 
+        if isCompareMode {
+            await openCompareFileInspector(file, effectiveMode: effectiveMode)
+            return
+        }
+
         await selectDiffFile(file, context: context)
         do {
             let loaded = try await loadInspectableFileContent(path: file.path, context: context)
@@ -555,6 +560,43 @@ final class RepoViewModel {
             fileInspectorBlameTask?.cancel()
             fileInspectorBlameTask = nil
             isFileInspectorEditable = canEditInspectorContent
+            fileInspectorEncodingName = loaded.content.encodingName
+            fileInspectorMessage = loaded.message
+            rebuildFileInspectorArtifacts(
+                diffBaseText: fileInspectorDiffBaseText,
+                currentText: fileInspectorContent,
+                parsedDiff: inspectorParsedDiff
+            )
+        } catch {
+            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    private func openCompareFileInspector(_ file: DiffFile, effectiveMode: FileInspectorMode) async {
+        await selectCompareFile(file)
+        do {
+            let loaded = try await loadCompareInspectableContent(file)
+            let loadedText = loaded.content.text ?? ""
+            let inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
+
+            fileInspectorContent = loadedText
+            fileInspectorInitialContent = loadedText
+            fileInspectorDiffBaseText = loaded.baseText
+            fileInspectorDisplayContent = loadedText
+            fileInspectorVisualContent = effectiveMode == .diff
+                ? payloadVisualContent(for: inspectorParsedDiff) ?? loaded.visualContent
+                : loaded.visualContent
+            fileInspectorSelectedRange = NSRange(location: 0, length: 0)
+            isFileInspectorDiffEditing = false
+            showFileInspectorExternalChangePrompt = false
+            fileInspectorUndoStack.removeAll(keepingCapacity: false)
+            fileInspectorRedoStack.removeAll(keepingCapacity: false)
+            fileInspectorEditSession = nil
+            fileInspectorRebuildTask?.cancel()
+            fileInspectorRebuildTask = nil
+            fileInspectorBlameTask?.cancel()
+            fileInspectorBlameTask = nil
+            isFileInspectorEditable = false
             fileInspectorEncodingName = loaded.content.encodingName
             fileInspectorMessage = loaded.message
             rebuildFileInspectorArtifacts(
@@ -920,6 +962,13 @@ final class RepoViewModel {
         let visualContent: VisualFileContent?
     }
 
+    private struct LoadedCompareInspectableContent {
+        let content: GitService.DecodedFileContent
+        let baseText: String
+        let visualContent: VisualFileContent?
+        let message: String?
+    }
+
     static func monacoLanguage(for language: SourceLanguage) -> String {
         switch language {
         case .swift, .python, .javascript, .typescript, .go, .rust, .c, .cpp, .java,
@@ -999,6 +1048,40 @@ final class RepoViewModel {
             isEditable: true,
             message: nil,
             visualContent: nil
+        )
+    }
+
+    private func loadCompareInspectableContent(_ file: DiffFile) async throws -> LoadedCompareInspectableContent {
+        guard let baseHash = compareBaseHash else {
+            return LoadedCompareInspectableContent(
+                content: .init(text: "", encodingName: "UTF-8", isBinary: false),
+                baseText: "",
+                visualContent: nil,
+                message: nil
+            )
+        }
+
+        let currentDecoded: GitService.DecodedFileContent
+        let currentData: Data?
+        if let targetHash = compareTargetHash {
+            currentDecoded = try await git.decodedFileContent(atCommit: targetHash, path: file.path)
+            currentData = try await git.fileData(atCommit: targetHash, path: file.path)
+        } else {
+            currentDecoded = try await git.decodedWorkingTreeFileContent(path: file.path)
+            currentData = try await git.workingTreeFileData(path: file.path)
+        }
+
+        let basePath = file.oldPath ?? file.path
+        let baseDecoded = try await git.decodedFileContentIfExists(atCommit: baseHash, path: basePath)
+        let baseData = try await git.fileData(atCommit: baseHash, path: basePath)
+        let visualContent = Self.makeVisualDiffContent(path: file.path, oldData: baseData, newData: currentData)
+        let message = currentDecoded.isBinary ? "Binary files can't be edited here." : nil
+
+        return LoadedCompareInspectableContent(
+            content: currentDecoded,
+            baseText: baseDecoded?.text ?? "",
+            visualContent: visualContent,
+            message: message
         )
     }
 
@@ -2414,14 +2497,33 @@ final class RepoViewModel {
         fileHistorySelectedCommit = commit
         do {
             let resolvedPath = fileHistoryPathsByCommitHash[commit.hash] ?? fileHistoryPath
+            let repositoryPath = repositoryFileHistoryPath(resolvedPath)
+
+            if let currentText = await fileHistoryText(atCommit: commit.hash, path: repositoryPath) {
+                let baseText: String
+                if let olderEntry = olderFileHistoryEntry(for: commit) {
+                    let olderPath = repositoryFileHistoryPath(olderEntry.path)
+                    baseText = await fileHistoryText(atCommit: olderEntry.commit.hash, path: olderPath) ?? ""
+                } else {
+                    baseText = ""
+                }
+
+                let parsedDiff = TextDiffEngine.diff(old: baseText, new: currentText)
+                fileHistoryDiff = "__synthetic__"
+                fileHistoryParsedDiff = parsedDiff
+                fileHistoryCurrentText = currentText
+                fileHistoryBaseText = baseText
+                return
+            }
+
             let diff = try await git.fileLogDiff(hash: commit.hash, path: resolvedPath)
             let parsedDiff = DiffParserEngine.parse(diff)
-            let newPath = normalizeFileHistoryPath(parsedDiff.newPath ?? resolvedPath)
-            let oldPath = normalizeFileHistoryPath(parsedDiff.oldPath ?? resolvedPath)
-            let currentText = try? await git.decodedFileContent(atCommit: commit.hash, path: newPath).text
+            let newPath = repositoryFileHistoryPath(parsedDiff.newPath ?? resolvedPath)
+            let currentText = await fileHistoryText(atCommit: commit.hash, path: newPath)
             let baseText: String
-            if let parentHash = commit.parentHashes.first {
-                baseText = (try? await git.decodedFileContent(atCommit: parentHash, path: oldPath).text) ?? ""
+            if let olderEntry = olderFileHistoryEntry(for: commit) {
+                let olderPath = repositoryFileHistoryPath(olderEntry.path)
+                baseText = await fileHistoryText(atCommit: olderEntry.commit.hash, path: olderPath) ?? ""
             } else {
                 baseText = ""
             }
@@ -2451,12 +2553,32 @@ final class RepoViewModel {
         fileHistoryParsedDiff = nil
     }
 
-    private func normalizeFileHistoryPath(_ path: String) -> String {
-        guard !fileHistoryWorkingTreePrefix.isEmpty,
-              path.hasPrefix(fileHistoryWorkingTreePrefix) else {
+    func repositoryFileHistoryPath(_ path: String) -> String {
+        guard !fileHistoryWorkingTreePrefix.isEmpty else { return path }
+        if path.hasPrefix(fileHistoryWorkingTreePrefix) {
             return path
         }
-        return String(path.dropFirst(fileHistoryWorkingTreePrefix.count))
+        if path == fileHistoryPath {
+            return fileHistoryWorkingTreePrefix + path
+        }
+        return path
+    }
+
+    private func fileHistoryText(atCommit hash: String, path: String) async -> String? {
+        (try? await git.decodedFileContentIfExists(atCommit: hash, path: path))?.text
+    }
+
+    private func olderFileHistoryEntry(for commit: CommitInfo) -> (commit: CommitInfo, path: String)? {
+        guard let currentIndex = fileHistoryCommits.firstIndex(where: { $0.hash == commit.hash }) else {
+            return nil
+        }
+        let olderIndex = currentIndex + 1
+        guard fileHistoryCommits.indices.contains(olderIndex) else {
+            return nil
+        }
+        let olderCommit = fileHistoryCommits[olderIndex]
+        let olderPath = fileHistoryPathsByCommitHash[olderCommit.hash] ?? fileHistoryPath
+        return (olderCommit, olderPath)
     }
 
     // MARK: - Hosted Code Review
@@ -4526,6 +4648,9 @@ final class RepoViewModel {
 
     var isCompareMode = false
     var compareBaseHash: String?
+    var compareTargetHash: String?
+    var compareBaseLabel: String?
+    var compareTargetLabel: String?
 
     var scrollToCommitHash: String?
 
@@ -4534,6 +4659,9 @@ final class RepoViewModel {
         invalidateCommittedDiffLoading()
         isCompareMode = true
         compareBaseHash = commit.hash
+        compareTargetHash = nil
+        compareBaseLabel = commit.shortHash
+        compareTargetLabel = "Working Directory"
         selectedCommit = commit
         selectedDiffFile = nil
         fileDiffContent = ""
@@ -4546,12 +4674,52 @@ final class RepoViewModel {
         }
     }
 
+    func performCompareBetweenCommits(base: CommitInfo, target: CommitInfo) async {
+        await performCommitCompare(
+            baseHash: base.hash,
+            targetHash: target.hash,
+            baseLabel: base.shortHash,
+            targetLabel: target.shortHash,
+            selectedCommit: target
+        )
+    }
+
+    private func performCommitCompare(
+        baseHash: String,
+        targetHash: String,
+        baseLabel: String,
+        targetLabel: String,
+        selectedCommit commit: CommitInfo
+    ) async {
+        closeFileInspector()
+        invalidateCommittedDiffLoading()
+        isCompareMode = true
+        compareBaseHash = baseHash
+        compareTargetHash = targetHash
+        compareBaseLabel = baseLabel
+        compareTargetLabel = targetLabel
+        selectedCommit = commit
+        selectedDiffFile = nil
+        fileDiffContent = ""
+        parsedDiff = nil
+        do {
+            diffFiles = await annotateLFSTracking(for: (try await git.compareFileList(from: baseHash, to: targetHash)))
+        } catch {
+            diffFiles = []
+            operationError = "Compare failed: \(error.localizedDescription)"
+        }
+    }
+
     func selectCompareFile(_ file: DiffFile) async {
         guard let baseHash = compareBaseHash else { return }
         selectedDiffFile = file
         currentDiffContext = .committed
         do {
-            fileDiffContent = try await git.compareFileDiff(baseHash, path: file.path)
+            if let targetHash = compareTargetHash {
+                fileDiffContent = try await git.compareFileDiff(from: baseHash, to: targetHash, path: file.path)
+            } else {
+                fileDiffContent = try await git.compareFileDiff(baseHash, path: file.path)
+            }
             parsedDiff = DiffParserEngine.parse(fileDiffContent)
         } catch {
             fileDiffContent = "Failed to load diff"
@@ -4564,6 +4732,9 @@ final class RepoViewModel {
         invalidateCommittedDiffLoading()
         isCompareMode = false
         compareBaseHash = nil
+        compareTargetHash = nil
+        compareBaseLabel = nil
+        compareTargetLabel = nil
         diffFiles = []
         fileDiffContent = ""
         parsedDiff = nil

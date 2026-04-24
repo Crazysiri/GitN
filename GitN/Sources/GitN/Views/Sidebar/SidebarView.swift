@@ -5,6 +5,7 @@ struct SidebarView: View {
 
     private static let animatedSectionItemLimit = 60
     private static let animatedRemoteDisclosureItemLimit = 120
+    private static let fileSearchDebounceNanoseconds: UInt64 = 300_000_000
 
     @State private var showAddRemote = false
     @State private var newRemoteName = ""
@@ -54,6 +55,14 @@ struct SidebarView: View {
     @State private var stashPendingDrop: StashInfo?
     @State private var activeFileTreeEdit: FileTreeEditState?
     @State private var pendingWorkingTreeDelete: PendingWorkingTreeDelete?
+    @State private var fileSearchText = ""
+    @State private var fileSearchSnapshot: WorkingTreeFileTreeBuilder.TreeSnapshot?
+    @State private var fileSearchSnapshotQuery = ""
+    @State private var fileSearchGeneration = 0
+    @State private var fileSearchTask: Task<Void, Never>?
+    @State private var isFileSearchSearching = false
+    @State private var isFileSearchFieldHovered = false
+    @FocusState private var isFileSearchFieldFocused: Bool
 
     private var localBranchesSectionShouldAnimate: Bool {
         viewModel.localBranches.count + (viewModel.isDetachedHead ? 1 : 0) <= Self.animatedSectionItemLimit
@@ -61,6 +70,18 @@ struct SidebarView: View {
 
     private var filesSectionShouldAnimate: Bool {
         viewModel.workingTreeFiles.count <= Self.animatedSectionItemLimit
+    }
+
+    private var trimmedFileSearchText: String {
+        fileSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isFileSearchActive: Bool {
+        !trimmedFileSearchText.isEmpty
+    }
+
+    private var isFileSearchFieldHighlighted: Bool {
+        isFileSearchFieldFocused || isFileSearchFieldHovered
     }
 
     private var remoteSectionShouldAnimate: Bool {
@@ -122,15 +143,33 @@ struct SidebarView: View {
             }
         }
         .onAppear {
+            isFileSearchFieldFocused = false
+            Task { @MainActor in
+                await Task.yield()
+                isFileSearchFieldFocused = false
+            }
             if !viewModel.isSectionCollapsed("files") {
                 Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
             }
         }
         .onChange(of: viewModel.workingTreeFiles) { _, _ in
             collapseNewLoadedFileFolders()
+            if isFileSearchActive {
+                scheduleFileSearch(allowNarrowingExistingResults: false)
+            }
         }
         .onChange(of: viewModel.workingTreeFolderContents) { _, _ in
             collapseNewLoadedFileFolders()
+            if isFileSearchActive {
+                scheduleFileSearch(allowNarrowingExistingResults: false)
+            }
+        }
+        .onChange(of: fileSearchText) { _, _ in
+            scheduleFileSearch(allowNarrowingExistingResults: true)
+        }
+        .onDisappear {
+            fileSearchTask?.cancel()
+            isFileSearchSearching = false
         }
         .background(Color(.controlBackgroundColor).opacity(0.5))
         .sheet(isPresented: $showAddRemote) {
@@ -229,6 +268,71 @@ struct SidebarView: View {
         expandingFileFolders.subtract(loadedFolderPaths)
     }
 
+    private func scheduleFileSearch(allowNarrowingExistingResults: Bool) {
+        fileSearchGeneration += 1
+        let generation = fileSearchGeneration
+        let query = trimmedFileSearchText
+        fileSearchTask?.cancel()
+        isFileSearchSearching = false
+
+        guard !query.isEmpty else {
+            fileSearchSnapshot = nil
+            fileSearchSnapshotQuery = ""
+            return
+        }
+
+        let repositoryPath = viewModel.repoPath
+        let candidateFilePaths: Set<String>?
+        if allowNarrowingExistingResults,
+           !fileSearchSnapshotQuery.isEmpty,
+           query.hasPrefix(fileSearchSnapshotQuery),
+           query != fileSearchSnapshotQuery,
+           let fileSearchSnapshot {
+            candidateFilePaths = fileSearchSnapshot.matchedFilePaths
+        } else {
+            candidateFilePaths = nil
+            fileSearchSnapshot = .empty
+            fileSearchSnapshotQuery = ""
+        }
+
+        fileSearchTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: Self.fileSearchDebounceNanoseconds)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard generation == fileSearchGeneration else { return }
+                isFileSearchSearching = true
+            }
+
+            let searchTask = Task.detached(priority: .utility) {
+                try await WorkingTreeFileTreeBuilder().searchIncrementally(
+                    at: repositoryPath,
+                    query: query,
+                    candidateFilePaths: candidateFilePaths
+                ) { snapshot in
+                    await MainActor.run {
+                        guard generation == fileSearchGeneration else { return }
+                        fileSearchSnapshot = snapshot
+                        fileSearchSnapshotQuery = query
+                    }
+                }
+            }
+            try? await withTaskCancellationHandler {
+                try await searchTask.value
+            } onCancel: {
+                searchTask.cancel()
+            }
+            await MainActor.run {
+                guard generation == fileSearchGeneration else { return }
+                isFileSearchSearching = false
+            }
+        }
+    }
+
     private var addRemoteSheet: some View {
         VStack(spacing: 12) {
             Text("Add Remote")
@@ -283,15 +387,19 @@ struct SidebarView: View {
                 AnyView(filesRootContextMenu)
             }
         ) {
+            let treeNodes = isFileSearchActive ? (fileSearchSnapshot?.rootNodes ?? []) : viewModel.workingTreeFiles
+            let folderContents = isFileSearchActive ? (fileSearchSnapshot?.folderContents ?? [:]) : viewModel.workingTreeFolderContents
+            let collapsedFolders = isFileSearchActive ? [] : collapsedFileFolders
             let flatNodes = flattenWorkingTree(
-                viewModel.workingTreeFiles,
-                folderContents: viewModel.workingTreeFolderContents,
+                treeNodes,
+                folderContents: folderContents,
                 depth: 0,
-                collapsedFolders: collapsedFileFolders
+                collapsedFolders: collapsedFolders
             )
             let listRows = fileTreeRows(from: flatNodes)
+            fileSearchField
             if listRows.isEmpty {
-                Text("No files")
+                Text(isFileSearchActive ? "No matches" : "No files")
                     .font(AppTypography.Sidebar.rowMeta)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 28)
@@ -330,6 +438,67 @@ struct SidebarView: View {
         }
     }
 
+    private var fileSearchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(AppTypography.Sidebar.rowMeta)
+                .foregroundStyle(isFileSearchFieldHighlighted ? .secondary : .tertiary)
+
+            TextField("Search files", text: $fileSearchText)
+                .textFieldStyle(.plain)
+                .font(AppTypography.Sidebar.row)
+                .focused($isFileSearchFieldFocused)
+                .onAppear {
+                    isFileSearchFieldFocused = false
+                    Task { @MainActor in
+                        await Task.yield()
+                        isFileSearchFieldFocused = false
+                    }
+                }
+
+            if isFileSearchSearching {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.65)
+                    .frame(width: 14, height: 14)
+                    .hoverTooltip("Searching")
+            }
+
+            if isFileSearchActive {
+                Button {
+                    fileSearchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(AppTypography.Sidebar.rowMeta)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .hoverTooltip("Clear")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(.textBackgroundColor).opacity(isFileSearchFieldHighlighted ? 0.95 : 0.76))
+        )
+        .animatedInputBorder(
+            isFocused: isFileSearchFieldFocused,
+            cornerRadius: 6,
+            showsBaseBorder: true
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isFileSearchFieldHovered = hovering
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: isFileSearchFieldHighlighted)
+        .padding(.leading, 22)
+        .padding(.trailing, 10)
+        .padding(.vertical, 4)
+    }
+
     @ViewBuilder
     private func fileTreeNodeRow(_ node: FlatWorkingTreeNode) -> some View {
         switch node.kind {
@@ -352,7 +521,7 @@ struct SidebarView: View {
             } else {
                 SidebarFileFolderRow(
                     name: node.displayName,
-                    isCollapsed: collapsedFileFolders.contains(node.relativePath),
+                    isCollapsed: isFileSearchActive ? false : collapsedFileFolders.contains(node.relativePath),
                     depth: node.depth
                 )
                 .contextMenu {
@@ -360,7 +529,9 @@ struct SidebarView: View {
                         .font(AppTypography.Sidebar.contextMenu)
                 }
                 .onTapGesture {
-                    toggleFolder(node.relativePath)
+                    if !isFileSearchActive {
+                        toggleFolder(node.relativePath)
+                    }
                 }
             }
         case .file:
@@ -431,6 +602,10 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func fileLeafContextMenu(_ node: FlatWorkingTreeNode) -> some View {
+        Button("File History") {
+            Task { await viewModel.openFileHistory(path: node.relativePath, context: .unstaged) }
+        }
+        Divider()
         Button("Rename") {
             activeFileTreeEdit = .rename(
                 path: node.relativePath,
@@ -469,6 +644,7 @@ struct SidebarView: View {
     }
 
     private func startCreatingNode(in parentPath: String, isFolder: Bool, depth: Int) {
+        fileSearchText = ""
         if !parentPath.isEmpty {
             collapsedFileFolders.remove(parentPath)
             expandingFileFolders.insert(parentPath)
@@ -563,6 +739,7 @@ struct SidebarView: View {
 
     private func fileTreeRows(from flatNodes: [FlatWorkingTreeNode]) -> [FileTreeListRow] {
         var rows = flatNodes.map(FileTreeListRow.node)
+        guard !isFileSearchActive else { return rows }
 
         switch activeFileTreeEdit {
         case .createFolder(let parentPath, _, let depth):

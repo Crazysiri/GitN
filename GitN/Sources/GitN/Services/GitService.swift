@@ -177,6 +177,14 @@ private func createFallbackSignature() -> UnsafeMutablePointer<git_signature>? {
     return nil
 }
 
+private func openRepositoryDiscoveringFrom(_ path: String) -> OpaquePointer? {
+    var repo: OpaquePointer?
+    guard git_repository_open_ext(&repo, path, 0, nil) == 0 else {
+        return nil
+    }
+    return repo
+}
+
 // MARK: - CommitWalker (on-demand pagination, pull-based)
 
 /// A pull-based commit walker that only reads commits from git_revwalk when
@@ -209,8 +217,7 @@ final class CommitWalker: @unchecked Sendable {
 
         git_libgit2_init()
 
-        var r: OpaquePointer?
-        guard git_repository_open(&r, repoPath) == 0, let r else {
+        guard let r = openRepositoryDiscoveringFrom(repoPath) else {
             git_libgit2_shutdown()
             return nil
         }
@@ -335,8 +342,7 @@ final class CommitWalker: @unchecked Sendable {
     private func decodeChunk(_ oids: [git_oid]) -> [CommitInfo] {
         guard !oids.isEmpty else { return [] }
 
-        var repoHandle: OpaquePointer?
-        guard git_repository_open(&repoHandle, repoPath) == 0, let repoHandle else {
+        guard let repoHandle = openRepositoryDiscoveringFrom(repoPath) else {
             return []
         }
         defer { git_repository_free(repoHandle) }
@@ -466,10 +472,7 @@ actor GitService {
         self.cli = GitCLI(repoPath: repoPath)
         self.lfsSupport = GitLFSSupport(repoPath: repoPath)
         git_libgit2_init()
-        var r: OpaquePointer?
-        if git_repository_open(&r, repoPath) == 0 {
-            self.repo = r
-        }
+        self.repo = openRepositoryDiscoveringFrom(repoPath)
     }
 
     deinit {
@@ -483,8 +486,7 @@ actor GitService {
         invalidateRefMapCache()
         if let repo { git_repository_free(repo) }
 
-        var reopened: OpaquePointer?
-        guard git_repository_open(&reopened, repoPath) == 0 else {
+        guard let reopened = openRepositoryDiscoveringFrom(repoPath) else {
             repo = nil
             return
         }
@@ -2609,12 +2611,25 @@ actor GitService {
     }
 
     // Diff/compare operations kept as CLI (--follow, --numstat not in libgit2)
+    static let emptyTreeHash = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
     func compareWithWorkingDirectory(_ hash: String) async throws -> String {
         try await runGitOutput(["diff", hash])
     }
 
     func compareFileList(_ hash: String) async throws -> [DiffFile] {
         let raw = try await runGitOutput(["diff", "--numstat", hash])
+        return parseCompareFileList(raw)
+    }
+
+    func compareFileList(from baseHash: String, to targetHash: String) async throws -> [DiffFile] {
+        let raw = try await runGitOutput([
+            "diff", "--find-renames", "--find-copies", "--numstat", baseHash, targetHash
+        ])
+        return parseCompareFileList(raw)
+    }
+
+    private func parseCompareFileList(_ raw: String) -> [DiffFile] {
         return raw.split(separator: "\n").compactMap { line in
             let parts = line.split(separator: "\t")
             guard parts.count >= 3 else { return nil }
@@ -2627,6 +2642,12 @@ actor GitService {
 
     func compareFileDiff(_ hash: String, path: String) async throws -> String {
         try await runGitOutput(["diff", hash, "--", path])
+    }
+
+    func compareFileDiff(from baseHash: String, to targetHash: String, path: String) async throws -> String {
+        try await runGitOutput([
+            "diff", "--find-renames", "--find-copies", baseHash, targetHash, "--", path
+        ])
     }
 
     // MARK: - File History (git log --follow, kept as CLI - libgit2 has no --follow)
@@ -2707,7 +2728,32 @@ actor GitService {
 
     /// Get the diff for a specific file at a specific commit
     func fileLogDiff(hash: String, path: String) async throws -> String {
-        try await runGitOutput(["log", "-1", "-p", "--follow", "--format=", hash, "--", path])
+        let followPatch = try await runGitOutput(["log", "-1", "-p", "--follow", "--format=", hash, "--", path])
+        guard shouldFallbackFileLogDiff(from: followPatch) else {
+            return followPatch
+        }
+        return try await runGitOutput([
+            "show",
+            "--find-renames",
+            "--find-copies",
+            "--format=",
+            hash,
+            "--",
+            path
+        ])
+    }
+
+    private func shouldFallbackFileLogDiff(from output: String) -> Bool {
+        guard !output.isEmpty else { return true }
+        if output.contains("@@") {
+            return false
+        }
+        let hasRenameOrCopyMetadata =
+            output.contains("rename from ") ||
+            output.contains("rename to ") ||
+            output.contains("copy from ") ||
+            output.contains("copy to ")
+        return hasRenameOrCopyMetadata
     }
 
     private static func normalizeLogPath(_ rawPath: String, prefix: String) -> String {
@@ -3847,6 +3893,13 @@ actor GitService {
     func decodedFileContent(atCommit hash: String, path: String) throws -> DecodedFileContent {
         guard let data = try rawFileData(atCommit: hash, path: path) else {
             return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+        return decodeResolvedFileData(data, path: path)
+    }
+
+    func decodedFileContentIfExists(atCommit hash: String, path: String) throws -> DecodedFileContent? {
+        guard let data = try rawFileData(atCommit: hash, path: path) else {
+            return nil
         }
         return decodeResolvedFileData(data, path: path)
     }

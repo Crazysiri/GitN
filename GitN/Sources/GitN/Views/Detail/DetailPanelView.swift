@@ -716,7 +716,7 @@ struct DetailPanelView: View {
             HStack {
                 Image(systemName: "arrow.left.arrow.right")
                     .foregroundStyle(.purple)
-                Text("Comparing commit against working directory")
+                Text("Comparing commits")
                     .font(AppTypography.Detail.messageTitle)
                 Spacer()
                 Button("Done") {
@@ -728,7 +728,7 @@ struct DetailPanelView: View {
 
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(commit.shortHash)
+                    Text(viewModel.compareBaseLabel ?? commit.shortHash)
                         .font(AppTypography.Detail.mono)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -736,14 +736,14 @@ struct DetailPanelView: View {
                             RoundedRectangle(cornerRadius: 3)
                                 .fill(Color.purple.opacity(0.15))
                         )
-                    Text(commit.message)
+                    Text("Base")
                         .font(AppTypography.Detail.meta)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Image(systemName: "arrow.right")
                     .foregroundStyle(.secondary)
-                Text("Working Directory")
+                Text(viewModel.compareTargetLabel ?? "Target")
                     .font(AppTypography.Detail.metaStrong)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
