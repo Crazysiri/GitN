@@ -290,7 +290,13 @@ enum ThreeWayConflictResolver {
             return insertionIndex..<insertionIndex
         }
 
-        if let start = nextSubsequenceStart(for: needle, in: haystack, startingAt: cursor) {
+        if let start = bestSubsequenceStart(
+            for: needle,
+            in: haystack,
+            preferred: cursor,
+            beforeContext: beforeContext,
+            afterContext: afterContext
+        ) {
             let end = start + needle.count
             cursor = end
             return start..<end
@@ -435,21 +441,92 @@ enum ThreeWayConflictResolver {
         return lines[start...].firstIndex(of: line)
     }
 
-    private static func nextSubsequenceStart(
+    private static func allSubsequenceStarts(
         for needle: [String],
-        in haystack: [String],
-        startingAt start: Int
-    ) -> Int? {
-        if needle.isEmpty { return start }
-        guard start < haystack.count, needle.count <= haystack.count else { return nil }
+        in haystack: [String]
+    ) -> [Int] {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return [] }
+
         let lastStart = haystack.count - needle.count
-        guard start <= lastStart else { return nil }
-        for candidate in start...lastStart {
-            if Array(haystack[candidate..<(candidate + needle.count)]) == needle {
-                return candidate
+        guard lastStart >= 0 else { return [] }
+
+        var matches: [Int] = []
+        matches.reserveCapacity(4)
+        for candidate in 0...lastStart {
+            if haystack[candidate..<(candidate + needle.count)].elementsEqual(needle) {
+                matches.append(candidate)
             }
         }
-        return nil
+        return matches
+    }
+
+    private static func bestSubsequenceStart(
+        for needle: [String],
+        in haystack: [String],
+        preferred: Int,
+        beforeContext: String?,
+        afterContext: String?
+    ) -> Int? {
+        let candidates = allSubsequenceStarts(for: needle, in: haystack)
+        guard !candidates.isEmpty else { return nil }
+
+        let boundedPreferred = min(max(preferred, 0), haystack.count)
+
+        return candidates.min { lhs, rhs in
+            let lhsScore = subsequenceContextScore(
+                start: lhs,
+                length: needle.count,
+                in: haystack,
+                beforeContext: beforeContext,
+                afterContext: afterContext
+            )
+            let rhsScore = subsequenceContextScore(
+                start: rhs,
+                length: needle.count,
+                in: haystack,
+                beforeContext: beforeContext,
+                afterContext: afterContext
+            )
+
+            if lhsScore != rhsScore {
+                return lhsScore > rhsScore
+            }
+
+            let lhsForwardBias = lhs >= boundedPreferred ? 0 : 1
+            let rhsForwardBias = rhs >= boundedPreferred ? 0 : 1
+            if lhsForwardBias != rhsForwardBias {
+                return lhsForwardBias < rhsForwardBias
+            }
+
+            let lhsDistance = abs(lhs - boundedPreferred)
+            let rhsDistance = abs(rhs - boundedPreferred)
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+
+            return lhs < rhs
+        }
+    }
+
+    private static func subsequenceContextScore(
+        start: Int,
+        length: Int,
+        in lines: [String],
+        beforeContext: String?,
+        afterContext: String?
+    ) -> Int {
+        let end = start + length
+        var score = 0
+
+        if let beforeContext, start > 0, lines[start - 1] == beforeContext {
+            score += 1
+        }
+
+        if let afterContext, end < lines.count, lines[end] == afterContext {
+            score += 1
+        }
+
+        return score
     }
 
     private static func libgit2ErrorMessage(prefix: String, code: Int32) -> String {

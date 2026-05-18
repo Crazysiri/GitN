@@ -334,7 +334,6 @@ struct FileInspectorOverlayView: View {
         .labelsHidden()
         .pickerStyle(.segmented)
         .controlSize(.small)
-        .scaleEffect(0.92)
         .frame(width: 270)
     }
 

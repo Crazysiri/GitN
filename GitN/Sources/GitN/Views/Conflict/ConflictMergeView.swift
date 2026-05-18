@@ -77,63 +77,6 @@ private enum ConflictScrollSync {
     }
 }
 
-private struct SideDisplayLayout {
-    struct Row {
-        let sourceLineIndex: Int?
-    }
-
-    let rows: [Row]
-    let regionDisplayRanges: [Range<Int>]
-
-    var anchors: [Int] {
-        regionDisplayRanges.map(\.lowerBound)
-    }
-
-    static func make(lines: [String], conflictRegions: [ConflictRegion], side: ConflictSide) -> SideDisplayLayout {
-        let emptyRegions = conflictRegions.enumerated().filter { (_, region) in
-            let range = side == .ours ? region.oursRange : region.theirsRange
-            return range.isEmpty
-        }
-
-        let emptyRegionsByGap = Dictionary(grouping: emptyRegions, by: { element in
-            let region = element.element
-            let range = side == .ours ? region.oursRange : region.theirsRange
-            return range.lowerBound
-        })
-
-        var rows: [Row] = []
-        var sourceLineToDisplayLine: [Int] = Array(repeating: 0, count: lines.count)
-        var emptyRegionDisplayStarts: [Int: Int] = [:]
-
-        for gap in 0...lines.count {
-            if let gapRegions = emptyRegionsByGap[gap]?.sorted(by: { lhs, rhs in lhs.offset < rhs.offset }) {
-                for gapRegion in gapRegions {
-                    emptyRegionDisplayStarts[gapRegion.offset] = rows.count
-                    rows.append(Row(sourceLineIndex: nil))
-                }
-            }
-
-            guard gap < lines.count else { continue }
-            sourceLineToDisplayLine[gap] = rows.count
-            rows.append(Row(sourceLineIndex: gap))
-        }
-
-        let regionDisplayRanges = conflictRegions.enumerated().map { index, region -> Range<Int> in
-            let sourceRange = side == .ours ? region.oursRange : region.theirsRange
-            if sourceRange.isEmpty {
-                let start = emptyRegionDisplayStarts[index] ?? min(sourceRange.lowerBound, rows.count)
-                return start..<(start + 1)
-            }
-
-            let start = sourceLineToDisplayLine[sourceRange.lowerBound]
-            let end = sourceLineToDisplayLine[sourceRange.upperBound - 1] + 1
-            return start..<end
-        }
-
-        return SideDisplayLayout(rows: rows, regionDisplayRanges: regionDisplayRanges)
-    }
-}
-
 struct ConflictMergeView: View {
     let viewModel: RepoViewModel
     @State private var currentConflictIndex = 0
@@ -352,6 +295,7 @@ struct ConflictMergeView: View {
                     get: { viewModel.conflictOutputText },
                     set: { viewModel.updateConflictOutputText($0) }
                 ),
+                textRevision: viewModel.conflictOutputExternalRevision,
                 blocks: document?.blocks ?? [],
                 lineOrigins: document?.outputLineOrigins ?? [],
                 currentBlockID: currentBlock?.id,
@@ -524,7 +468,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let contentView = scrollView.documentView as? SideCodeContentView else { return }
 
-        contentView.configure(
+        let contentChanged = contentView.configure(
             lines: lines, conflictRegions: conflictRegions, side: side,
             highlightColor: highlightColor, regionChoices: regionChoices,
             onToggleRegion: onToggleRegion,
@@ -534,8 +478,14 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         let lineH = SideCodeContentView.lineHeight
         let contentHeight = CGFloat(contentView.displayLineCount) * lineH + 16
         let contentWidth = max(scrollView.bounds.width, contentView.cachedEstimatedWidth)
-        contentView.frame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
-        contentView.needsDisplay = true
+        let targetFrame = NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight)
+        let frameChanged = contentView.frame != targetFrame
+        if frameChanged {
+            contentView.frame = targetFrame
+        }
+        if contentChanged || frameChanged {
+            contentView.needsDisplay = true
+        }
 
         if !context.coordinator.isScrolling {
             let cur = scrollView.contentView.bounds.origin
@@ -606,6 +556,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
 
 struct ConflictOutputEditorView: NSViewRepresentable {
     @Binding var text: String
+    let textRevision: Int
     let blocks: [ConflictEditorBlock]
     let lineOrigins: [ConflictEditorDocument.OutputLineOrigin]
     let currentBlockID: Int?
@@ -690,7 +641,8 @@ struct ConflictOutputEditorView: NSViewRepresentable {
         )
         textView.onSave = onSave
 
-        if !context.coordinator.isUpdating, textView.string != text {
+        if !context.coordinator.isUpdating,
+           context.coordinator.lastAppliedTextRevision != textRevision {
             let selection = textView.selectedRange()
             context.coordinator.isUpdating = true
             textView.textStorage?.setAttributedString(
@@ -698,6 +650,7 @@ struct ConflictOutputEditorView: NSViewRepresentable {
             )
             textView.setSelectedRange(selection)
             textView.typingAttributes = Self.baseAttributes(font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular))
+            context.coordinator.lastAppliedTextRevision = textRevision
             context.coordinator.isUpdating = false
         }
 
@@ -828,6 +781,7 @@ struct ConflictOutputEditorView: NSViewRepresentable {
         var isUpdating = false
         var isSyncing = false
         var isScrolling = false
+        var lastAppliedTextRevision = -1
         var lastAppliedScrollRequestID = -1
         var lastAnchorSignature: [Int] = []
         var pendingViewportRebase = false
@@ -1411,30 +1365,63 @@ final class SideCodeContentView: NSView {
     private var regionChoices: [Int: RepoViewModel.RegionChoice] = [:]
     private var onToggleRegion: ((Int) -> Void)?
     private var syntaxLanguage: CodeSyntaxHighlighter.Language = .unknown
+    private var cachedContentLines: [Int: NSAttributedString] = [:]
+    private var displayLineToRegionIndex: [Int?] = []
     private(set) var cachedEstimatedWidth: CGFloat = 400
     var displayLineCount: Int { displayLayout.rows.count }
     var displayAnchors: [Int] { displayLayout.anchors }
 
     override var isFlipped: Bool { true }
 
+    private static func tabParagraphStyle(for font: NSFont) -> NSParagraphStyle {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byClipping
+
+        let spaceAdvance = max(font.advancement(forGlyph: font.glyph(withName: "space")).width, 7)
+        let tabWidth = spaceAdvance * 4
+        paragraphStyle.defaultTabInterval = tabWidth
+        paragraphStyle.tabStops = (1...32).map { index in
+            NSTextTab(textAlignment: .left, location: CGFloat(index) * tabWidth, options: [:])
+        }
+        return paragraphStyle
+    }
+
     func configure(
         lines: [String], conflictRegions: [ConflictRegion], side: ConflictSide,
         highlightColor: NSColor, regionChoices: [Int: RepoViewModel.RegionChoice],
         onToggleRegion: @escaping (Int) -> Void,
         filePath: String = ""
-    ) {
-        if lines.count != self.lines.count {
+    ) -> Bool {
+        let language = CodeSyntaxHighlighter.language(for: filePath)
+        let linesChanged = lines != self.lines
+        let sideChanged = side != self.side
+        let regionsChanged = conflictRegions != self.conflictRegions
+        let languageChanged = language != self.syntaxLanguage
+        let highlightChanged = highlightColor != self.highlightColor
+        let choicesChanged = regionChoices != self.regionChoices
+
+        if linesChanged {
             let maxLen = lines.reduce(0) { max($0, $1.count) }
             cachedEstimatedWidth = CGFloat(maxLen) * 8.4 + 80
         }
+
         self.lines = lines
         self.conflictRegions = conflictRegions
-        self.displayLayout = SideDisplayLayout.make(lines: lines, conflictRegions: conflictRegions, side: side)
+        if linesChanged || sideChanged || regionsChanged {
+            self.displayLayout = SideDisplayLayout.make(lines: lines, conflictRegions: conflictRegions, side: side)
+            rebuildDisplayLineRegionIndex()
+        }
         self.side = side
         self.highlightColor = highlightColor
         self.regionChoices = regionChoices
         self.onToggleRegion = onToggleRegion
-        self.syntaxLanguage = CodeSyntaxHighlighter.language(for: filePath)
+        self.syntaxLanguage = language
+
+        if linesChanged || languageChanged {
+            cachedContentLines.removeAll(keepingCapacity: true)
+        }
+
+        return linesChanged || sideChanged || regionsChanged || languageChanged || highlightChanged || choicesChanged
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1443,6 +1430,7 @@ final class SideCodeContentView: NSView {
 
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let lineNumFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let contentParagraphStyle = Self.tabParagraphStyle(for: font)
         let lineH = Self.lineHeight
         let lnW = Self.lineNumWidth
 
@@ -1514,13 +1502,21 @@ final class SideCodeContentView: NSView {
             let numSz = numStr.size()
             numStr.draw(at: NSPoint(x: lnW - numSz.width - 4, y: y + (lineH - numSz.height) / 2))
 
-            // Content text (with syntax highlighting)
+            // Content text is cached by source line to avoid re-highlighting on every draw pass.
             let sourceIndex = displayLayout.rows[i].sourceLineIndex
-            let text = sourceIndex.flatMap { lines[$0].isEmpty ? " " : lines[$0] } ?? " "
-            let textX: CGFloat = lnW + 8 + (isConflict ? 20 : 0)
-            let contentStr = CodeSyntaxHighlighter.highlight(text, language: syntaxLanguage, font: font)
-            let textSz = contentStr.size()
-            contentStr.draw(at: NSPoint(x: textX, y: y + (lineH - textSz.height) / 2))
+            let textX: CGFloat = lnW + 8
+            let contentStr = cachedContentLine(
+                for: sourceIndex,
+                font: font,
+                paragraphStyle: contentParagraphStyle
+            )
+            let contentRect = NSRect(
+                x: textX,
+                y: y + 1,
+                width: max(bounds.width - textX - 8, 40),
+                height: lineH
+            )
+            contentStr.draw(with: contentRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
         }
     }
 
@@ -1536,14 +1532,49 @@ final class SideCodeContentView: NSView {
     }
 
     private func conflictRegionIndex(forDisplayLine lineIdx: Int) -> Int? {
-        for (i, range) in displayLayout.regionDisplayRanges.enumerated() {
-            if range.contains(lineIdx) { return i }
-        }
-        return nil
+        guard lineIdx >= 0, lineIdx < displayLineToRegionIndex.count else { return nil }
+        return displayLineToRegionIndex[lineIdx]
     }
 
     private func isFirstLineOfRegion(_ lineIdx: Int, _ regionIdx: Int) -> Bool {
         displayLayout.regionDisplayRanges[regionIdx].lowerBound == lineIdx
+    }
+
+    private func rebuildDisplayLineRegionIndex() {
+        displayLineToRegionIndex = Array(repeating: nil, count: displayLayout.rows.count)
+        for (regionIndex, range) in displayLayout.regionDisplayRanges.enumerated() {
+            for lineIndex in range {
+                guard lineIndex < displayLineToRegionIndex.count else { continue }
+                displayLineToRegionIndex[lineIndex] = regionIndex
+            }
+        }
+    }
+
+    private func cachedContentLine(
+        for sourceIndex: Int?,
+        font: NSFont,
+        paragraphStyle: NSParagraphStyle
+    ) -> NSAttributedString {
+        guard let sourceIndex else {
+            return NSAttributedString(string: " ", attributes: [.font: font, .paragraphStyle: paragraphStyle])
+        }
+
+        if let cached = cachedContentLines[sourceIndex] {
+            return cached
+        }
+
+        let text = lines[sourceIndex].isEmpty ? " " : lines[sourceIndex]
+        let contentStr = NSMutableAttributedString(
+            attributedString: CodeSyntaxHighlighter.highlight(text, language: syntaxLanguage, font: font)
+        )
+        contentStr.addAttribute(
+            .paragraphStyle,
+            value: paragraphStyle,
+            range: NSRange(location: 0, length: contentStr.length)
+        )
+        let frozen = NSAttributedString(attributedString: contentStr)
+        cachedContentLines[sourceIndex] = frozen
+        return frozen
     }
 }
 

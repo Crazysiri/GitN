@@ -5,7 +5,7 @@ struct SidebarView: View {
 
     private static let animatedSectionItemLimit = 60
     private static let animatedRemoteDisclosureItemLimit = 120
-    private static let fileSearchDebounceNanoseconds: UInt64 = 300_000_000
+    private static let fileSearchDebounceNanoseconds: UInt64 = 120_000_000
 
     @State private var showAddRemote = false
     @State private var newRemoteName = ""
@@ -149,7 +149,10 @@ struct SidebarView: View {
                 isFileSearchFieldFocused = false
             }
             if !viewModel.isSectionCollapsed("files") {
-                Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
+                Task {
+                    await viewModel.loadWorkingTreeFilesRootIfNeeded()
+                    await viewModel.prewarmWorkingTreeFileSearchIndex()
+                }
             }
         }
         .onChange(of: viewModel.workingTreeFiles) { _, _ in
@@ -309,16 +312,15 @@ struct SidebarView: View {
             }
 
             let searchTask = Task.detached(priority: .utility) {
-                try await WorkingTreeFileTreeBuilder().searchIncrementally(
-                    at: repositoryPath,
+                let snapshot = try await WorkingTreeFileSearchIndex.shared.search(
+                    repositoryPath: repositoryPath,
                     query: query,
                     candidateFilePaths: candidateFilePaths
-                ) { snapshot in
-                    await MainActor.run {
-                        guard generation == fileSearchGeneration else { return }
-                        fileSearchSnapshot = snapshot
-                        fileSearchSnapshotQuery = query
-                    }
+                )
+                await MainActor.run {
+                    guard generation == fileSearchGeneration else { return }
+                    fileSearchSnapshot = snapshot
+                    fileSearchSnapshotQuery = query
                 }
             }
             try? await withTaskCancellationHandler {
@@ -379,7 +381,10 @@ struct SidebarView: View {
                 let wasCollapsed = viewModel.isSectionCollapsed("files")
                 viewModel.toggleSection("files")
                 if wasCollapsed {
-                    Task { await viewModel.loadWorkingTreeFilesRootIfNeeded() }
+                    Task {
+                        await viewModel.loadWorkingTreeFilesRootIfNeeded()
+                        await viewModel.prewarmWorkingTreeFileSearchIndex()
+                    }
                 }
             },
             animateCollapse: filesSectionShouldAnimate,

@@ -97,6 +97,29 @@ struct RepoContainerView: View {
                 .padding(32)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             }
+
+            if !viewModel.showConflictMergeView,
+               let loadingPath = viewModel.conflictMergeLoadingPath {
+                Color.black.opacity(0.18)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.regular)
+                    Text("Loading conflict...")
+                        .font(.system(size: 13, weight: .medium))
+                    Text(loadingPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 480)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 18)
+                .background(ChromePalette.panelMutedBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
         }
         .environment(\.hoverTooltipHostActive, isActive)
         .onAppear {

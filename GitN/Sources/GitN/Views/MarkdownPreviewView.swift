@@ -34,6 +34,35 @@ enum MarkdownPreviewFence {
     }
 }
 
+enum MarkdownCodeBlockCapabilities {
+    static func shouldUseSyntaxHighlighting(
+        _ fenceInfo: String?,
+        isHighlightingAvailable: Bool
+    ) -> Bool {
+        MarkdownPreviewFence.shouldSyntaxHighlight(fenceInfo) && isHighlightingAvailable
+    }
+}
+
+enum MarkdownPreviewPerformance {
+    static let richPreviewCharacterLimit = 12_000
+    static let richPreviewLineLimit = 320
+
+    static func shouldUseRichPreview(for text: String) -> Bool {
+        let utf16Length = (text as NSString).length
+        guard utf16Length <= richPreviewCharacterLimit else { return false }
+        return lineCount(for: text) <= richPreviewLineLimit
+    }
+
+    static func lineCount(for text: String) -> Int {
+        guard !text.isEmpty else { return 0 }
+        return text.reduce(into: 1) { count, character in
+            if character == "\n" {
+                count += 1
+            }
+        }
+    }
+}
+
 enum MermaidSourceHeuristics {
     static func isFlowchart(_ source: String) -> Bool {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -197,6 +226,15 @@ private struct MarkdownDocumentView: View {
     }
 }
 
+private struct PlainMarkdownDocumentView: View {
+    let text: String
+
+    var body: some View {
+        MarkdownPlainTextView(text: text)
+            .background(MarkdownCodeBlockColors.pageBackground)
+    }
+}
+
 private struct MarkdownCodeBlockView: View {
     let configuration: CodeBlockConfiguration
 
@@ -204,7 +242,10 @@ private struct MarkdownCodeBlockView: View {
         Group {
             if MarkdownPreviewFence.isMermaid(configuration.language) {
                 MermaidCodeBlockView(source: configuration.content)
-            } else if MarkdownPreviewFence.shouldSyntaxHighlight(configuration.language) {
+            } else if MarkdownCodeBlockCapabilities.shouldUseSyntaxHighlighting(
+                configuration.language,
+                isHighlightingAvailable: GitNResources.highlightScriptURL != nil
+            ) {
                 SyntaxHighlightedCodeBlockView(
                     content: configuration.content,
                     language: MarkdownPreviewFence.normalizedLanguage(configuration.language)
@@ -1269,6 +1310,41 @@ struct MarkdownEditorView: NSViewRepresentable {
     }
 }
 
+private struct MarkdownPlainTextView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? NSTextView else {
+            return scrollView
+        }
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = false
+        textView.backgroundColor = EditorColors.background
+        textView.drawsBackground = true
+        textView.textContainerInset = NSSize(width: 24, height: 24)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.font = NSFont.systemFont(ofSize: 13)
+        textView.textColor = EditorColors.text
+
+        scrollView.backgroundColor = EditorColors.background
+        scrollView.drawsBackground = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = true
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        guard let textView = nsView.documentView as? NSTextView,
+              textView.string != text else { return }
+        textView.string = text
+    }
+}
+
 // MARK: - Top-level preview / edit window view
 
 struct MarkdownPreviewView: View {
@@ -1288,12 +1364,18 @@ struct MarkdownPreviewView: View {
             Divider()
             if isEditing {
                 MarkdownEditorView(text: $content)
-            } else {
+            } else if usesRichPreview {
                 MarkdownDocumentView(text: content)
+            } else {
+                PlainMarkdownDocumentView(text: content)
             }
         }
         .frame(minWidth: 680, minHeight: 500)
         .preferredColorScheme(theme.preferredColorScheme)
+    }
+
+    private var usesRichPreview: Bool {
+        MarkdownPreviewPerformance.shouldUseRichPreview(for: content)
     }
 
     private var toolbar: some View {
@@ -1306,6 +1388,11 @@ struct MarkdownPreviewView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
+            if !isEditing && !usesRichPreview {
+                Text("Large file")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
             Picker("", selection: $isEditing) {
                 Label("Preview", systemImage: "eye").tag(false)
                 Label("Edit", systemImage: "pencil").tag(true)
@@ -1334,8 +1421,10 @@ struct MarkdownInspectorContentView: View {
 
             if isEditing && isEditable {
                 MarkdownEditorView(text: $text)
-            } else {
+            } else if usesRichPreview {
                 MarkdownDocumentView(text: text)
+            } else {
+                PlainMarkdownDocumentView(text: text)
             }
         }
         .onChange(of: isEditable) { _, editable in
@@ -1346,8 +1435,17 @@ struct MarkdownInspectorContentView: View {
         .preferredColorScheme(theme.preferredColorScheme)
     }
 
+    private var usesRichPreview: Bool {
+        MarkdownPreviewPerformance.shouldUseRichPreview(for: text)
+    }
+
     private var toolbar: some View {
         HStack(spacing: 12) {
+            if !isEditing && !usesRichPreview {
+                Text("Large Markdown shown as plain text")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
 
             if isEditable {

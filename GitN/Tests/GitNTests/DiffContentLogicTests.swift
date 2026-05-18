@@ -66,26 +66,29 @@ final class DiffContentLogicTests: XCTestCase {
             "committed markdown file must not be editable")
     }
 
-    func testMarkdownFileRequestedInDiffModeDefaultsInspectorToPreview() async throws {
+    func testMarkdownFileRequestedInDiffModeKeepsInspectorInDiff() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("README.md", contents: "# Hello\n\nThis is a test.\n")
         try repo.commitAll(message: "add readme")
+        try repo.writeFile("README.md", contents: "# Hello\n\nThis is a test.\n\nUpdated.\n")
+        try repo.commitAll(message: "update readme")
 
         let viewModel = RepoViewModel(path: repo.path, name: "repo")
         await viewModel.loadAll()
 
-        let commit = try XCTUnwrap(viewModel.commits.first(where: { $0.message == "add readme" }))
+        let commit = try XCTUnwrap(viewModel.commits.first(where: { $0.message == "update readme" }))
         await viewModel.selectCommit(commit)
 
         let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "README.md" }))
         await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
 
-        XCTAssertEqual(viewModel.fileInspectorMode, .preview,
-            "Markdown files should default to preview mode even when diff is the caller's default")
-        XCTAssertTrue(viewModel.fileInspectorPath.isMarkdownFile,
-            "the mode override should only apply to markdown files")
-        XCTAssertTrue(viewModel.fileInspectorContent.contains("# Hello"),
-            "Markdown preview still needs the loaded source content")
+        XCTAssertEqual(viewModel.fileInspectorMode, .diff,
+            "Markdown files opened from a diff entry should stay in diff mode so the patch is visible")
+        XCTAssertTrue(viewModel.fileInspectorPath.isMarkdownFile)
+        XCTAssertFalse(viewModel.fileDiffContent.isEmpty,
+            "the committed markdown diff should be loaded into the inspector flow")
+        XCTAssertNotNil(viewModel.parsedDiff,
+            "markdown files opened from diff mode should produce parsed diff hunks when the commit changed the file")
     }
 
     func testMarkdownFilesResolveToMarkdownLanguage() {

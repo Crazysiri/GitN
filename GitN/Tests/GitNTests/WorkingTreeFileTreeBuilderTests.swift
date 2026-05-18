@@ -49,6 +49,17 @@ final class WorkingTreeFileTreeBuilderTests: XCTestCase {
         XCTAssertEqual(snapshot.expandedFolderPaths, ["Sources", "Sources/App", "Sources/App/Deep"])
     }
 
+    func testTreeSnapshotBuildsAncestorFoldersFromMatchedFilePaths() {
+        let snapshot = WorkingTreeFileTreeBuilder().treeSnapshot(
+            matchingFilePaths: ["Sources/App/Deep/ViewModel.swift", "README.md"]
+        )
+
+        XCTAssertEqual(snapshot.rootNodes.map(\.relativePath), ["Sources", "README.md"])
+        XCTAssertEqual(snapshot.folderContents["Sources"]?.map(\.relativePath), ["Sources/App"])
+        XCTAssertEqual(snapshot.folderContents["Sources/App"]?.map(\.relativePath), ["Sources/App/Deep"])
+        XCTAssertEqual(snapshot.folderContents["Sources/App/Deep"]?.map(\.relativePath), ["Sources/App/Deep/ViewModel.swift"])
+    }
+
     func testSearchMatchesFileNamesCaseInsensitively() throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("Sources/App/SettingsView.swift", contents: "struct SettingsView {}\n")

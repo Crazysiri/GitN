@@ -1208,6 +1208,34 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.scrollToCommitHash, initialHash)
     }
 
+    func testScrollToCommitForBranchLoadsOlderCommitWhenNotInInitialPage() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "one\n")
+        let initialHash = try repo.commitAll(
+            message: "initial",
+            environment: gitDateEnv("2026-01-01T00:00:00Z")
+        )
+        try repo.run(["branch", "feature", initialHash])
+        try repo.appendFile("tracked.txt", contents: "two\n")
+        _ = try repo.commitAll(
+            message: "second",
+            environment: gitDateEnv("2026-01-02T00:00:00Z")
+        )
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+
+        XCTAssertEqual(viewModel.commits.count, 1)
+        XCTAssertFalse(viewModel.commits.contains(where: { $0.hash == initialHash }))
+
+        let branch = try XCTUnwrap(viewModel.localBranches.first(where: { $0.name == "feature" }))
+
+        await viewModel.scrollToCommitForBranch(branch)
+
+        XCTAssertEqual(viewModel.selectedCommit?.hash, initialHash)
+        XCTAssertEqual(viewModel.scrollToCommitHash, initialHash)
+    }
+
     func testRefreshAfterActivationReloadsCommitsCreatedWhileInactive() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("tracked.txt", contents: "one\n")
@@ -1226,6 +1254,69 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertTrue(viewModel.commits.contains(where: { $0.hash == secondHash && $0.message == "second" }))
         let refOwner = try XCTUnwrap(viewModel.commits.first(where: { $0.refs.contains(where: { $0.contains("main") }) }))
         XCTAssertEqual(refOwner.hash, secondHash)
+    }
+
+    func testRefreshAfterWorkingTreeMutationPromotesToFullReloadWhenExternalCheckoutChangesBranch() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "base\n")
+        _ = try repo.commitAll(
+            message: "main",
+            environment: gitDateEnv("2026-01-01T00:00:00Z")
+        )
+
+        try repo.run(["checkout", "-b", "feature"])
+        try repo.writeFile("tracked.txt", contents: "feature\n")
+        let featureHash = try repo.commitAll(
+            message: "feature",
+            environment: gitDateEnv("2026-01-02T00:00:00Z")
+        )
+        try repo.run(["checkout", "main"])
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo", commitPageSize: 1)
+        await viewModel.loadAll()
+
+        XCTAssertEqual(viewModel.currentBranch, "main")
+        XCTAssertEqual(viewModel.localBranches.first(where: { $0.isCurrent })?.name, "main")
+
+        try repo.run(["checkout", "feature"])
+
+        await viewModel.refreshAfterWorkingTreeMutation()
+
+        XCTAssertEqual(viewModel.currentBranch, "feature")
+        XCTAssertEqual(viewModel.localBranches.first(where: { $0.isCurrent })?.name, "feature")
+        XCTAssertEqual(viewModel.headCommitHash, featureHash)
+        XCTAssertTrue(viewModel.commits.contains(where: { $0.hash == featureHash }))
+    }
+
+    func testRefreshAfterWorkingTreeMutationInvalidatesSidebarFileSearchIndex() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("Sources/App/LoginView.swift", contents: "struct LoginView {}\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await WorkingTreeFileSearchIndex.shared.invalidate(repositoryPath: repo.path)
+
+        let initial = try await WorkingTreeFileSearchIndex.shared.search(
+            repositoryPath: repo.path,
+            query: "Login"
+        )
+        XCTAssertEqual(initial.matchedFilePaths, ["Sources/App/LoginView.swift"])
+
+        try repo.writeFile("Sources/App/SignupView.swift", contents: "struct SignupView {}\n")
+        try FileManager.default.removeItem(at: repo.url.appendingPathComponent("Sources/App/LoginView.swift"))
+
+        await viewModel.refreshAfterWorkingTreeMutation()
+
+        let refreshed = try await WorkingTreeFileSearchIndex.shared.search(
+            repositoryPath: repo.path,
+            query: "Signup"
+        )
+        let stale = try await WorkingTreeFileSearchIndex.shared.search(
+            repositoryPath: repo.path,
+            query: "Login"
+        )
+
+        XCTAssertEqual(refreshed.matchedFilePaths, ["Sources/App/SignupView.swift"])
+        XCTAssertTrue(stale.matchedFilePaths.isEmpty)
     }
 
     func testPerformCompareWithWorkingDirectoryLoadsChangesAfterSelectedCommitAndExitClearsState() async throws {

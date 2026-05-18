@@ -105,6 +105,27 @@ enum GitNResources {
         ])
     }
 
+    static var highlightScriptURL: URL? {
+        if let directURL = firstExistingFileURL([
+            Bundle.main.bundleURL
+                .appendingPathComponent("HighlightSwift_HighlightSwift.bundle", isDirectory: true)
+                .appendingPathComponent("highlight.min.js"),
+            Bundle.main.resourceURL?
+                .appendingPathComponent("HighlightSwift_HighlightSwift.bundle", isDirectory: true)
+                .appendingPathComponent("highlight.min.js"),
+        ]) {
+            return directURL
+        }
+
+        for bundle in appResourceBundles {
+            if let url = bundle.url(forResource: "highlight.min", withExtension: "js") {
+                return url
+            }
+        }
+
+        return nil
+    }
+
     static var monacoIndexURL: URL? {
         if let directURL = firstExistingFileURL([
             Bundle.main.resourceURL?

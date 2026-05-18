@@ -148,6 +148,7 @@ final class RepoViewModel {
     private let git: GitService
     private let reflogLoader: RepoReflogLoader
     private let workingTreeFileOperations: WorkingTreeFileOperations
+    private let workingTreeFileSearchIndex: WorkingTreeFileSearchIndex
 
     var localBranches: [BranchInfo] = []
     var remoteBranches: [BranchInfo] = []
@@ -240,7 +241,13 @@ final class RepoViewModel {
             return short
         }
 
-        return commits.first(where: { $0.hash == hash || $0.hash.hasPrefix(hash) || hash.hasPrefix($0.hash) })
+        return nil
+    }
+
+    private func resolveCommitNavigationHash(_ hash: String) async -> String? {
+        guard loadedCommit(matching: hash) == nil else { return hash }
+        guard hash.count < 40 else { return nil }
+        return try? await git.resolveCommitHash(hash)
     }
 
     // MARK: - Pagination (pull-based via CommitWalker)
@@ -613,10 +620,7 @@ final class RepoViewModel {
         for path: String,
         preferredMode: FileInspectorMode
     ) -> FileInspectorMode {
-        guard preferredMode == .diff, path.isMarkdownFile else {
-            return preferredMode
-        }
-        return .preview
+        preferredMode
     }
 
     func openFilePreview(path: String, context: DiffContext = .committed) async {
@@ -1115,6 +1119,7 @@ final class RepoViewModel {
     func loadWorkingTreeFilesRootIfNeeded() async {
         guard !hasLoadedWorkingTreeRoot else { return }
         await loadWorkingTreeFolder(path: "")
+        prewarmWorkingTreeFileSearchIndexInBackground()
     }
 
     func setWorkingTreeFolderExpanded(path: String, isExpanded: Bool) async {
@@ -2602,11 +2607,13 @@ final class RepoViewModel {
     }
     var hasUnresolvedConflicts: Bool { currentConflictedFiles.isEmpty == false }
     var conflictMergeFile: ConflictFile?
+    var conflictMergeLoadingPath: String?
     var conflictSides: ConflictSides?
     var conflictEditorDocument: ConflictEditorDocument?
     var conflictFallbackMessage: String?
     var conflictOutputText: String = ""
     var conflictOutputLines: [String] = []
+    var conflictOutputExternalRevision: Int = 0
     var showConflictMergeView = false
     let conflictUndoManager = UndoManager()
     private var isRestoringConflictUndoSnapshot = false
@@ -2705,6 +2712,7 @@ final class RepoViewModel {
         self.git = gitService
         self.reflogLoader = RepoReflogLoader(git: gitService)
         self.workingTreeFileOperations = workingTreeFileOperations ?? WorkingTreeFileOperations(repoPath: path)
+        self.workingTreeFileSearchIndex = .shared
         // 恢复上次 terminal 的打开状态
         self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
         self.graphDisplayMode = GraphDisplayMode(
@@ -2784,7 +2792,8 @@ final class RepoViewModel {
 
         let navigationGeneration = beginCommitNavigation(title: "Loading commit history")
         defer { finishCommitNavigation(navigationGeneration) }
-        await revealCommit(hash: hash, navigationGeneration: navigationGeneration)
+        let resolvedHash = await resolveCommitNavigationHash(hash) ?? hash
+        await revealCommit(hash: resolvedHash, navigationGeneration: navigationGeneration)
     }
 
     func loadReflog() async {
@@ -2867,6 +2876,8 @@ final class RepoViewModel {
     private func handleFileSystemChanges(_ changes: Set<RepositoryFileWatcher.ChangeKind>) async {
         guard !isLoading, !operationInProgress else { return }
 
+        await workingTreeFileSearchIndex.invalidate(repositoryPath: repoPath)
+
         let needsFullReload = changes.contains(.head) || changes.contains(.refs)
 
         if needsFullReload {
@@ -2893,7 +2904,26 @@ final class RepoViewModel {
         isRefreshing = true
         defer { isRefreshing = false }
         do {
+            await workingTreeFileSearchIndex.invalidate(repositoryPath: repoPath)
+            let previousHeadCommitHash = headCommitHash
+            let previousCurrentBranch = currentBranch
+            let previousDetachedState = isDetachedHead
+
             await git.refreshRepositoryState()
+            let refreshedHeadCommitHash = try await git.headCommitHash()
+            let refreshedDetachedState = try await git.isDetachedHead()
+            let refreshedCurrentBranch = try await git.currentBranch()
+
+            let branchIdentityChanged =
+                refreshedHeadCommitHash != previousHeadCommitHash
+                || refreshedDetachedState != previousDetachedState
+                || refreshedCurrentBranch != previousCurrentBranch
+
+            if branchIdentityChanged {
+                await loadAll()
+                return
+            }
+
             let sts = try await git.status()
             fileStatuses = sts
             if selectedCommit?.isUncommitted == true {
@@ -2904,9 +2934,9 @@ final class RepoViewModel {
                 }
             }
             scheduleVisibleWorkingTreeFoldersRefresh()
-            let hc = try await git.headCommitHash()
+            let hc = refreshedHeadCommitHash
             headCommitHash = hc
-            isDetachedHead = try await git.isDetachedHead()
+            isDetachedHead = refreshedDetachedState
             currentBranchHashes = await git.commitHashesOnCurrentBranch()
             normalizeGraphDisplayMode()
 
@@ -2952,6 +2982,7 @@ final class RepoViewModel {
             }
             syncSelectionWithGraphDisplay()
             await ensureCurrentGraphCommitsAreLoaded()
+            prewarmWorkingTreeFileSearchIndexInBackground()
         } catch {}
     }
 
@@ -3048,6 +3079,7 @@ final class RepoViewModel {
         defer { isLoading = false }
 
         do {
+            await workingTreeFileSearchIndex.invalidate(repositoryPath: repoPath)
             await git.refreshRepositoryState()
             // Phase 1: Load metadata in parallel
             async let b = git.localBranches()
@@ -3150,8 +3182,20 @@ final class RepoViewModel {
             commits = loadedCommits
             syncSelectionWithGraphDisplay()
             schedulePostInitialCommitLoadWork()
+            prewarmWorkingTreeFileSearchIndexInBackground()
         } catch {
             print("Error loading repo data: \(error)")
+        }
+    }
+
+    func prewarmWorkingTreeFileSearchIndex() async {
+        await workingTreeFileSearchIndex.prewarm(repositoryPath: repoPath)
+    }
+
+    private func prewarmWorkingTreeFileSearchIndexInBackground() {
+        let repositoryPath = repoPath
+        Task.detached(priority: .utility) {
+            await WorkingTreeFileSearchIndex.shared.prewarm(repositoryPath: repositoryPath)
         }
     }
 
@@ -4768,7 +4812,7 @@ final class RepoViewModel {
     }
 
     func scrollToCommitForBranch(_ branch: BranchInfo) async {
-        if let commit = commitsByShortHash[branch.shortHash] ?? loadedCommit(matching: branch.shortHash) {
+        if let commit = commitsByShortHash[branch.shortHash] {
             await revealCommit(hash: commit.hash)
             return
         }
@@ -5141,6 +5185,8 @@ final class RepoViewModel {
     }
 
     func openConflictMerge(_ file: ConflictFile) async {
+        guard conflictMergeLoadingPath != file.path else { return }
+        conflictMergeLoadingPath = file.path
         conflictMergeFile = file
         do {
             conflictUndoManager.removeAllActions()
@@ -5151,25 +5197,30 @@ final class RepoViewModel {
             conflictEditorDocument = document
             conflictOutputText = document.outputText
             conflictOutputLines = document.outputLines
+            conflictOutputExternalRevision += 1
             showConflictMergeView = true
         } catch {
             conflictSides = nil
             conflictEditorDocument = nil
             conflictOutputText = ""
             conflictOutputLines = []
+            conflictOutputExternalRevision += 1
             conflictFallbackMessage = error.localizedDescription
             showConflictMergeView = true
         }
+        conflictMergeLoadingPath = nil
     }
 
     func closeConflictMerge() {
         showConflictMergeView = false
+        conflictMergeLoadingPath = nil
         conflictMergeFile = nil
         conflictSides = nil
         conflictEditorDocument = nil
         conflictFallbackMessage = nil
         conflictOutputText = ""
         conflictOutputLines = []
+        conflictOutputExternalRevision += 1
         conflictUndoManager.removeAllActions()
     }
 
@@ -5230,6 +5281,7 @@ final class RepoViewModel {
         conflictEditorDocument = snapshot.document
         conflictOutputText = snapshot.outputText
         conflictOutputLines = snapshot.outputLines
+        conflictOutputExternalRevision += 1
     }
 
     private func registerConflictUndo(actionName: String) {
@@ -5255,10 +5307,13 @@ final class RepoViewModel {
         conflictUndoManager.redo()
     }
 
-    private func updateConflictDocument(_ document: ConflictEditorDocument) {
+    private func updateConflictDocument(_ document: ConflictEditorDocument, externalTextChange: Bool = true) {
         conflictEditorDocument = document
         conflictOutputText = document.outputText
         conflictOutputLines = document.outputLines
+        if externalTextChange {
+            conflictOutputExternalRevision += 1
+        }
     }
 
     func toggleOurs(_ regionIndex: Int) {
@@ -5339,7 +5394,7 @@ final class RepoViewModel {
             registerConflictUndo(actionName: "Edit Conflict Output")
         }
         document.updateOutputText(text)
-        updateConflictDocument(document)
+        updateConflictDocument(document, externalTextChange: false)
     }
 
     func saveConflictResolution() async {
@@ -5349,12 +5404,14 @@ final class RepoViewModel {
                 try await git.markConflictResolved(path: file.path)
                 showToast(title: "Marked Resolved", detail: "\(file.path) marked as resolved", style: .success)
                 showConflictMergeView = false
+                conflictMergeLoadingPath = nil
                 conflictMergeFile = nil
                 conflictSides = nil
                 conflictEditorDocument = nil
                 conflictFallbackMessage = nil
                 conflictOutputText = ""
                 conflictOutputLines = []
+                conflictOutputExternalRevision += 1
                 conflictUndoManager.removeAllActions()
                 await refreshConflictState()
                 if !isInConflict {
@@ -5376,12 +5433,14 @@ final class RepoViewModel {
             try await git.markConflictResolved(path: file.path)
             showToast(title: "Saved", detail: "\(file.path) marked as resolved", style: .success)
             showConflictMergeView = false
+            conflictMergeLoadingPath = nil
             conflictMergeFile = nil
             conflictSides = nil
             conflictEditorDocument = nil
             conflictFallbackMessage = nil
             conflictOutputText = ""
             conflictOutputLines = []
+            conflictOutputExternalRevision += 1
             conflictUndoManager.removeAllActions()
             await refreshRebaseState()
             await refreshStatusAndGraph()

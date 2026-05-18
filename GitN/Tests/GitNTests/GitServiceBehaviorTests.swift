@@ -689,6 +689,28 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertEqual(contents, "one\ntwo\nthree\n")
     }
 
+    func testSquashNormalizesOldestToNewestInputOrder() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "one\n")
+        try repo.commitAll(message: "base")
+
+        try repo.appendFile("a.txt", contents: "two\n")
+        let olderHash = try repo.commitAll(message: "add two")
+
+        try repo.appendFile("a.txt", contents: "three\n")
+        let newerHash = try repo.commitAll(message: "add three")
+
+        let service = GitService(repoPath: repo.path)
+        try await service.squashCommits([olderHash, newerHash])
+
+        let log = try repo.run(["log", "--oneline"])
+        let lines = log.split(separator: "\n")
+        XCTAssertEqual(lines.count, 2, "Expected 2 commits after squash, got: \(log)")
+
+        let contents = try repo.readFile("a.txt")
+        XCTAssertEqual(contents, "one\ntwo\nthree\n")
+    }
+
     func testSquashWithFewerThanTwoHashesThrows() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("a.txt", contents: "x\n")

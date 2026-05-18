@@ -59,7 +59,8 @@ struct WorkingTreeFileTreeBuilder {
             return .empty
         }
 
-        return try searchSnapshots(at: repositoryPath, query: trimmedQuery).last ?? .empty
+        let filePaths = try searchableFilePaths(at: repositoryPath)
+        return search(in: filePaths, query: trimmedQuery)
     }
 
     func searchSnapshots(at repositoryPath: String, query: String) throws -> [TreeSnapshot] {
@@ -67,17 +68,18 @@ struct WorkingTreeFileTreeBuilder {
         guard !trimmedQuery.isEmpty else { return [.empty] }
 
         let searchRoots = try listDirectory(at: repositoryPath, relativePath: "")
+        let allSearchablePaths = try searchableFilePaths(at: repositoryPath)
         var matchingPaths: Set<String> = []
         var snapshots: [TreeSnapshot] = []
 
         for root in searchRoots {
             let beforeCount = matchingPaths.count
-            for path in try searchableFilePaths(at: repositoryPath, in: root) where searchPath(path, matches: trimmedQuery) {
+            for path in allSearchablePaths where pathIsWithinRoot(path, root: root.relativePath) && searchPath(path, matches: trimmedQuery) {
                 matchingPaths.insert(path)
             }
 
             if matchingPaths.count != beforeCount {
-                snapshots.append(snapshot(from: matchingPaths))
+                snapshots.append(treeSnapshot(matchingFilePaths: matchingPaths))
             }
         }
 
@@ -99,24 +101,25 @@ struct WorkingTreeFileTreeBuilder {
 
         if let candidateFilePaths {
             let matches = Set(candidateFilePaths.filter { searchPath($0, matches: trimmedQuery) })
-            await onSnapshot(matches.isEmpty ? .empty : snapshot(from: matches))
+            await onSnapshot(treeSnapshot(matchingFilePaths: matches))
             return
         }
 
         let searchRoots = try listDirectory(at: repositoryPath, relativePath: "")
+        let allSearchablePaths = try searchableFilePaths(at: repositoryPath)
         var matchingPaths: Set<String> = []
         var didPublishSnapshot = false
 
         for root in searchRoots {
             try Task.checkCancellation()
             let beforeCount = matchingPaths.count
-            for path in try searchableFilePaths(at: repositoryPath, in: root) where searchPath(path, matches: trimmedQuery) {
+            for path in allSearchablePaths where pathIsWithinRoot(path, root: root.relativePath) && searchPath(path, matches: trimmedQuery) {
                 matchingPaths.insert(path)
             }
 
             if matchingPaths.count != beforeCount {
                 didPublishSnapshot = true
-                await onSnapshot(snapshot(from: matchingPaths))
+                await onSnapshot(treeSnapshot(matchingFilePaths: matchingPaths))
                 if snapshotPublishDelayNanoseconds > 0 {
                     try await Task.sleep(nanoseconds: snapshotPublishDelayNanoseconds)
                 }
@@ -127,6 +130,19 @@ struct WorkingTreeFileTreeBuilder {
         if !didPublishSnapshot {
             await onSnapshot(.empty)
         }
+    }
+
+    func search(in filePaths: [String], query: String) -> TreeSnapshot {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return .empty }
+
+        let matches = Set(filePaths.filter { searchPath($0, matches: trimmedQuery) })
+        return treeSnapshot(matchingFilePaths: matches)
+    }
+
+    func treeSnapshot(matchingFilePaths filePaths: Set<String>) -> TreeSnapshot {
+        guard !filePaths.isEmpty else { return .empty }
+        return snapshot(from: filePaths)
     }
 
     func listDirectory(at repositoryPath: String, relativePath: String) throws -> [WorkingTreeFileNode] {
@@ -177,14 +193,10 @@ struct WorkingTreeFileTreeBuilder {
         }
     }
 
-    private func searchableFilePaths(at repositoryPath: String, in root: WorkingTreeFileNode) throws -> [String] {
-        return try searchableFilePaths(at: repositoryPath, pathspec: root.relativePath)
-    }
-
-    private func searchableFilePaths(at repositoryPath: String, pathspec: String) throws -> [String] {
+    func searchableFilePaths(at repositoryPath: String) throws -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", repositoryPath, "ls-files", "-co", "--exclude-standard", "-z", "--", pathspec]
+        process.arguments = ["-C", repositoryPath, "ls-files", "-co", "--exclude-standard", "-z"]
 
         let output = Pipe()
         let error = Pipe()
@@ -218,6 +230,10 @@ struct WorkingTreeFileTreeBuilder {
             of: query,
             options: [.caseInsensitive, .diacriticInsensitive]
         ) != nil
+    }
+
+    private func pathIsWithinRoot(_ path: String, root: String) -> Bool {
+        path == root || path.hasPrefix(root + "/")
     }
 
     private func snapshot(from filePaths: Set<String>) -> TreeSnapshot {

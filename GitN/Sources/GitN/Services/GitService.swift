@@ -529,6 +529,12 @@ actor GitService {
         return String(cString: hashStr)
     }
 
+    /// Resolve an arbitrary commit revision or unique abbreviation to a full commit hash.
+    func resolveCommitHash(_ revision: String) async throws -> String {
+        let resolved = try await runGitOutput(["rev-parse", "--verify", "\(revision)^{commit}"])
+        return resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private nonisolated func oidToShortHash(_ ptr: UnsafePointer<git_oid>) -> String {
         var buf = [CChar](repeating: 0, count: 8)
         git_oid_tostr(&buf, 8, ptr)
@@ -2577,16 +2583,48 @@ actor GitService {
         invalidateRefMapCache()
     }
 
+    private func normalizeSquashCommitOrder(_ hashes: [String]) async -> [String] {
+        let requestedHashes = Array(NSOrderedSet(array: hashes)) as? [String] ?? hashes
+        guard requestedHashes.count >= 2 else { return requestedHashes }
+
+        let reachableHashes = await commitHashesOnCurrentBranch()
+        guard reachableHashes.count >= requestedHashes.count else {
+            return requestedHashes
+        }
+
+        let selectedReachableHashes = Set(requestedHashes).intersection(reachableHashes)
+        guard selectedReachableHashes.count == Set(requestedHashes).count else {
+            return requestedHashes
+        }
+
+        guard let output = try? await runGitOutput(["rev-list", "--topo-order", "HEAD"]) else {
+            return requestedHashes
+        }
+
+        let orderedHashes = output
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { selectedReachableHashes.contains($0) }
+
+        guard orderedHashes.count == requestedHashes.count else {
+            return requestedHashes
+        }
+
+        return orderedHashes
+    }
+
     /// Squash multiple commits into one using interactive rebase with GIT_SEQUENCE_EDITOR.
-    /// The hashes should be ordered from newest (top) to oldest (bottom) as they appear in the log.
+    /// Input hashes may be in any selection order; they are normalized to current-branch history order.
     func squashCommits(_ hashes: [String]) async throws {
         guard hashes.count >= 2 else {
             throw GitError.operationFailed("Need at least 2 commits to squash")
         }
 
+        let orderedHashes = await normalizeSquashCommitOrder(hashes)
+
         // The oldest commit is the last in the list (as ordered in git log: newest first)
-        let oldestHash = hashes.last!
-        let squashSet = Set(hashes.dropLast()) // all except the oldest get squashed
+        let oldestHash = orderedHashes.last!
+        let squashSet = Set(orderedHashes.dropLast()) // all except the oldest get squashed
 
         // Build a sed-like script for GIT_SEQUENCE_EDITOR that replaces "pick" with "squash"
         // for all commits except the oldest one

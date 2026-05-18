@@ -268,4 +268,44 @@ final class GitServiceConflictSidesTests: XCTestCase {
         XCTAssertEqual(sides.markers.first?.baseLines, ["base-only"])
         XCTAssertEqual(sides.markers.first?.incomingLines, [])
     }
+
+    func testBuildConflictSidesReanchorsNonEmptyIncomingWhenCursorDriftsPastMatch() {
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "header",
+                "common-a",
+                "drift-line",
+                "<<<<<<< Current",
+                "ours-1",
+                "=======",
+                "incoming-1",
+                ">>>>>>> Incoming",
+                "after",
+            ].joined(separator: "\n"),
+            baseLines: [
+                "header",
+                "common-a",
+                "after",
+            ],
+            oursLines: [
+                "header",
+                "common-a",
+                "drift-line",
+                "ours-1",
+                "after",
+            ],
+            theirsLines: [
+                "header",
+                "common-a",
+                "incoming-1",
+                "after",
+                "drift-line",
+            ],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        XCTAssertEqual(sides.markers.first?.theirsRange, 2..<3)
+        XCTAssertEqual(sides.markers.first?.incomingLines, ["incoming-1"])
+    }
 }

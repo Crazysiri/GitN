@@ -1834,6 +1834,7 @@ struct DetailPanelView: View {
                     .background(Color(.controlBackgroundColor).opacity(0.3))
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        guard viewModel.conflictMergeLoadingPath == nil else { return }
                         Task { await viewModel.openConflictMerge(file) }
                     }
                     .contextMenu { conflictFileContextMenu(file) }

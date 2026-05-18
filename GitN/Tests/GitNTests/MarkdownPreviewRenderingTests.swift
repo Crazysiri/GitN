@@ -31,6 +31,44 @@ final class MarkdownPreviewRenderingTests: XCTestCase {
         XCTAssertTrue(MarkdownPreviewFence.shouldSyntaxHighlight("json"))
     }
 
+    func testSyntaxHighlightingFallsBackWhenResourcesAreUnavailable() {
+        XCTAssertFalse(
+            MarkdownCodeBlockCapabilities.shouldUseSyntaxHighlighting(
+                "swift",
+                isHighlightingAvailable: false
+            )
+        )
+        XCTAssertTrue(
+            MarkdownCodeBlockCapabilities.shouldUseSyntaxHighlighting(
+                "swift",
+                isHighlightingAvailable: true
+            )
+        )
+    }
+
+    func testRichMarkdownPreviewStaysEnabledForSmallDocuments() {
+        let text = """
+        # Title
+
+        Small markdown body.
+        """
+
+        XCTAssertTrue(MarkdownPreviewPerformance.shouldUseRichPreview(for: text))
+    }
+
+    func testRichMarkdownPreviewFallsBackForLongDocuments() {
+        let text = String(repeating: "abcd", count: 3_100)
+
+        XCTAssertFalse(MarkdownPreviewPerformance.shouldUseRichPreview(for: text))
+    }
+
+    func testRichMarkdownPreviewFallsBackForManyLines() {
+        let text = Array(repeating: "- item", count: 321).joined(separator: "\n")
+
+        XCTAssertFalse(MarkdownPreviewPerformance.shouldUseRichPreview(for: text))
+        XCTAssertEqual(MarkdownPreviewPerformance.lineCount(for: text), 321)
+    }
+
     func testMermaidSourceHeuristicsDetectsFlowchartSyntax() {
         XCTAssertTrue(MermaidSourceHeuristics.isFlowchart("flowchart TD\nA --> B"))
         XCTAssertTrue(MermaidSourceHeuristics.isFlowchart("graph LR\nA --> B"))
