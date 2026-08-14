@@ -13,6 +13,7 @@ Fix the conflict merge side panels so files with tab-indented content, such as `
 - The left and right conflict side panels now preserve visible tab indentation for code-like files.
 - Each conflict block now occupies the same visual height on both sides, so the shorter side pads within the block instead of causing later lines to drift out of alignment.
 - Scrolling large conflicted files in the side panels avoids repeated line-highlighting work and should stay more responsive.
+- When scrolling from the output pane back to the side panes after conflict selections change block heights, scroll sync keeps later conflicts aligned instead of jumping to the wrong side-panel line.
 
 ## Non-Goals
 
@@ -25,6 +26,7 @@ Fix the conflict merge side panels so files with tab-indented content, such as `
 - In scope:
   - Conflict side-panel row layout and rendering.
   - Conflict side-panel drawing performance.
+  - Conflict scroll-sync mapping between side panes and the output pane.
   - Testable helper logic for per-side display rows.
 - Out of scope:
   - Conflict parsing in `GitService`.
@@ -63,6 +65,7 @@ Fix the conflict merge side panels so files with tab-indented content, such as `
   - Open a conflicted `project.pbxproj` and verify both side panels stay aligned.
   - Confirm leading tab indentation matches the file content in both side panels.
   - Scroll a large conflicted file and confirm the side panes remain responsive.
+  - Select multiple conflict hunks, then scroll the output pane and confirm the side panes do not jump at later conflicts.
 - Failure modes / edge cases:
   - One side empty, the other non-empty.
   - One side much shorter than the other.
@@ -82,6 +85,7 @@ Fix the conflict merge side panels so files with tab-indented content, such as `
 - Side panels preserve visible indentation for tab-indented files.
 - Side panels keep conflict blocks vertically aligned when block heights differ across sides.
 - Side panel scrolling does not rebuild visible-line highlighting work on every draw pass.
+- Output-to-side scroll sync preserves conflict order even when selected output blocks collapse or expand to duplicate anchor positions.
 - Automated tests cover the extracted side layout helper.
 
 ## Open Questions

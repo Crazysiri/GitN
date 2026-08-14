@@ -1375,6 +1375,13 @@ final class RepoViewModel {
             return VisualFileContent(kind: .image, oldData: oldData, newData: newData, message: nil)
         }
 
+        // Video files are surfaced as a playable visual preview. Prefer the post-image
+        // bytes (newData) and fall back to the pre-image bytes (oldData) for deletions,
+        // matching VisualFileContent.currentData (newData ?? oldData).
+        if path.isVideoFile && !path.isImageFile, (newData ?? oldData) != nil {
+            return VisualFileContent(kind: .video, oldData: oldData, newData: newData, message: nil)
+        }
+
         // Only return a binary placeholder when the blob data actually looks binary.
         // Text files (JSON, Swift, plain text, …) contain no null bytes; classifying
         // them as binary would show "Binary diff is not readable" for pure text renames
@@ -2160,8 +2167,7 @@ final class RepoViewModel {
     }
 
     private nonisolated static func textLines(_ text: String) -> [String] {
-        guard !text.isEmpty else { return [] }
-        return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        DiffTextSplitter.lines(text)
     }
 
     private nonisolated static func lineContentRanges(for lines: [String]) -> [NSRange] {
@@ -3418,7 +3424,12 @@ final class RepoViewModel {
 
     enum DiffContext { case staged, unstaged, committed }
     var currentDiffContext: DiffContext = .committed
-    private var diffLoadGeneration = 0
+    /// Monotonic selection token + payload-applicability decision for the file
+    /// inspector. `selectDiffFile` calls `beginSelection()` on entry and routes
+    /// every write-back (success, failure, and the too-large early return) through
+    /// `canApply(token:)` so a load that started for a superseded selection can
+    /// never write its result onto the newer selection. (R3.2 / R3.6)
+    private var fileInspectorSelection = FileInspectorSelectionState()
     private var committedDiffGeneration = 0
 
     private func invalidateCommittedDiffLoading() {
@@ -3473,8 +3484,17 @@ final class RepoViewModel {
     func selectDiffFile(_ file: DiffFile, context: DiffContext = .committed, ignoreSize: Bool = false) async {
         let isUncommitted = isWorkingTreeConflictSelection
         guard selectedCommit != nil || selectedStash != nil || isInConflict else { return }
-        diffLoadGeneration += 1
-        let generation = diffLoadGeneration
+
+        // R3.2 / R3.6: open a new selection generation. Every write-back below (success,
+        // failure, and the too-large early return) is gated on `canApply(token:)`, so a
+        // load that began for a now-superseded selection can never stamp its result onto
+        // the newer selection. The token logic itself lives in FileInspectorSelectionState
+        // (kept out of this view model so it is unit-testable in isolation).
+        let token = fileInspectorSelection.beginSelection()
+
+        // R3.1: synchronously reset every per-selection preview field BEFORE issuing any
+        // new load (no `await` / `Task.detached` has run yet), so nothing tied to the
+        // previous file can linger into the new selection.
         selectedDiffFile = file
         currentDiffContext = context
         isLoadingDiff = true
@@ -3483,6 +3503,18 @@ final class RepoViewModel {
         fileDiffContent = ""
         parsedDiff = nil
         selectedDiffVisualContent = nil
+
+        // When this selection is the one currently shown in the inspector, drop the old
+        // visual content in the same synchronous step. Detaching the previous
+        // VisualFileContentView / VideoDiffContentView makes its `onDisappear` /
+        // `onChange(of: path)` tear down the AVPlayer (R1.6) and reset the per-file
+        // Markdown "Render Anyway" opt-in (R2.4), and guarantees no stale image / video /
+        // markdown frame survives into the new selection (R3.4 / R3.5).
+        let drivesInspector = isFileInspectorPresented && fileInspectorPath == file.path
+        if drivesInspector {
+            fileInspectorVisualContent = nil
+        }
+
         do {
             if isUncommitted {
                 // Guard against huge files that would blow up memory
@@ -3490,6 +3522,16 @@ final class RepoViewModel {
                     let fullPath = (repoPath as NSString).appendingPathComponent(file.path)
                     if let attrs = try? FileManager.default.attributesOfItem(atPath: fullPath),
                        let size = attrs[.size] as? Int, size > Self.maxDiffFileSize {
+                        // R3.2 / R3.6 core bug fix: the too-large early return MUST pass the
+                        // same generation gate as the async write-backs. Without it an older
+                        // selection could stamp isFileTooLarge / fileTooLargeSizeMB onto a
+                        // newer selection. R3.3: the size and every path-derived label
+                        // (file name, repo-relative path, change-status) follow the new file
+                        // because `selectedDiffFile` was just reset above.
+                        guard fileInspectorSelection.canApply(token: token),
+                              selectedDiffFile?.path == file.path,
+                              currentDiffContext == context
+                        else { return }
                         let sizeMB = String(format: "%.1f", Double(size) / 1_048_576.0)
                         isFileTooLarge = true
                         fileTooLargeSizeMB = sizeMB
@@ -3521,7 +3563,7 @@ final class RepoViewModel {
             }
             let payload = try await payloadTask.value
 
-            guard generation == diffLoadGeneration,
+            guard fileInspectorSelection.canApply(token: token),
                   selectedDiffFile?.path == path,
                   currentDiffContext == context
             else { return }
@@ -3543,7 +3585,7 @@ final class RepoViewModel {
                 )
             }
         } catch {
-            guard generation == diffLoadGeneration,
+            guard fileInspectorSelection.canApply(token: token),
                   selectedDiffFile?.path == file.path
             else { return }
             fileDiffContent = "Failed to load diff"
@@ -3551,7 +3593,7 @@ final class RepoViewModel {
             parsedDiff = nil
             selectedDiffVisualContent = nil
         }
-        if generation == diffLoadGeneration {
+        if fileInspectorSelection.canApply(token: token) {
             isLoadingDiff = false
         }
     }
@@ -3746,9 +3788,6 @@ final class RepoViewModel {
             switch error {
             case .notFound(let tool):
                 showToast(title: "\(tool.displayName) Not Found", detail: error.localizedDescription, style: .error)
-            case .apiKeyMissing:
-                showToast(title: "AI Setup Required", detail: error.localizedDescription, style: .error)
-                openSettings()
             case .authorizationRequired(let tool):
                 showToast(title: "\(tool.displayName) Login Required", detail: error.localizedDescription, style: .error)
                 openSettings()
@@ -3776,9 +3815,6 @@ final class RepoViewModel {
             switch error {
             case .notFound(let tool):
                 showToast(title: "\(tool.displayName) Not Found", detail: error.localizedDescription, style: .error)
-            case .apiKeyMissing:
-                showToast(title: "AI Setup Required", detail: error.localizedDescription, style: .error)
-                openSettings()
             case .authorizationRequired(let tool):
                 showToast(title: "\(tool.displayName) Login Required", detail: error.localizedDescription, style: .error)
                 openSettings()
@@ -4519,12 +4555,33 @@ final class RepoViewModel {
     func performSquashCommits(_ hashes: [String]) async {
         operationInProgress = true
         operationError = nil
+        let runner = AutoStashRunner(
+            isDirty: { [git] in await git.hasWorkingTreeChanges() },
+            stashPush: { [git] in try await git.stashSave(message: "GitN: auto-stash before squash", includeUntracked: true) },
+            stashPop: { [git] in try await git.stashPop(index: 0) },
+            hasUnmergedPaths: { [git] in await git.hasIndexConflicts() }
+        )
         do {
-            try await git.squashCommits(hashes)
+            let outcome = try await runner.run { [git] in try await git.squashCommits(hashes) }
             await loadAll()
-            showToast(title: "Squash Completed", detail: "Successfully squashed \(hashes.count) commits", style: .success)
+            if outcome.popConflict {
+                await checkForMergeOrStashConflict(errorMessage: "Stash pop resulted in merge conflicts", type: .stashApply)
+            } else {
+                showToast(title: "Squash Completed",
+                          detail: "Squashed \(hashes.count - 1) commits into 1",
+                          style: .success)
+            }
+        } catch let err as AutoStashError {
+            await loadAll()
+            switch err {
+            case .operationFailed(let original, _):
+                await checkForRebaseConflict(errorMessage: original)
+            case .stashPushFailed(let msg):
+                showToast(title: "Squash Failed", detail: msg, style: .error)
+            }
         } catch {
-            await checkForRebaseConflict(errorMessage: error.localizedDescription)
+            await loadAll()
+            showToast(title: "Squash Failed", detail: error.localizedDescription, style: .error)
         }
         operationInProgress = false
     }
@@ -5422,9 +5479,14 @@ final class RepoViewModel {
             }
             return
         }
-        guard let document = conflictEditorDocument,
-              document.blocks.contains(where: { $0.selectedSources.hasSelection }) else {
-            showToast(title: "No Hunks Selected", detail: "Select at least one conflict hunk before saving", style: .warning)
+        guard let document = conflictEditorDocument else { return }
+        let hasSelectedHunks = document.blocks.contains(where: { $0.selectedSources.hasSelection })
+        guard hasSelectedHunks || document.hasOutputChanges else {
+            showToast(
+                title: "No Hunks Selected",
+                detail: "Select at least one conflict hunk or edit the output before saving",
+                style: .warning
+            )
             return
         }
         let content = conflictOutputText

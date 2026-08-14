@@ -46,6 +46,9 @@ enum MarkdownCodeBlockCapabilities {
 enum MarkdownPreviewPerformance {
     static let richPreviewCharacterLimit = 12_000
     static let richPreviewLineLimit = 320
+    /// Markdown_Render_Cap: hard upper bound (256 KB) for rich Markdown rendering.
+    /// Declared adjacent to the legacy char/line heuristics as the single source of truth (R2.1).
+    static let renderCapBytes = 262_144
 
     static func shouldUseRichPreview(for text: String) -> Bool {
         let utf16Length = (text as NSString).length
@@ -60,6 +63,74 @@ enum MarkdownPreviewPerformance {
                 count += 1
             }
         }
+    }
+}
+
+/// Outcome of the Markdown preview render decision (R2).
+enum MarkdownRenderDecision: Equatable {
+    case rich
+    case plain
+}
+
+/// Pure decision boundary for choosing between rich Markdown rendering and the
+/// plain-text fallback. Kept free of SwiftUI so it can be unit tested directly (R2.8).
+enum MarkdownRenderDecider {
+    /// Decides how a Markdown document should be rendered.
+    ///
+    /// - Parameters:
+    ///   - text: the full Markdown source.
+    ///   - forceRich: `true` when the user has opted in to rich rendering for this file.
+    /// - Returns: `.rich` or `.plain` per Requirements 2.2 / 2.3.
+    ///
+    /// Priority:
+    /// 1. `forceRich == true` → `.rich` (highest priority opt-in).
+    /// 2. UTF-8 byte length `> renderCapBytes` → `.plain` (R2.3, the only hard gate).
+    /// 3. UTF-8 byte length `<= renderCapBytes` → always `.rich`, even when the legacy
+    ///    line/char heuristics (`shouldUseRichPreview`) would return `false` (R2.2).
+    static func decide(text: String, forceRich: Bool) -> MarkdownRenderDecision {
+        if forceRich { return .rich }
+        if text.utf8.count > MarkdownPreviewPerformance.renderCapBytes { return .plain }
+        return .rich
+    }
+}
+
+/// Tracks the per-file "Render Anyway" opt-in for the Markdown preview, scoped to the
+/// current preview session.
+///
+/// Extracted from `MarkdownInspectorContentView` so the session-scope semantics (R2.4)
+/// are unit-testable without instantiating a SwiftUI view body. The opt-in applies to a
+/// single file at a time: switching to a different file clears it, so a second over-cap
+/// file opened in the same session reverts to the default decision (`.plain`).
+struct MarkdownForceRichScope: Equatable {
+    /// The file path the opt-in currently applies to, or `nil` when no file is opted in.
+    private(set) var optedInPath: String?
+
+    init(optedInPath: String? = nil) {
+        self.optedInPath = optedInPath
+    }
+
+    /// Whether rich rendering is currently forced for `path`.
+    func isForced(for path: String) -> Bool {
+        optedInPath != nil && optedInPath == path
+    }
+
+    /// User activated "Render Anyway" while viewing `path`.
+    mutating func optIn(path: String) {
+        optedInPath = path
+    }
+
+    /// Call when the previewed file changes. Clears the opt-in unless the new path is the
+    /// same file the opt-in already applied to, so the opt-in never leaks to another file
+    /// (R2.4: "SHALL NOT alter the rendering decision for any other file opened before or after").
+    mutating func fileDidChange(to path: String) {
+        if optedInPath != path {
+            optedInPath = nil
+        }
+    }
+
+    /// Render decision for `path` with `text`, honoring this scope's per-file opt-in.
+    func decision(forPath path: String, text: String) -> MarkdownRenderDecision {
+        MarkdownRenderDecider.decide(text: text, forceRich: isForced(for: path))
     }
 }
 
@@ -1408,11 +1479,30 @@ struct MarkdownPreviewView: View {
 }
 
 struct MarkdownInspectorContentView: View {
+    /// Repo-relative path of the previewed file. Drives the per-file opt-in scope reset (R2.4).
+    let filePath: String
     @Environment(ThemeManager.self) private var theme
     @Binding var text: String
     let isEditable: Bool
 
     @State private var isEditing = false
+    /// User opted in to rich rendering for the current file via "Render Anyway" (R2.3/R2.4).
+    /// Scoped to the current preview session and reset whenever `filePath` changes.
+    @State private var forceRich = false
+    /// Watchdog fired: rich rendering threw or produced no first frame within the timeout (R2.6).
+    @State private var richRenderTimedOut = false
+    /// The `filePath` whose rich document has actually appeared. Compared by the watchdog so it
+    /// only falls back when the *current* file's rich view never reports appearance (R2.6).
+    @State private var renderedPath: String?
+
+    /// Seconds the watchdog waits for the first frame before falling back to plain (R2.6).
+    private static let richRenderTimeout: Duration = .seconds(5)
+
+    init(filePath: String, text: Binding<String>, isEditable: Bool) {
+        self.filePath = filePath
+        self._text = text
+        self.isEditable = isEditable
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1421,9 +1511,17 @@ struct MarkdownInspectorContentView: View {
 
             if isEditing && isEditable {
                 MarkdownEditorView(text: $text)
-            } else if usesRichPreview {
+            } else if showsRichPreview {
+                // R2.5: rich rendering still flows through MarkdownDocumentView, preserving
+                // zoom/link/anchor behavior. The watchdog (R2.6) only reverts to plain when
+                // the first frame never arrives.
                 MarkdownDocumentView(text: text)
+                    // Fresh identity per file so onAppear fires on every switch (rich→rich included).
+                    .id(filePath)
+                    .onAppear { renderedPath = filePath }
+                    .task(id: filePath) { await runRichRenderWatchdog(for: filePath) }
             } else {
+                // Markdown_Plain_Fallback shows the complete contents without truncation (R2.6).
                 PlainMarkdownDocumentView(text: text)
             }
         }
@@ -1432,19 +1530,66 @@ struct MarkdownInspectorContentView: View {
                 isEditing = false
             }
         }
+        .onChange(of: filePath) { _, _ in
+            // R2.4: opt-in and watchdog state are scoped to a single file. Switching files
+            // (or reopening the same file in a later session) reverts to the default decision.
+            // The rendered marker is not reset here — it is re-established by the rich view's
+            // .onAppear (which fires on every switch thanks to .id(filePath)).
+            forceRich = false
+            richRenderTimedOut = false
+        }
         .preferredColorScheme(theme.preferredColorScheme)
     }
 
-    private var usesRichPreview: Bool {
-        MarkdownPreviewPerformance.shouldUseRichPreview(for: text)
+    /// Render decision for the current file, honoring the per-file opt-in (R2.2–R2.4).
+    private var decision: MarkdownRenderDecision {
+        MarkdownRenderDecider.decide(text: text, forceRich: forceRich)
+    }
+
+    /// Whether the rich document should be shown. A fired watchdog forces plain (R2.6).
+    private var showsRichPreview: Bool {
+        decision == .rich && !richRenderTimedOut
+    }
+
+    /// True while the persistent "shown as plain text" indicator + opt-in control apply (R2.3).
+    private var showsPlainFallbackIndicator: Bool {
+        !isEditing && decision == .plain
+    }
+
+    /// Waits for the timeout; if the current file's rich view never reported its appearance,
+    /// reverts to the plain fallback and surfaces a non-blocking message (R2.6). Cancellation
+    /// (file change or view teardown) is treated as "no fallback needed".
+    private func runRichRenderWatchdog(for target: String) async {
+        do {
+            try await Task.sleep(for: Self.richRenderTimeout)
+        } catch {
+            // Cancelled (file change / view teardown) → no fallback needed.
+            return
+        }
+        guard !Task.isCancelled else { return }
+        // Only fall back if the current file's rich view never reported its appearance.
+        if renderedPath != target {
+            richRenderTimedOut = true
+        }
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
-            if !isEditing && !usesRichPreview {
+            if !isEditing && richRenderTimedOut {
+                // R2.6: non-blocking message describing the automatic fallback.
+                Label("Markdown rendering timed out — showing plain text", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else if showsPlainFallbackIndicator {
                 Text("Large Markdown shown as plain text")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
+                Button("Render Anyway") {
+                    forceRich = true
+                    richRenderTimedOut = false
+                }
+                .controlSize(.small)
+                .help("Render this large Markdown file as rich text for the current preview session")
             }
             Spacer()
 

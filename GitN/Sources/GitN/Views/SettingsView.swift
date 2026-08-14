@@ -25,10 +25,8 @@ struct SettingsView: View {
 
     @State private var aiPrompt: String = AICommitService.userPrompt
     @State private var selectedTool: AICommitTool = AICommitService.selectedTool
-    @State private var cursorAPIKey: String = AICommitService.cursorAPIKey
     @State private var promptHasChanges = false
     @State private var toolHasChanges = false
-    @State private var keyHasChanges = false
     @State private var toolStatus: AICommitToolStatus?
 
     @State private var gitlabURL: String = GitLabService.gitlabURL
@@ -110,10 +108,7 @@ struct SettingsView: View {
                 // --- Status ---
                 agentStatusSection
 
-                if selectedTool.requiresAPIKey {
-                    apiKeySection
-                    Divider()
-                }
+                Divider()
 
                 promptSection
             }
@@ -246,47 +241,6 @@ struct SettingsView: View {
             ]
         default:
             return selectedTool.installInstructions
-        }
-    }
-
-    private var apiKeySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("API Key")
-                .font(.system(size: 13, weight: .semibold))
-
-            Text("Set your CURSOR_API_KEY. If empty, the app will try to read it from the environment variable.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 8) {
-                FocusSecureField(titleKey: "CURSOR_API_KEY", text: $cursorAPIKey)
-                    .font(.system(size: 11, design: .monospaced))
-                    .onChange(of: cursorAPIKey) {
-                        keyHasChanges = true
-                    }
-
-                Button("Save") {
-                    AICommitService.cursorAPIKey = cursorAPIKey
-                    keyHasChanges = false
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(!keyHasChanges)
-
-                if !AICommitService.cursorAPIKey.isEmpty {
-                    Button(role: .destructive) {
-                        cursorAPIKey = ""
-                        AICommitService.cursorAPIKey = ""
-                        keyHasChanges = false
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .hoverTooltip("Clear saved API key")
-                }
-            }
         }
     }
 

@@ -1,5 +1,24 @@
 import Foundation
 
+// MARK: - Line Splitting
+
+/// Splits text into individual lines on the `\n` boundary while preserving any
+/// trailing `\r`, so CRLF-terminated content is handled correctly.
+///
+/// Swift treats `"\r\n"` as a single `Character` (grapheme cluster). As a result
+/// `text.split(separator: "\n")` — where `"\n"` is a `Character` — never matches
+/// the `\n` inside a CRLF sequence and collapses the entire text into one element.
+/// That breaks diff base-text reconstruction for files saved with CRLF endings,
+/// surfacing phantom deletions in the inspector. Splitting on the scalar boundary
+/// via `components(separatedBy:)` avoids the grapheme pitfall and keeps the `\r`
+/// attached to each line so the reconstructed text matches the on-disk content.
+enum DiffTextSplitter {
+    static func lines(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        return text.components(separatedBy: "\n")
+    }
+}
+
 // MARK: - Data Structures
 
 struct ParsedDiff: Sendable {
@@ -420,8 +439,7 @@ enum TextDiffEngine {
     }
 
     private static func textLines(_ text: String) -> [String] {
-        guard !text.isEmpty else { return [] }
-        return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        DiffTextSplitter.lines(text)
     }
 }
 

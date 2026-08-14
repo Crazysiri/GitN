@@ -183,6 +183,10 @@ struct ConflictEditorDocument: Equatable, Sendable {
         outputText.components(separatedBy: "\n")
     }
 
+    var hasOutputChanges: Bool {
+        outputText != initialOutputText
+    }
+
     mutating func resetAll() {
         outputText = initialOutputText
         outputLineOrigins = initialOutputLineOrigins

@@ -15,6 +15,14 @@ final class DiffContentLogicTests: XCTestCase {
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII="
     )!
 
+    // Small binary blob with null bytes so git classifies the file as binary
+    // (the model layer only needs bytes + a video extension; playability is a
+    // view-layer concern handled by VideoPreviewController).
+    private let fakeVideoData = Data([
+        0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70,
+        0x6D, 0x70, 0x34, 0x32, 0x00, 0x00, 0x00, 0x00
+    ])
+
     // MARK: - Language detection
 
     func testSourceLanguageForKnownExtensions() {
@@ -339,6 +347,73 @@ final class DiffContentLogicTests: XCTestCase {
         XCTAssertEqual(visual.kind, .image)
         XCTAssertNotNil(visual.oldData, "oldData should hold the pre-deletion image bytes")
         XCTAssertNil(visual.newData, "newData should be nil for a deleted image")
+    }
+
+    // MARK: - Committed added video: kind .video bound to post-image bytes
+
+    func testCommittedAddedVideoProducesVideoVisualContentWithNewData() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("placeholder.txt", contents: "init\n")
+        try repo.commitAll(message: "init")
+
+        let videoURL = URL(fileURLWithPath: repo.path).appendingPathComponent("clip.mp4")
+        try fakeVideoData.write(to: videoURL)
+        try repo.commitAll(message: "add clip")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let addCommit = try XCTUnwrap(
+            viewModel.commits.first(where: { $0.message == "add clip" })
+        )
+        await viewModel.selectCommit(addCommit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "clip.mp4" }))
+        XCTAssertEqual(file.changeKind, .added)
+        XCTAssertTrue(file.path.isVideoFile)
+
+        let visual = try XCTUnwrap(
+            viewModel.selectedDiffVisualContent,
+            "a video file should produce visual content"
+        )
+        XCTAssertEqual(visual.kind, .video,
+            "video files must be surfaced as .video, not .binary")
+        XCTAssertNotNil(visual.newData, "newData should hold the added video bytes (post-image)")
+        XCTAssertNil(visual.oldData, "oldData should be nil for a newly added video")
+        XCTAssertEqual(visual.currentData, visual.newData,
+            "currentData must prefer the post-image bytes (newData ?? oldData)")
+    }
+
+    // MARK: - Committed deleted video: kind .video falls back to pre-image bytes
+
+    func testCommittedDeletedVideoProducesVideoVisualContentWithOldData() async throws {
+        let repo = try TemporaryGitRepository()
+
+        let videoURL = URL(fileURLWithPath: repo.path).appendingPathComponent("removed.mp4")
+        try fakeVideoData.write(to: videoURL)
+        try repo.commitAll(message: "add clip")
+
+        try repo.run(["rm", "removed.mp4"])
+        try repo.commitAll(message: "delete clip")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let deleteCommit = try XCTUnwrap(
+            viewModel.commits.first(where: { $0.message == "delete clip" })
+        )
+        await viewModel.selectCommit(deleteCommit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "removed.mp4" }))
+        XCTAssertEqual(file.changeKind, .deleted)
+
+        let visual = try XCTUnwrap(viewModel.selectedDiffVisualContent)
+        XCTAssertEqual(visual.kind, .video,
+            "a deleted video must still resolve to .video using its pre-image bytes")
+        XCTAssertNotNil(visual.oldData, "oldData should hold the pre-deletion video bytes")
+        XCTAssertNil(visual.newData, "newData should be nil for a deleted video")
+        XCTAssertEqual(visual.currentData, visual.oldData,
+            "currentData should fall back to oldData for deletions")
     }
 
     func testCommittedDeletedLFSImageHasOnlyOldData() async throws {
@@ -749,6 +824,46 @@ final class DiffContentLogicTests: XCTestCase {
         // The diff base must not contain the new line.
         XCTAssertFalse(base.contains("let y = 2"),
             "base text must not contain lines that were only added in this commit")
+    }
+
+    /// Regression for phantom deletions on CRLF files. A single-line change in a
+    /// file saved with Windows line endings must reconstruct a diff base that equals
+    /// the real "before" content, not a one-line blob that makes the whole hunk look
+    /// deleted. Mirrors the real-world `number_percision.dart` report.
+    func testFileInspectorDiffBaseHandlesCRLFSingleLineChange() async throws {
+        let repo = try TemporaryGitRepository()
+        // Keep git from rewriting line endings so the blobs stay CRLF on disk and in-tree.
+        try repo.run(["config", "core.autocrlf", "false"])
+
+        let before = "/// header\r\n/// Author\r\n///\r\n// ignore_for_file: a, b\r\nimport 'dart:math';\r\n"
+        let after = "/// header\r\n/// Author\r\n///\r\n// ignore_for_file: a, b, c\r\nimport 'dart:math';\r\n"
+
+        try repo.writeFile("crlf.dart", contents: before)
+        try repo.commitAll(message: "add crlf file")
+        try repo.writeFile("crlf.dart", contents: after)
+        try repo.commitAll(message: "tweak ignore_for_file")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let commit = try XCTUnwrap(
+            viewModel.commits.first(where: { $0.message == "tweak ignore_for_file" })
+        )
+        await viewModel.selectCommit(commit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "crlf.dart" }))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        let base = viewModel.fileInspectorDiffBaseText
+        let current = viewModel.fileInspectorContent
+
+        XCTAssertEqual(current, after, "modified side should be the committed file content")
+        XCTAssertEqual(base, before,
+            "reconstructed base for a CRLF file must equal the real previous content, " +
+            "not a collapsed single line that fabricates a whole-block deletion; got: \(base.debugDescription)")
+        // The unchanged context lines must survive on the base side.
+        XCTAssertTrue(base.contains("import 'dart:math';"),
+            "context lines must remain in the base text instead of appearing as deletions")
     }
 
     /// The preview mode inspector opened DIRECTLY (not via a diff→preview switch)

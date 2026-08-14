@@ -435,13 +435,17 @@ struct FileInspectorOverlayView: View {
                         path: viewModel.fileInspectorPath,
                         mode: .preview
                     )
+                } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
+                    // R2.7: a Markdown (or any) file whose contents could not be decoded as
+                    // UTF-8 / read from disk surfaces the existing unreadable-file placeholder
+                    // and never enters either Markdown rendering path.
+                    unsupportedContentState
                 } else if viewModel.fileInspectorPath.isMarkdownFile {
                     MarkdownInspectorContentView(
+                        filePath: viewModel.fileInspectorPath,
                         text: Bindable(viewModel).fileInspectorContent,
                         isEditable: viewModel.isFileInspectorEditable
                     )
-                } else if !viewModel.isFileInspectorEditable && viewModel.fileInspectorContent.isEmpty {
-                    unsupportedContentState
                 } else {
                     MonacoInspectorView(
                         mode: .preview,
@@ -594,6 +598,8 @@ struct VisualFileContentView: View {
         Group {
             if content.isImage {
                 ImageDiffContentView(content: content, path: path, mode: mode, changeKind: changeKind, oldPath: oldPath)
+            } else if content.isVideo {
+                VideoDiffContentView(content: content, path: path)
             } else {
                 BinaryFilePlaceholderView(
                     title: mode == .diff ? "Binary diff is not readable" : "Binary file preview is not readable",

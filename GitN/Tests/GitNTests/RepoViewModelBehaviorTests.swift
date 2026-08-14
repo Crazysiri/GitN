@@ -293,6 +293,51 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.conflictOutputText, document.outputText)
     }
 
+    func testSaveConflictResolutionAllowsManualOutputChangesWithoutSelectedHunks() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("file.txt", contents: "alpha\nbase-1\nomega\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.writeFile("file.txt", contents: "alpha\ncurrent-1\nomega\n")
+        try repo.commitAll(message: "ours")
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("file.txt", contents: "alpha\nincoming-1\nomega\n")
+        try repo.commitAll(message: "theirs")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let mergedText = try repo.readFile("file.txt")
+        let sides = GitService.buildConflictSides(
+            mergedText: mergedText,
+            baseLines: ["alpha", "base-1", "omega"],
+            oursLines: ["alpha", "current-1", "omega"],
+            theirsLines: ["alpha", "incoming-1", "omega"],
+            oursLabel: "Current",
+            theirsLabel: "Incoming"
+        )
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        viewModel.conflictMergeFile = ConflictFile(path: "file.txt", conflictCount: 1)
+
+        var document = ConflictEditorDocument(sides: sides)
+        document.updateOutputText([
+            "alpha",
+            "manual-resolution",
+            "omega",
+        ].joined(separator: "\n"))
+
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.conflictOutputLines = document.outputLines
+        viewModel.showConflictMergeView = true
+
+        await viewModel.saveConflictResolution()
+
+        XCTAssertEqual(viewModel.toastMessage?.title, "Saved")
+        XCTAssertFalse(viewModel.showConflictMergeView)
+        XCTAssertEqual(try repo.readFile("file.txt"), "alpha\nmanual-resolution\nomega")
+        XCTAssertEqual(try repo.run(["diff", "--cached", "--name-only"]), "file.txt")
+    }
+
     func testSaveConflictResolutionInFallbackModeMarksFileResolved() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("file.bin", contents: "base\n")
@@ -1562,8 +1607,188 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertFalse(viewModel.workingTreeFolderContents.keys.contains("docs"))
     }
 
-    private func makeCommit(hash: String, parentHashes: [String] = [], message: String) -> CommitInfo {
-        CommitInfo(
+    // MARK: - R3: File-switch correctness (selectDiffFile transitions)
+
+    /// Forces `maxDiffFileSize` down to 1 MB for the duration of `body` so tests can
+    /// trip the "file too large" guard with small fixture files. The previous value is
+    /// restored afterwards. (R3)
+    private func withMaxDiffFileSizeMB(_ value: Int, _ body: () async throws -> Void) async rethrows {
+        let key = RepoViewModel.maxDiffFileSizeKey
+        let previous = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set(value, forKey: key)
+        defer {
+            if let previous {
+                UserDefaults.standard.set(previous, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        try await body()
+    }
+
+    /// Writes a file whose on-disk size is exactly `megabytes` MiB so the resulting
+    /// `fileTooLargeSizeMB` label is deterministic (e.g. "2.0", "3.0").
+    private func writeSizedFile(_ repo: TemporaryGitRepository, path: String, megabytes: Int) throws {
+        let byteCount = megabytes * 1_048_576
+        try repo.writeFile(path, contents: String(repeating: "a", count: byteCount))
+    }
+
+    private func selectUncommitted(_ viewModel: RepoViewModel) async throws -> CommitInfo {
+        await viewModel.loadAll()
+        let uncommitted = try XCTUnwrap(
+            viewModel.commits.first(where: \.isUncommitted),
+            "expected an uncommitted history entry for working-tree changes"
+        )
+        await viewModel.selectCommit(uncommitted)
+        return uncommitted
+    }
+
+    /// R3.3: switching between two over-cap files refreshes the size label and the
+    /// path-derived selection, never leaking the previous file's size or path.
+    func testSelectDiffFileTooLargeToTooLargeRefreshesSizeAndPath() async throws {
+        try await withMaxDiffFileSizeMB(1) {
+            let repo = try TemporaryGitRepository()
+            try repo.writeFile("seed.txt", contents: "seed\n")
+            try repo.commitAll(message: "initial")
+            try writeSizedFile(repo, path: "big-a.bin", megabytes: 2)
+            try writeSizedFile(repo, path: "big-b.bin", megabytes: 3)
+
+            let viewModel = RepoViewModel(path: repo.path, name: "repo")
+            _ = try await selectUncommitted(viewModel)
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "big-a.bin"), context: .unstaged)
+            XCTAssertTrue(viewModel.isFileTooLarge)
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "2.0")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "big-a.bin")
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "big-b.bin"), context: .unstaged)
+            XCTAssertTrue(viewModel.isFileTooLarge, "still too large after switching to the second over-cap file")
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "3.0", "size label must reflect the newly selected file (R3.3)")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "big-b.bin", "displayed path must follow the new selection (R3.3)")
+            XCTAssertNil(viewModel.selectedDiffVisualContent, "no visual preview should leak into a too-large placeholder")
+        }
+    }
+
+    /// R3.4: moving from a too-large placeholder to a renderable file shows the
+    /// renderable preview in the same selection event, with no stale too-large frame.
+    func testSelectDiffFileTooLargeToRenderableRendersPreviewInOneEvent() async throws {
+        try await withMaxDiffFileSizeMB(1) {
+            let repo = try TemporaryGitRepository()
+            try repo.writeFile("seed.txt", contents: "seed\n")
+            try repo.commitAll(message: "initial")
+            try writeSizedFile(repo, path: "big.bin", megabytes: 2)
+            try repo.writeFile("small.txt", contents: "hello world\n")
+
+            let viewModel = RepoViewModel(path: repo.path, name: "repo")
+            _ = try await selectUncommitted(viewModel)
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "big.bin"), context: .unstaged)
+            XCTAssertTrue(viewModel.isFileTooLarge)
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "2.0")
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "small.txt"), context: .unstaged)
+            XCTAssertFalse(viewModel.isFileTooLarge, "too-large state must clear when switching to a renderable file (R3.4)")
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "", "size label must reset for a renderable selection")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "small.txt")
+            XCTAssertNil(viewModel.selectedDiffVisualContent, "a text file resolves to the Monaco text preview, not visual content")
+            XCTAssertFalse(viewModel.fileDiffContent.isEmpty, "the renderable text diff should be loaded in the same event")
+        }
+    }
+
+    /// R3.5: moving from a renderable file back to a too-large file binds the placeholder
+    /// to the new selection's path/size and never leaks the previous file's content.
+    func testSelectDiffFileRenderableToTooLargeBindsPlaceholderToNewSelection() async throws {
+        try await withMaxDiffFileSizeMB(1) {
+            let repo = try TemporaryGitRepository()
+            try repo.writeFile("seed.txt", contents: "seed\n")
+            try repo.commitAll(message: "initial")
+            try repo.writeFile("small.txt", contents: "hello world\n")
+            try writeSizedFile(repo, path: "big.bin", megabytes: 3)
+
+            let viewModel = RepoViewModel(path: repo.path, name: "repo")
+            _ = try await selectUncommitted(viewModel)
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "small.txt"), context: .unstaged)
+            XCTAssertFalse(viewModel.isFileTooLarge)
+            XCTAssertFalse(viewModel.fileDiffContent.isEmpty)
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "small.txt")
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "big.bin"), context: .unstaged)
+            XCTAssertTrue(viewModel.isFileTooLarge, "switching to an over-cap file must show the size-limit placeholder (R3.5)")
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "3.0", "placeholder size must bind to the new selection")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "big.bin", "placeholder path must bind to the new selection")
+            XCTAssertEqual(viewModel.fileDiffContent, "", "the previous file's diff text must not leak into the placeholder")
+            XCTAssertNil(viewModel.selectedDiffVisualContent, "no previous visual content may leak into the placeholder")
+            XCTAssertNil(viewModel.parsedDiff)
+        }
+    }
+
+    /// renderable → renderable: switching between two renderable files swaps the active
+    /// preview kind (text → image) with no residual state from the previous file.
+    func testSelectDiffFileRenderableToRenderableSwapsPreviewKind() async throws {
+        try await withMaxDiffFileSizeMB(1) {
+            let repo = try TemporaryGitRepository()
+            try repo.writeFile("seed.txt", contents: "seed\n")
+            try repo.commitAll(message: "initial")
+            try repo.writeFile("small.txt", contents: "hello world\n")
+            let imageURL = URL(fileURLWithPath: repo.path).appendingPathComponent("diagram.png")
+            try onePixelPNGData.write(to: imageURL)
+
+            let viewModel = RepoViewModel(path: repo.path, name: "repo")
+            _ = try await selectUncommitted(viewModel)
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "small.txt"), context: .unstaged)
+            XCTAssertFalse(viewModel.isFileTooLarge)
+            XCTAssertNil(viewModel.selectedDiffVisualContent, "text file → Monaco text preview (no visual content)")
+            XCTAssertFalse(viewModel.fileDiffContent.isEmpty)
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "small.txt")
+
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "diagram.png"), context: .unstaged)
+            XCTAssertFalse(viewModel.isFileTooLarge)
+            XCTAssertEqual(viewModel.selectedDiffVisualContent?.kind, .image, "image file → image visual preview kind")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "diagram.png")
+            XCTAssertNil(viewModel.parsedDiff, "no parsed text diff should linger from the previous text file")
+        }
+    }
+
+    /// R3.6: when a second selection begins before the first selection's load completes,
+    /// the late-arriving payload is discarded by the generation token and the final state
+    /// matches the most recent selection.
+    func testSelectDiffFileRapidReselectionDiscardsStaleLoad() async throws {
+        try await withMaxDiffFileSizeMB(1) {
+            let repo = try TemporaryGitRepository()
+            try repo.writeFile("seed.txt", contents: "seed\n")
+            try repo.commitAll(message: "initial")
+            try repo.writeFile("small.txt", contents: "hello world\n")
+            try writeSizedFile(repo, path: "big.bin", megabytes: 2)
+
+            let viewModel = RepoViewModel(path: repo.path, name: "repo")
+            _ = try await selectUncommitted(viewModel)
+
+            // Kick off the renderable selection without awaiting; it suspends at its
+            // detached payload load.
+            let firstSelection = Task {
+                await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "small.txt"), context: .unstaged)
+            }
+            // Let the first selection run up to its async payload load and suspend.
+            await Task.yield()
+
+            // The second selection (an over-cap file) resolves synchronously through the
+            // too-large guard, superseding the first selection's generation token.
+            await viewModel.selectDiffFile(DiffFile(additions: 0, deletions: 0, path: "big.bin"), context: .unstaged)
+
+            // Allow the first (now-stale) load to finish; its write-back must be discarded.
+            await firstSelection.value
+
+            XCTAssertTrue(viewModel.isFileTooLarge, "final state must match the most recent selection (R3.6)")
+            XCTAssertEqual(viewModel.fileTooLargeSizeMB, "2.0")
+            XCTAssertEqual(viewModel.selectedDiffFile?.path, "big.bin")
+            XCTAssertEqual(viewModel.fileDiffContent, "", "the stale renderable load must not populate diff content")
+            XCTAssertNil(viewModel.selectedDiffVisualContent, "the stale load must not populate visual content")
+        }
+    }
+
+    private func makeCommit(hash: String, parentHashes: [String] = [], message: String) -> CommitInfo {        CommitInfo(
             hash: hash,
             shortHash: String(hash.prefix(7)),
             parentHashes: parentHashes,
@@ -1580,6 +1805,104 @@ final class RepoViewModelBehaviorTests: XCTestCase {
             "GIT_AUTHOR_DATE": iso8601,
             "GIT_COMMITTER_DATE": iso8601
         ]
+    }
+
+    // MARK: - performSquashCommits integration (Task 12.1, R4.8, R5.2)
+
+    /// R5.2 + R4.8: dirty tree squash — working directory changes are restored
+    /// after stash pop and the success toast matches R4.8 format.
+    func testPerformSquashCommitsDirtyTreeRestoresWorkingDirectoryChanges() async throws {
+        let repo = try TemporaryGitRepository()
+
+        // Build history: 3 commits (oldest → newest), HEAD at c3.
+        try repo.writeFile("file.txt", contents: "line1\n")
+        try repo.commitAll(message: "commit1")
+        try repo.writeFile("file.txt", contents: "line2\n")
+        let c2 = try repo.commitAll(message: "commit2")
+        try repo.writeFile("file.txt", contents: "line3\n")
+        let c3 = try repo.commitAll(message: "commit3")
+
+        // Dirty the working tree with an untracked file.
+        try repo.writeFile("dirty.txt", contents: "uncommitted work\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        // Squash c2 and c3 (the top 2 commits). hashes.count = 2 → "Squashed 1 commits into 1".
+        await viewModel.performSquashCommits([c3, c2])
+
+        // Working directory changes must be restored after stash pop.
+        let restoredContent = try repo.readFile("dirty.txt")
+        XCTAssertEqual(restoredContent, "uncommitted work\n",
+                       "Auto-stash pop must restore dirty working tree changes")
+
+        // Success toast must follow R4.8 format.
+        XCTAssertEqual(viewModel.toastMessage?.title, "Squash Completed")
+        XCTAssertEqual(viewModel.toastMessage?.detail, "Squashed 1 commits into 1")
+        XCTAssertEqual(viewModel.toastMessage?.style, .success)
+
+        // operationInProgress must be cleared.
+        XCTAssertFalse(viewModel.operationInProgress)
+    }
+
+    /// R5.1 + R4.8: clean tree squash must not create any residual stash entries.
+    func testPerformSquashCommitsCleanTreeLeavesNoResidualStash() async throws {
+        let repo = try TemporaryGitRepository()
+
+        try repo.writeFile("a.txt", contents: "a\n")
+        try repo.commitAll(message: "commit1")
+        try repo.writeFile("a.txt", contents: "b\n")
+        let c2 = try repo.commitAll(message: "commit2")
+        try repo.writeFile("a.txt", contents: "c\n")
+        let c3 = try repo.commitAll(message: "commit3")
+
+        // Ensure working tree is clean.
+        let statusOutput = try repo.run(["status", "--porcelain"])
+        XCTAssertTrue(statusOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "Pre-condition: working tree must be clean")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        await viewModel.performSquashCommits([c3, c2])
+
+        // No stash entries must have been created.
+        let stashList = try repo.run(["stash", "list"])
+        XCTAssertTrue(stashList.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "Clean tree squash must leave zero residual stash entries (R5.1)")
+
+        // Success toast must follow R4.8 format.
+        XCTAssertEqual(viewModel.toastMessage?.title, "Squash Completed")
+        XCTAssertEqual(viewModel.toastMessage?.detail, "Squashed 1 commits into 1")
+        XCTAssertEqual(viewModel.toastMessage?.style, .success)
+    }
+
+    /// R4.8: success toast detail format matches "|Squash_Set| commits into 1".
+    func testPerformSquashCommitsToastDetailMatchesR48Format() async throws {
+        let repo = try TemporaryGitRepository()
+
+        // Build history: 5 commits (c1 oldest, c5 HEAD).
+        // We squash c2..c5 (4 commits) so |Squash_Set| = 3 → "Squashed 3 commits into 1".
+        try repo.writeFile("f.txt", contents: "1\n")
+        try repo.commitAll(message: "c1")
+        try repo.writeFile("f.txt", contents: "2\n")
+        let c2 = try repo.commitAll(message: "c2")
+        try repo.writeFile("f.txt", contents: "3\n")
+        let c3 = try repo.commitAll(message: "c3")
+        try repo.writeFile("f.txt", contents: "4\n")
+        let c4 = try repo.commitAll(message: "c4")
+        try repo.writeFile("f.txt", contents: "5\n")
+        let c5 = try repo.commitAll(message: "c5")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        // Squash 4 commits (c2..c5): hashes.count = 4 → "Squashed 3 commits into 1"
+        await viewModel.performSquashCommits([c5, c4, c3, c2])
+
+        XCTAssertEqual(viewModel.toastMessage?.title, "Squash Completed")
+        XCTAssertEqual(viewModel.toastMessage?.detail, "Squashed 3 commits into 1",
+                       "Toast detail must be 'Squashed N-1 commits into 1' (R4.8)")
     }
 }
 

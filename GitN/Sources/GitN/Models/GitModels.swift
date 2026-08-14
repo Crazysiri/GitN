@@ -200,6 +200,7 @@ struct DiffFile: Identifiable, Equatable {
 enum FileRenderableKind: Sendable, Equatable {
     case text
     case image
+    case video
     case binary
 }
 
@@ -211,6 +212,7 @@ struct VisualFileContent: Sendable, Equatable {
 
     var currentData: Data? { newData ?? oldData }
     var isImage: Bool { kind == .image }
+    var isVideo: Bool { kind == .video }
     var isBinary: Bool { kind == .binary }
 }
 
@@ -228,6 +230,18 @@ extension String {
         }
         guard let type = UTType(filenameExtension: ext) else { return false }
         return type.conforms(to: .image)
+    }
+
+    static let knownVideoExtensions: Set<String> = ["mp4", "m4v", "mov", "m4a"]
+
+    var isVideoFile: Bool {
+        let ext = (self as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return false }
+        if Self.knownVideoExtensions.contains(ext) {
+            return true
+        }
+        guard let type = UTType(filenameExtension: ext) else { return false }
+        return type.conforms(to: .audiovisualContent)
     }
 }
 

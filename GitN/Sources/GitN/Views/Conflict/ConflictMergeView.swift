@@ -1,10 +1,6 @@
 import SwiftUI
 import AppKit
 
-private func conflictScrollDebugLog(_ message: @autoclosure () -> String) {
-    print("[ConflictScroll] \(message())")
-}
-
 private enum ConflictEditorStyle {
     static let lineHeight: CGFloat = 19
     static let unresolvedBaseColor = NSColor.systemRed
@@ -14,67 +10,6 @@ enum ConflictScrollDriver {
     case sideA
     case sideB
     case output
-}
-
-private enum ConflictScrollSync {
-    static func scalar(forTopLine topLine: Double, anchors: [Int], totalLines: Int) -> Double {
-        let points = segmentPoints(anchors: anchors, totalLines: totalLines)
-        guard points.count >= 2 else { return max(topLine, 0) }
-
-        let clampedTopLine = max(topLine, 0)
-        for index in 0..<(points.count - 1) {
-            let start = Double(points[index])
-            let end = Double(points[index + 1])
-            let length = max(end - start, 1)
-            if clampedTopLine < end || index == points.count - 2 {
-                let progress = min(max((clampedTopLine - start) / length, 0), 1)
-                return Double(index) + progress
-            }
-        }
-
-        return Double(max(points.count - 2, 0))
-    }
-
-    static func topLine(forScalar scalar: Double, anchors: [Int], totalLines: Int) -> Double {
-        let points = segmentPoints(anchors: anchors, totalLines: totalLines)
-        guard points.count >= 2 else { return 0 }
-
-        let maxSegmentIndex = max(points.count - 2, 0)
-        let clampedScalar = min(max(scalar, 0), Double(maxSegmentIndex) + 0.999)
-        let segmentIndex = min(Int(floor(clampedScalar)), maxSegmentIndex)
-        let progress = clampedScalar - Double(segmentIndex)
-        let start = Double(points[segmentIndex])
-        let end = Double(points[min(segmentIndex + 1, points.count - 1)])
-        return start + (end - start) * progress
-    }
-
-    static func sideAnchors(lines: [String], regions: [ConflictRegion], side: ConflictSide) -> [Int] {
-        SideDisplayLayout.make(lines: lines, conflictRegions: regions, side: side).anchors
-    }
-
-    static func sideTotalLines(lines: [String], regions: [ConflictRegion], side: ConflictSide) -> Int {
-        SideDisplayLayout.make(lines: lines, conflictRegions: regions, side: side).rows.count
-    }
-
-    static func outputAnchors(for blocks: [ConflictEditorBlock]) -> [Int] {
-        blocks.map { block in
-            block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
-        }
-    }
-
-    private static func segmentPoints(anchors: [Int], totalLines: Int) -> [Int] {
-        let uniqueAnchors = Array(Set(anchors.map { min(max($0, 0), totalLines) })).sorted()
-        var points = [0]
-        for anchor in uniqueAnchors where anchor > (points.last ?? -1) {
-            points.append(anchor)
-        }
-        if totalLines > (points.last ?? -1) {
-            points.append(totalLines)
-        } else if points.count == 1 {
-            points.append(totalLines)
-        }
-        return points
-    }
 }
 
 struct ConflictMergeView: View {
@@ -397,12 +332,11 @@ struct ConflictMergeView: View {
         let sideLine = sideLayout.regionDisplayRanges[index].lowerBound
         let outputLine = block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
         let paddedSideLine = max(Double(sideLine) - 2, 0)
-        let scalar = ConflictScrollSync.scalar(
+        let scalar = ConflictScrollMapping.scalar(
             forTopLine: paddedSideLine,
             anchors: sideLayout.anchors,
             totalLines: sideLayout.rows.count
         )
-        conflictScrollDebugLog("scrollToConflict index=\(index) sideLine=\(sideLine) scalar=\(scalar) outputLine=\(outputLine)")
         scrollDriver = .sideA
         scrollOffset = CGPoint(x: scrollOffset.x, y: CGFloat(scalar) * SideCodeContentView.lineHeight)
         outputScrollTargetLine = outputLine
@@ -414,13 +348,12 @@ struct ConflictMergeView: View {
         initialScrollDone = true
         let sideLayout = SideDisplayLayout.make(lines: sides.oursLines, conflictRegions: sides.markers, side: .ours)
         let paddedSideLine = max(Double(sideLayout.regionDisplayRanges[0].lowerBound) - 2, 0)
-        let scalar = ConflictScrollSync.scalar(
+        let scalar = ConflictScrollMapping.scalar(
             forTopLine: paddedSideLine,
             anchors: sideLayout.anchors,
             totalLines: sideLayout.rows.count
         )
         let outputLine = block.activeRange?.lowerBound ?? block.initialAttachedRange.lowerBound
-        conflictScrollDebugLog("scrollToFirstConflict sideLine=\(sideLayout.regionDisplayRanges[0].lowerBound) scalar=\(scalar) outputLine=\(outputLine)")
         scrollDriver = .sideA
         scrollOffset = CGPoint(x: 0, y: CGFloat(scalar) * SideCodeContentView.lineHeight)
         outputScrollTargetLine = outputLine
@@ -467,6 +400,7 @@ struct SyncedScrollCodeView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let contentView = scrollView.documentView as? SideCodeContentView else { return }
+        context.coordinator.parent = self
 
         let contentChanged = contentView.configure(
             lines: lines, conflictRegions: conflictRegions, side: side,
@@ -490,14 +424,13 @@ struct SyncedScrollCodeView: NSViewRepresentable {
         if !context.coordinator.isScrolling {
             let cur = scrollView.contentView.bounds.origin
             let scalar = Double(scrollOffset.y / SideCodeContentView.lineHeight)
-            let targetTopLine = ConflictScrollSync.topLine(
+            let targetTopLine = ConflictScrollMapping.topLine(
                 forScalar: scalar,
                 anchors: contentView.displayAnchors,
                 totalLines: contentView.displayLineCount
             )
             let targetY = CGFloat(targetTopLine) * SideCodeContentView.lineHeight
             if abs(cur.y - targetY) > 1 || abs(cur.x - scrollOffset.x) > 1 {
-                conflictScrollDebugLog("syncSide side=\(side == .ours ? "A" : "B") scalar=\(scalar) targetTopLine=\(targetTopLine) curY=\(cur.y) targetY=\(targetY)")
                 context.coordinator.isSyncing = true
                 let targetPoint = CGPoint(x: scrollOffset.x, y: targetY)
                 context.coordinator.lastProgrammaticOrigin = targetPoint
@@ -535,13 +468,12 @@ struct SyncedScrollCodeView: NSViewRepresentable {
             DispatchQueue.main.async {
                 let topLine = Double(origin.y / SideCodeContentView.lineHeight)
                 let contentView = scrollView.documentView as? SideCodeContentView
-                let scalar = ConflictScrollSync.scalar(
+                let scalar = ConflictScrollMapping.scalar(
                     forTopLine: topLine,
                     anchors: contentView?.displayAnchors ?? [],
                     totalLines: contentView?.displayLineCount ?? self.parent.lines.count
                 )
                 self.parent.scrollDriver = self.parent.side == .ours ? .sideA : .sideB
-                conflictScrollDebugLog("scrollSide side=\(self.parent.side == .ours ? "A" : "B") topLine=\(topLine) scalar=\(scalar)")
                 self.parent.scrollOffset = CGPoint(
                     x: origin.x,
                     y: CGFloat(scalar) * SideCodeContentView.lineHeight
@@ -627,6 +559,7 @@ struct ConflictOutputEditorView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? ConflictOutputTextView else { return }
+        context.coordinator.parent = self
         textView.conflictUndoManager = undoManager
         textView.canUndoConflictAction = canUndoConflictAction
         textView.canRedoConflictAction = canRedoConflictAction
@@ -654,7 +587,7 @@ struct ConflictOutputEditorView: NSViewRepresentable {
             context.coordinator.isUpdating = false
         }
 
-        let anchorSignature = ConflictScrollSync.outputAnchors(for: blocks)
+        let anchorSignature = ConflictScrollMapping.outputAnchors(for: blocks)
         let anchorSignatureChanged = context.coordinator.lastAnchorSignature != anchorSignature
         if anchorSignatureChanged {
             context.coordinator.lastAnchorSignature = anchorSignature
@@ -666,12 +599,11 @@ struct ConflictOutputEditorView: NSViewRepresentable {
            (anchorSignatureChanged || context.coordinator.pendingViewportRebase) {
             context.coordinator.pendingViewportRebase = false
             let topLine = textView.topVisibleLogicalPosition(in: scrollView)
-            let scalar = ConflictScrollSync.scalar(
+           let scalar = ConflictScrollMapping.scalar(
                 forTopLine: topLine,
                 anchors: anchorSignature,
                 totalLines: textView.logicalLineCount
             )
-                conflictScrollDebugLog("rebaseOutputMapping topLine=\(topLine) scalar=\(scalar) anchors=\(anchorSignature)")
                 DispatchQueue.main.async {
                     self.suppressSideScrollFeedback = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -687,7 +619,6 @@ struct ConflictOutputEditorView: NSViewRepresentable {
         if context.coordinator.lastAppliedScrollRequestID != scrollRequestID,
            let scrollTargetLine {
             context.coordinator.isSyncing = true
-            conflictScrollDebugLog("jumpOutput request=\(scrollRequestID) targetLine=\(scrollTargetLine)")
             textView.scrollToLogicalLine(scrollTargetLine, in: scrollView)
             scrollView.reflectScrolledClipView(scrollView.contentView)
             context.coordinator.lastAppliedScrollRequestID = scrollRequestID
@@ -700,14 +631,13 @@ struct ConflictOutputEditorView: NSViewRepresentable {
            context.coordinator.lastAppliedScrollRequestID == scrollRequestID {
             let cur = scrollView.contentView.bounds.origin
             let scalar = Double(scrollOffset.y / SideCodeContentView.lineHeight)
-            let targetTopLine = ConflictScrollSync.topLine(
+            let targetTopLine = ConflictScrollMapping.topLine(
                 forScalar: scalar,
-                anchors: ConflictScrollSync.outputAnchors(for: blocks),
+                anchors: ConflictScrollMapping.outputAnchors(for: blocks),
                 totalLines: textView.logicalLineCount
             )
             let currentTopLine = textView.topVisibleLogicalPosition(in: scrollView)
             if abs(currentTopLine - targetTopLine) > 0.05 || abs(cur.x - scrollOffset.x) > 1 {
-                conflictScrollDebugLog("syncOutput scalar=\(scalar) currentTopLine=\(currentTopLine) targetTopLine=\(targetTopLine)")
                 context.coordinator.isSyncing = true
                 textView.scrollToLogicalPosition(targetTopLine, in: scrollView)
                 if abs(scrollView.contentView.bounds.origin.x - scrollOffset.x) > 1 {
@@ -845,13 +775,12 @@ struct ConflictOutputEditorView: NSViewRepresentable {
                     return
                 }
                 let topLine = textView.topVisibleLogicalPosition(in: scrollView)
-                let scalar = ConflictScrollSync.scalar(
+                let scalar = ConflictScrollMapping.scalar(
                     forTopLine: topLine,
-                    anchors: ConflictScrollSync.outputAnchors(for: self.parent.blocks),
+                    anchors: ConflictScrollMapping.outputAnchors(for: self.parent.blocks),
                     totalLines: textView.logicalLineCount
                 )
                 self.parent.scrollDriver = .output
-                conflictScrollDebugLog("scrollOutput topLine=\(topLine) scalar=\(scalar) originY=\(origin.y)")
                 self.parent.scrollOffset = CGPoint(
                     x: origin.x,
                     y: CGFloat(scalar) * SideCodeContentView.lineHeight

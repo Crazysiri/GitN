@@ -537,6 +537,26 @@ final class GitServiceBehaviorTests: XCTestCase {
         XCTAssertEqual(decoded?.text, "hidden\n")
     }
 
+    func testStashDiffFilesPreservesFullLongPathForDiffLoading() async throws {
+        let repo = try TemporaryGitRepository()
+        let longPath = "very/long/nested/path/for/stash/diff/loading/that/used/to/get/truncated/in/stat/output/MGLoginController+Context.swift"
+        try repo.writeFile(longPath, contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.appendFile(longPath, contents: "token\n")
+
+        let service = GitService(repoPath: repo.path)
+        try await service.stashSave(message: "wip", includeUntracked: true)
+        let stashes = try await service.stashes()
+        let ref = try XCTUnwrap(stashes.first?.index)
+
+        let diffFiles = try await service.stashDiffFiles(ref)
+        XCTAssertEqual(diffFiles.map(\.path), [longPath])
+
+        let diff = try await service.stashFileDiff(ref, path: longPath)
+        XCTAssertTrue(diff.contains("+++ b/\(longPath)"))
+        XCTAssertTrue(diff.contains("+token"))
+    }
+
     func testCompareFileListAndDiffAgainstWorkingTree() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("tracked.txt", contents: "one\n")
@@ -722,6 +742,114 @@ final class GitServiceBehaviorTests: XCTestCase {
             XCTFail("Expected squashCommits to throw for a single commit")
         } catch {
             // expected
+        }
+    }
+
+    // MARK: - Non-contiguous squash (Task 10.1)
+
+    /// R4.4, R4.5, R4.9: Non-contiguous squash {2, 5} out of commits 1..6 (HEAD = 6).
+    /// Commits 2 and 5 are squashed into commit 2's position; commits 1, 3, 4, 6 are preserved
+    /// in their original relative order.
+    func testSquashNonContiguousCommitsTwoAndFiveOutOfSix() async throws {
+        let repo = try TemporaryGitRepository()
+
+        // Create commits 1..6 each touching an independent file to avoid rebase conflicts
+        // when non-contiguous commits are reordered.
+        try repo.writeFile("file1.txt", contents: "content 1\n")
+        try repo.commitAll(message: "commit 1")
+
+        try repo.writeFile("file2.txt", contents: "content 2\n")
+        let hash2 = try repo.commitAll(message: "commit 2")
+
+        try repo.writeFile("file3.txt", contents: "content 3\n")
+        try repo.commitAll(message: "commit 3")
+
+        try repo.writeFile("file4.txt", contents: "content 4\n")
+        try repo.commitAll(message: "commit 4")
+
+        try repo.writeFile("file5.txt", contents: "content 5\n")
+        let hash5 = try repo.commitAll(message: "commit 5")
+
+        try repo.writeFile("file6.txt", contents: "content 6\n")
+        try repo.commitAll(message: "commit 6")
+
+        let service = GitService(repoPath: repo.path)
+
+        // Pass hashes in any order — implementation must handle it
+        try await service.squashCommits([hash5, hash2])
+
+        // After squash: commits 2 and 5 merged → history should have 5 commits (was 6)
+        let logLines = try repo.run(["log", "--oneline"])
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        XCTAssertEqual(logLines.count, 5,
+            "Expected 5 commits after squashing {2,5} out of 6, got: \(logLines)")
+
+        // The messages of non-squashed commits must be preserved in original relative order.
+        let allMessages = logLines.joined(separator: "\n")
+        XCTAssertTrue(allMessages.contains("commit 6"), "commit 6 must survive squash")
+        XCTAssertTrue(allMessages.contains("commit 4"), "commit 4 must survive squash")
+        XCTAssertTrue(allMessages.contains("commit 3"), "commit 3 must survive squash")
+        XCTAssertTrue(allMessages.contains("commit 1"), "commit 1 must survive squash")
+
+        // The squashed commit's message must contain at least commit 2's message
+        XCTAssertTrue(allMessages.contains("commit 2"),
+            "The squashed commit message must contain 'commit 2'")
+
+        // All files from all 6 original commits must still be present
+        for i in 1...6 {
+            XCTAssertEqual(
+                try repo.readFile("file\(i).txt"),
+                "content \(i)\n",
+                "file\(i).txt must have its original content after squash"
+            )
+        }
+    }
+
+    /// R4.5: Passing a clearly unreachable hash must throw without spawning rebase.
+    func testSquashRejectsUnreachableHash() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "one\n")
+        let realHash = try repo.commitAll(message: "initial")
+        try repo.appendFile("a.txt", contents: "two\n")
+        let realHash2 = try repo.commitAll(message: "second")
+        _ = realHash2
+
+        let fakeHash = "deadbeef1234deadbeef1234deadbeef12345678"
+        let service = GitService(repoPath: repo.path)
+
+        do {
+            try await service.squashCommits([realHash, fakeHash])
+            XCTFail("Expected squashCommits to throw when an unreachable hash is supplied")
+        } catch {
+            // Must throw without spawning rebase — we verify the repo state is unchanged
+            let logLines = try repo.run(["log", "--oneline"])
+                .split(separator: "\n")
+                .filter { !$0.isEmpty }
+            XCTAssertEqual(logLines.count, 2,
+                "Repo history must be unmodified after unreachable-hash rejection; got: \(logLines)")
+        }
+    }
+
+    /// R4.5: Passing a single (deduplicated) hash must throw before spawning rebase.
+    func testSquashRejectsSingleDistinctHash() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("a.txt", contents: "x\n")
+        let hash = try repo.commitAll(message: "only commit")
+
+        let service = GitService(repoPath: repo.path)
+        do {
+            // Passing the same hash twice — deduplication should leave only 1
+            try await service.squashCommits([hash, hash])
+            XCTFail("Expected squashCommits to throw for fewer than 2 distinct commits")
+        } catch {
+            // expected — verify history untouched
+            let logLines = try repo.run(["log", "--oneline"])
+                .split(separator: "\n")
+                .filter { !$0.isEmpty }
+            XCTAssertEqual(logLines.count, 1)
         }
     }
 

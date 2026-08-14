@@ -2614,37 +2614,101 @@ actor GitService {
     }
 
     /// Squash multiple commits into one using interactive rebase with GIT_SEQUENCE_EDITOR.
-    /// Input hashes may be in any selection order; they are normalized to current-branch history order.
+    ///
+    /// Input hashes may be in any order. The method:
+    /// 1. Deduplicates hashes and validates cardinality (R4.5)
+    /// 2. Validates all hashes are reachable from HEAD (R4.5 fail-fast)
+    /// 3. Computes the anchor (oldest selected commit on first-parent chain) and the
+    ///    full first-parent range from anchor to HEAD (oldest-first)
+    /// 4. Delegates plan construction to `SquashPlanBuilder` (R4.4)
+    /// 5. Writes the plan to a temp file and runs rebase with a byte-for-byte editor (R4.4)
     func squashCommits(_ hashes: [String]) async throws {
-        guard hashes.count >= 2 else {
-            throw GitError.operationFailed("Need at least 2 commits to squash")
+        // R4.5 — deduplicate and check cardinality
+        let distinct: [String] = {
+            var seen = Set<String>()
+            return hashes.filter { seen.insert($0).inserted }
+        }()
+        guard distinct.count >= 2 else {
+            throw GitError.operationFailed("Need at least 2 distinct commits to squash")
         }
 
-        let orderedHashes = await normalizeSquashCommitOrder(hashes)
-
-        // The oldest commit is the last in the list (as ordered in git log: newest first)
-        let oldestHash = orderedHashes.last!
-        let squashSet = Set(orderedHashes.dropLast()) // all except the oldest get squashed
-
-        // Build a sed-like script for GIT_SEQUENCE_EDITOR that replaces "pick" with "squash"
-        // for all commits except the oldest one
-        var sedParts: [String] = []
-        for hash in squashSet {
-            let shortHash = String(hash.prefix(7))
-            sedParts.append("s/^pick \(shortHash)/squash \(shortHash)/")
+        // R4.5 — reachability check: fail fast before touching working tree / index / refs
+        let reachable = await commitHashesOnCurrentBranch()
+        let unreachable = distinct.filter { !reachable.contains($0) }
+        guard unreachable.isEmpty else {
+            throw GitError.operationFailed(
+                "Commits not reachable from HEAD on current branch: \(unreachable.joined(separator: ", "))"
+            )
         }
-        let sedScript = sedParts.joined(separator: "; ")
-        let editor = "sed -i '' '\(sedScript)'"
 
-        // GIT_EDITOR=true prevents git from opening an interactive editor for the
-        // combined commit message in a non-TTY Process context, which would block forever.
+        // Compute anchor: the selected commit with the greatest first-parent distance from HEAD.
+        // `git log --first-parent --reverse --format=%H` lists commits oldest-first along the
+        // first-parent chain. The first hash in that list that is also in `distinct` is the anchor.
+        let firstParentAll = try await runGitOutput(
+            ["log", "--first-parent", "--reverse", "--format=%H", "HEAD"]
+        )
+        let allFirstParentOldestFirst = firstParentAll
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        let selectedSet = Set(distinct)
+        guard let anchor = allFirstParentOldestFirst.first(where: { selectedSet.contains($0) }) else {
+            throw GitError.operationFailed("None of the selected commits are on the first-parent chain")
+        }
+
+        // Compute the first-parent range from anchor (inclusive) to HEAD (inclusive), oldest-first.
+        // Using `<anchor>^..HEAD` excludes anchor's parent and includes anchor itself.
+        let rangeOutput = try await runGitOutput(
+            ["log", "--first-parent", "--reverse", "--format=%H", "\(anchor)^..HEAD"]
+        )
+        let rangeOldestToNewest = rangeOutput
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        // Build the squash plan (pure in-memory, no subprocess) — R4.4
+        let plan = try SquashPlanBuilder.build(
+            rangeOldestToNewest: rangeOldestToNewest,
+            selected: selectedSet
+        )
+
+        // Serialize the plan as "pick <fullhash>\nsquash <fullhash>\n..." — R4.4
+        let todoText = plan.todo.map { "\($0.action.rawValue) \($0.hash)" }.joined(separator: "\n") + "\n"
+
+        // Write todo text to a temporary file so GIT_SEQUENCE_EDITOR can copy it byte-for-byte — R4.4
+        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpTodo = tmpDir.appendingPathComponent("gitn-squash-todo-\(UUID().uuidString).txt")
+        let tmpScript = tmpDir.appendingPathComponent("gitn-squash-editor-\(UUID().uuidString).sh")
+        try todoText.write(to: tmpTodo, atomically: true, encoding: .utf8)
+        // Write an executable shell script that copies our todo file into git's todo file ($1).
+        // A script with a shebang ensures /bin/sh expands $1 correctly, unlike inline command
+        // strings that git may exec() directly without a shell.
+        let scriptText = "#!/bin/sh\ncp \(tmpTodo.path) \"$1\"\n"
+        try scriptText.write(to: tmpScript, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755 as NSNumber],
+            ofItemAtPath: tmpScript.path
+        )
+        defer {
+            try? FileManager.default.removeItem(at: tmpTodo)
+            try? FileManager.default.removeItem(at: tmpScript)
+        }
+
+        // GIT_SEQUENCE_EDITOR: the shell script copies the plan byte-for-byte into git's todo file.
+        // GIT_EDITOR=true: suppress any interactive editor for the combined commit message.
+        let seqEditor = tmpScript.path
+
+        // R4.6: non-zero exit from rebase propagates as GitError.operationFailed(stderr)
+        // because runGitWithEnv throws on non-zero exit.
         try await runGitWithEnv(
-            ["rebase", "-i", "\(oldestHash)^"],
+            ["rebase", "-i", "\(anchor)^"],
             env: [
-                "GIT_SEQUENCE_EDITOR": editor,
+                "GIT_SEQUENCE_EDITOR": seqEditor,
                 "GIT_EDITOR": "true"
             ]
         )
+
         invalidateRefMapCache()
     }
 
@@ -2919,40 +2983,42 @@ actor GitService {
         }
         invalidateRefMapCache()
     }
-    
+
+    /// Returns `true` when the working tree is dirty (`git status --porcelain` output is non-empty).
+    ///
+    /// Uses the same CLI output channel as other read-only status queries; does not
+    /// expand `GitService`'s responsibility beyond a simple status check (R5.7).
+    func hasWorkingTreeChanges() async -> Bool {
+        guard let output = try? await runGitOutput(["status", "--porcelain"]) else {
+            return false
+        }
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     func stashDiffFiles(_ stashRef: String) async throws -> [DiffFile] {
-        // Get tracked file changes (working tree + index diffs vs HEAD)
-        let output = try await runGitOutput(["stash", "show", "--stat", "--format=", stashRef])
+        // Use machine-readable output. `git stash show --stat` abbreviates long paths with `...`,
+        // which breaks later `git diff -- <path>` lookups for stash entries.
+        let pathsOutput = try await runGitOutput(["stash", "show", "--name-only", "--format=", stashRef])
+        let statsOutput = try await runGitOutput(["stash", "show", "--numstat", "--format=", stashRef])
+        var statsByPath: [String: (additions: Int, deletions: Int)] = [:]
+
+        for line in statsOutput.split(separator: "\n", omittingEmptySubsequences: true) {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 3 else { continue }
+
+            let path = String(fields[2])
+            let additions = Int(fields[0]) ?? 0
+            let deletions = Int(fields[1]) ?? 0
+            statsByPath[path] = (additions, deletions)
+        }
+
         var result: [DiffFile] = []
-        
-        // Parse output like: " file.txt | 5 +++++"
-        // or: " file.txt | 10 +++++-----"
-        for line in output.components(separatedBy: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty, trimmed.contains("|") else { continue }
-            
-            let parts = trimmed.components(separatedBy: "|")
-            guard parts.count == 2 else { continue }
-            
-            let path = parts[0].trimmingCharacters(in: .whitespaces)
-            let statPart = parts[1].trimmingCharacters(in: .whitespaces)
-            
-            // Parse stat like "5 +++++" or "10 +++++-----"
-            let statComponents = statPart.components(separatedBy: " ")
-            guard statComponents.count >= 2 else { continue }
-            
-            // Count + and - in the stat string
-            var additions = 0
-            var deletions = 0
-            for char in statComponents[1] {
-                if char == "+" {
-                    additions += 1
-                } else if char == "-" {
-                    deletions += 1
-                }
-            }
-            
-            result.append(DiffFile(additions: additions, deletions: deletions, path: path))
+        let orderedPaths = pathsOutput
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+        for path in orderedPaths {
+            let stats = statsByPath[path] ?? (0, 0)
+            result.append(DiffFile(additions: stats.additions, deletions: stats.deletions, path: path))
         }
 
         // Also include untracked files stored in the third parent (^3).

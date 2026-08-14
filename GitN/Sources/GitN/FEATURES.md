@@ -34,7 +34,7 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 ## 最近新增功能
 
 - **GitHub Pull Request 支持**：Sidebar 会根据远程地址自动识别 GitLab / GitHub，并切换为对应的 MR / PR 列表；支持 `Open` / `Mine` 过滤、浏览器打开、复制标题/链接，以及 `Rebase & Merge`。
-- **AI 提交工具可切换**：Settings 中可在 `cursor-agent` 与 `codex` 之间切换，界面会显示安装/登录状态，并根据所选工具给出不同的错误提示和引导。
+- **AI 提交工具**：使用 `codex` 生成提交信息，Settings 中会显示安装/登录状态，并给出对应的错误提示和引导。
 - **新仓库初始化更完整**：新建仓库后，如果仓库里还没有本地分支，GitN 会自动创建 `README.md`、写入初始提交并设置 `HEAD`，避免出现空仓库无法继续操作的问题。
 - **暂存区交互优化**：支持批量 stage / unstage、拖拽移动多选文件、未暂存区框选，多文件操作期间会显示处理中状态，减少重复刷新和误触。
 
@@ -194,8 +194,7 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 
 **前提：**
 
-- 在 **Settings → AI** 中选择要使用的 CLI 工具
-- `cursor-agent`：需要安装工具，并配置 API Key（或设置环境变量 `CURSOR_API_KEY`）
+- 在 **Settings → AI** 中确认 CLI 工具状态
 - `codex`：需要安装工具，并先在终端完成登录
 
 **新提交时使用：**
