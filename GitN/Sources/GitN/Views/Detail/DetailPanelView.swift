@@ -58,6 +58,15 @@ struct DetailPanelView: View {
     @State private var suppressNextFileListAutoScroll = false
     @State private var isResizingPane = false
     @State private var splitDragStartHeight: CGFloat?
+    @State private var stagingSplitRatio: CGFloat = 0.5
+    @State private var stagingSplitDragStartRatio: CGFloat?
+
+    // MARK: - Rubber-band selection (staged area)
+    @State private var isStagedRubberBanding = false
+    @State private var stagedRubberBandOrigin: CGPoint = .zero
+    @State private var stagedRubberBandCurrent: CGPoint = .zero
+    @State private var stagedRowFrames: [String: CGRect] = [:]
+
     @FocusState private var focusedTarget: FocusTarget?
 
     var body: some View {
@@ -886,195 +895,285 @@ struct DetailPanelView: View {
 
         return fileListContainer(maxHeight: .infinity) {
             GeometryReader { viewportGeo in
-                ScrollViewReader { proxy in
-                    let scrollView = ScrollView {
-                        VStack(spacing: 0) {
-                            // MARK: Staged section
-                            LazyVStack(spacing: 0) {
-                                stagingSectionHeader(
-                                    title: "已暂存",
-                                    count: stagedList.count,
-                                    allSelected: !stagedList.isEmpty,
-                                    onToggle: {
-                                        Task {
-                                            if stagedList.isEmpty {
-                                                await viewModel.stageAllFiles()
-                                            } else {
-                                                await viewModel.unstageAllFiles()
-                                            }
-                                        }
-                                    }
-                                )
+                let totalHeight = viewportGeo.size.height
+                let handleHeight: CGFloat = splitHandleHeight
+                let minPaneHeight: CGFloat = 60
+                let availableHeight = totalHeight - handleHeight
+                let stagedHeight = max(minPaneHeight, min(availableHeight - minPaneHeight, availableHeight * stagingSplitRatio))
+                let unstagedHeight = max(minPaneHeight, availableHeight - stagedHeight)
 
-                                ForEach(stagedList) { file in
-                                    StagingFileRow(
-                                        file: file,
-                                        isSelected: isStatusFileSelected(file.path, in: .staged),
-                                        isStaged: true,
-                                        onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                        dragPayload: dragPayload(for: file.path, sourceArea: .staged),
-                                        onClick: { flags in
-                                            focusedTarget = .fileList
-                                            suppressNextFileListAutoScroll = true
-                                            viewModel.toggleFileSelection(
-                                                file.path,
-                                                context: .staged,
-                                                isMulti: flags.contains(.command),
-                                                isRange: flags.contains(.shift),
-                                                orderedPaths: stagedFiles.map(\.path)
-                                            )
-                                            Task {
-                                                let diffFile = matchingDiffFile(for: file)
-                                                await viewModel.selectDiffFile(diffFile, context: .staged)
-                                                await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
-                                            }
-                                        }
-                                    )
-                                    .equatable()
-                                    .id(fileRowID(for: file.path, context: .staged))
-                                    .padding(.horizontal, 16)
-                                    .contextMenu { stagedFileContextMenu(file) }
-                                }
+                VStack(spacing: 0) {
+                    // MARK: Staged section (independently scrollable)
+                    stagedSectionView(stagedList: stagedList)
+                        .frame(height: stagedHeight)
+                        .clipped()
 
-                                if stagedList.isEmpty {
-                                    Text("Drag files here to stage")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.tertiary)
-                                        .frame(maxWidth: .infinity, minHeight: 28)
-                                }
-                            }
-                            .onDrop(of: [.text], isTargeted: nil) { providers in
-                                handleDrop(providers: providers, to: .staged)
-                            }
+                    // Resizable divider between staged and unstaged
+                    stagingSplitHandle(totalHeight: totalHeight)
 
-                            Divider().padding(.vertical, 2)
-
-                            // MARK: Unstaged section
-                            LazyVStack(spacing: 0) {
-                                    stagingSectionHeader(
-                                        title: "未暂存",
-                                        count: unstagedList.count,
-                                    allSelected: false,
-                                    onToggle: {
-                                        Task { await viewModel.stageAllFiles() }
-                                    },
-                                    onDiscard: {
-                                        let selected = viewModel.selectedFilePaths
-                                        let unstagedPathSet = Set(unstagedList.map(\.path))
-                                        let targets = selected.filter { unstagedPathSet.contains($0) }
-                                        if targets.count > 1 {
-                                            confirmDiscard(Array(targets))
-                                        } else {
-                                            confirmDiscard(unstagedList.map(\.path))
-                                        }
-                                    }
-                                )
-
-                                ForEach(unstagedList) { file in
-                                    StagingFileRow(
-                                        file: file,
-                                        isSelected: isStatusFileSelected(file.path, in: .unstaged),
-                                        isStaged: false,
-                                        onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                        dragPayload: dragPayload(for: file.path, sourceArea: .unstaged),
-                                        onClick: { flags in
-                                            focusedTarget = .fileList
-                                            suppressNextFileListAutoScroll = true
-                                            viewModel.toggleFileSelection(
-                                                file.path,
-                                                context: .unstaged,
-                                                isMulti: flags.contains(.command),
-                                                isRange: flags.contains(.shift),
-                                                orderedPaths: unstagedFiles.map(\.path)
-                                            )
-                                            Task {
-                                                let diffFile = matchingDiffFile(for: file)
-                                                await viewModel.selectDiffFile(diffFile, context: .unstaged)
-                                                await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
-                                            }
-                                        }
-                                    )
-                                    .equatable()
-                                    .id(fileRowID(for: file.path, context: .unstaged))
-                                    .modifier(UnstagedRowFrameReporter(filePath: file.path))
-                                    .padding(.horizontal, 16)
-                                    .contextMenu { unstagedFileContextMenu(file) }
-                                }
-
-                                if unstagedList.isEmpty {
-                                    Text("Drag files here to unstage")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.tertiary)
-                                        .frame(maxWidth: .infinity, minHeight: 28)
-                                }
-                            }
-                            .modifier(UnstagedSectionBoundsReporter())
-                            .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
-                                unstagedRowFrames = frames
-                            }
-                            .onDrop(of: [.text], isTargeted: nil) { providers in
-                                handleDrop(providers: providers, to: .unstaged)
-                            }
-
-                            // Guaranteed blank space at the bottom for marquee selection,
-                            // even when the list content exceeds the viewport height.
-                            Spacer().frame(minHeight: 40)
-                        }
-                        .frame(minHeight: viewportGeo.size.height, alignment: .top)
-                        // Full-area background for marquee/rubber-band selection.
-                        // Sits behind all content in the scroll area. Events only reach
-                        // this view when they don't hit a row's ImmediateDragNSView
-                        // overlay (i.e. left/right 16px margins, bottom blank space,
-                        // and the 40px spacer). Row overlays sit on top and intercept
-                        // events in the center column where rows exist.
-                        .background(
-                            MarqueeCanvasView(
-                                rowFrames: $unstagedRowFrames,
-                                onBegin: beginRubberBandSelection,
-                                onChange: updateRubberBandSelection,
-                                onEnd: endRubberBandSelection
-                            )
-                        )
-                        .overlay(alignment: .topLeading) {
-                            if isRubberBanding {
-                                rubberBandOverlay
-                            }
-                        }
-                        .coordinateSpace(name: "unstagedArea")
-                    }
-                    .onPreferenceChange(UnstagedSectionBoundsKey.self) { minY in
-                        unstagedSectionMinY = minY
-                    }
-                    .onChange(of: selectedStatusRowID) { _, rowID in
-                        handleFileListSelectionChange(rowID, with: proxy)
-                    }
-                    scrollView
+                    // MARK: Unstaged section (independently scrollable)
+                    unstagedSectionView(unstagedList: unstagedList, viewportHeight: unstagedHeight)
+                        .frame(height: unstagedHeight)
+                        .clipped()
                 }
-                .allowsHitTesting(!viewModel.isStageOperationInProgress)
-                .overlay(alignment: .topTrailing) {
-                    if viewModel.isStageOperationInProgress {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Processing...")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(Color(.windowBackgroundColor).opacity(0.72))
-                        )
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
-                        )
-                        .padding(8)
+                .coordinateSpace(name: "stagingSplit")
+            }
+            .allowsHitTesting(!viewModel.isStageOperationInProgress)
+            .overlay(alignment: .topTrailing) {
+                if viewModel.isStageOperationInProgress {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Processing...")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color(.windowBackgroundColor).opacity(0.72))
+                    )
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
+                    )
+                    .padding(8)
                 }
             }
         }
+    }
+
+    private func stagedSectionView(stagedList: [FileStatus]) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
+                        stagingSectionHeader(
+                            title: "已暂存",
+                            count: stagedList.count,
+                            allSelected: !stagedList.isEmpty,
+                            onToggle: {
+                                Task {
+                                    if stagedList.isEmpty {
+                                        await viewModel.stageAllFiles()
+                                    } else {
+                                        await viewModel.unstageAllFiles()
+                                    }
+                                }
+                            }
+                        )
+
+                        ForEach(stagedList) { file in
+                            StagingFileRow(
+                                file: file,
+                                isSelected: isStatusFileSelected(file.path, in: .staged),
+                                isStaged: true,
+                                onToggle: { Task { await viewModel.unstageFile(file.path) } },
+                                dragPayload: dragPayload(for: file.path, sourceArea: .staged),
+                                onClick: { flags in
+                                    focusedTarget = .fileList
+                                    suppressNextFileListAutoScroll = true
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .staged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: stagedFiles.map(\.path)
+                                    )
+                                    Task {
+                                        let diffFile = matchingDiffFile(for: file)
+                                        await viewModel.selectDiffFile(diffFile, context: .staged)
+                                        await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
+                                    }
+                                }
+                            )
+                            .equatable()
+                            .id(fileRowID(for: file.path, context: .staged))
+                            .modifier(StagedRowFrameReporter(filePath: file.path))
+                            .padding(.horizontal, 16)
+                            .contextMenu { stagedFileContextMenu(file) }
+                        }
+
+                        if stagedList.isEmpty {
+                            Text("Drag files here to stage")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, minHeight: 28)
+                        }
+                    }
+                    .onPreferenceChange(StagedRowFrameKey.self) { frames in
+                        stagedRowFrames = frames
+                    }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        handleDrop(providers: providers, to: .staged)
+                    }
+
+                    Spacer().frame(minHeight: 40)
+                }
+                .background(
+                    MarqueeCanvasView(
+                        rowFrames: $stagedRowFrames,
+                        onBegin: beginStagedRubberBandSelection,
+                        onChange: updateStagedRubberBandSelection,
+                        onEnd: endStagedRubberBandSelection
+                    )
+                )
+                .overlay(alignment: .topLeading) {
+                    if isStagedRubberBanding {
+                        stagedRubberBandOverlay
+                    }
+                }
+                .coordinateSpace(name: "stagedArea")
+            }
+            .onChange(of: selectedStatusRowID) { _, rowID in
+                if let rowID, rowID.hasPrefix("staged:") {
+                    handleFileListSelectionChange(rowID, with: proxy)
+                }
+            }
+        }
+    }
+
+    private func unstagedSectionView(unstagedList: [FileStatus], viewportHeight: CGFloat) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
+                        stagingSectionHeader(
+                            title: "未暂存",
+                            count: unstagedList.count,
+                            allSelected: false,
+                            onToggle: {
+                                Task { await viewModel.stageAllFiles() }
+                            },
+                            onDiscard: {
+                                let selected = viewModel.selectedFilePaths
+                                let unstagedPathSet = Set(unstagedList.map(\.path))
+                                let targets = selected.filter { unstagedPathSet.contains($0) }
+                                if targets.count > 1 {
+                                    confirmDiscard(Array(targets))
+                                } else {
+                                    confirmDiscard(unstagedList.map(\.path))
+                                }
+                            }
+                        )
+
+                        ForEach(unstagedList) { file in
+                            StagingFileRow(
+                                file: file,
+                                isSelected: isStatusFileSelected(file.path, in: .unstaged),
+                                isStaged: false,
+                                onToggle: { Task { await viewModel.stageFile(file.path) } },
+                                dragPayload: dragPayload(for: file.path, sourceArea: .unstaged),
+                                onClick: { flags in
+                                    focusedTarget = .fileList
+                                    suppressNextFileListAutoScroll = true
+                                    viewModel.toggleFileSelection(
+                                        file.path,
+                                        context: .unstaged,
+                                        isMulti: flags.contains(.command),
+                                        isRange: flags.contains(.shift),
+                                        orderedPaths: unstagedFiles.map(\.path)
+                                    )
+                                    Task {
+                                        let diffFile = matchingDiffFile(for: file)
+                                        await viewModel.selectDiffFile(diffFile, context: .unstaged)
+                                        await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
+                                    }
+                                }
+                            )
+                            .equatable()
+                            .id(fileRowID(for: file.path, context: .unstaged))
+                            .modifier(UnstagedRowFrameReporter(filePath: file.path))
+                            .padding(.horizontal, 16)
+                            .contextMenu { unstagedFileContextMenu(file) }
+                        }
+
+                        if unstagedList.isEmpty {
+                            Text("Drag files here to unstage")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .frame(maxWidth: .infinity, minHeight: 28)
+                        }
+                    }
+                    .modifier(UnstagedSectionBoundsReporter())
+                    .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
+                        unstagedRowFrames = frames
+                    }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        handleDrop(providers: providers, to: .unstaged)
+                    }
+
+                    // Blank space at bottom for marquee selection
+                    Spacer().frame(minHeight: 40)
+                }
+                .frame(minHeight: viewportHeight, alignment: .top)
+                .background(
+                    MarqueeCanvasView(
+                        rowFrames: $unstagedRowFrames,
+                        onBegin: beginRubberBandSelection,
+                        onChange: updateRubberBandSelection,
+                        onEnd: endRubberBandSelection
+                    )
+                )
+                .overlay(alignment: .topLeading) {
+                    if isRubberBanding {
+                        rubberBandOverlay
+                    }
+                }
+                .coordinateSpace(name: "unstagedArea")
+            }
+            .onPreferenceChange(UnstagedSectionBoundsKey.self) { minY in
+                unstagedSectionMinY = minY
+            }
+            .onChange(of: selectedStatusRowID) { _, rowID in
+                // Only auto-scroll in unstaged section if the selection is an unstaged file
+                if let rowID, rowID.hasPrefix("unstaged:") {
+                    handleFileListSelectionChange(rowID, with: proxy)
+                }
+            }
+        }
+    }
+
+    /// Resizable divider between staged and unstaged sections
+    private func stagingSplitHandle(totalHeight: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color(.separatorColor).opacity(0.55))
+            .frame(maxWidth: .infinity)
+            .frame(height: splitHandleHeight)
+            .overlay {
+                Capsule()
+                    .fill(Color.secondary.opacity(0.55))
+                    .frame(width: 36, height: 4)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("stagingSplit"))
+                    .onChanged { value in
+                        isResizingPane = true
+                        if stagingSplitDragStartRatio == nil {
+                            stagingSplitDragStartRatio = stagingSplitRatio
+                        }
+                        let handleHeight = splitHandleHeight
+                        let availableHeight = totalHeight - handleHeight
+                        guard availableHeight > 0 else { return }
+                        let newRatio = value.location.y / totalHeight
+                        let minRatio: CGFloat = 60 / availableHeight
+                        let maxRatio: CGFloat = 1.0 - (60 / availableHeight)
+                        stagingSplitRatio = min(max(newRatio, minRatio), maxRatio)
+                    }
+                    .onEnded { _ in
+                        isResizingPane = false
+                        stagingSplitDragStartRatio = nil
+                    }
+            )
+            .onHover { inside in
+                if inside {
+                    NSCursor.resizeUpDown.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
     }
 
     // MARK: - Conflict Staging File List (Staged / Unstaged during conflict resolution)
@@ -1560,6 +1659,62 @@ struct DetailPanelView: View {
     /// independently unit-testable.
     static func isPoint(_ point: CGPoint, insideAnyOf frames: [String: CGRect]) -> Bool {
         frames.values.contains { $0.contains(point) }
+    }
+
+    // MARK: - Rubber-band selection (staged area)
+
+    private func beginStagedRubberBandSelection(at location: CGPoint) {
+        guard isValidStagedRubberBandStart(location) else { return }
+        isStagedRubberBanding = true
+        stagedRubberBandOrigin = location
+        stagedRubberBandCurrent = location
+        viewModel.selectedFilePaths = []
+        viewModel.selectedFileListContext = .staged
+        viewModel.selectedDiffFile = nil
+    }
+
+    private func updateStagedRubberBandSelection(to location: CGPoint) {
+        guard isStagedRubberBanding else { return }
+        stagedRubberBandCurrent = location
+        updateStagedRubberBandHitTest()
+    }
+
+    private func endStagedRubberBandSelection() {
+        isStagedRubberBanding = false
+    }
+
+    private func isValidStagedRubberBandStart(_ location: CGPoint) -> Bool {
+        return !Self.isPoint(location, insideAnyOf: stagedRowFrames)
+    }
+
+    private func updateStagedRubberBandHitTest() {
+        let selRect = CGRect(
+            x: min(stagedRubberBandOrigin.x, stagedRubberBandCurrent.x),
+            y: min(stagedRubberBandOrigin.y, stagedRubberBandCurrent.y),
+            width: abs(stagedRubberBandCurrent.x - stagedRubberBandOrigin.x),
+            height: abs(stagedRubberBandCurrent.y - stagedRubberBandOrigin.y)
+        )
+        var newSelection: Set<String> = []
+        for file in stagedFiles {
+            if let frame = stagedRowFrames[file.path], selRect.intersects(frame) {
+                newSelection.insert(file.path)
+            }
+        }
+        viewModel.selectedFilePaths = newSelection
+    }
+
+    @ViewBuilder
+    private var stagedRubberBandOverlay: some View {
+        let x = min(stagedRubberBandOrigin.x, stagedRubberBandCurrent.x)
+        let y = min(stagedRubberBandOrigin.y, stagedRubberBandCurrent.y)
+        let w = max(1, abs(stagedRubberBandCurrent.x - stagedRubberBandOrigin.x))
+        let h = max(1, abs(stagedRubberBandCurrent.y - stagedRubberBandOrigin.y))
+        Rectangle()
+            .stroke(Color.accentColor.opacity(0.75), lineWidth: 1)
+            .background(Color.accentColor.opacity(0.08))
+            .frame(width: w, height: h)
+            .offset(x: x, y: y)
+            .allowsHitTesting(false)
     }
 
     // MARK: - AI Commit Button
@@ -2306,6 +2461,13 @@ private struct UnstagedRowFrameKey: PreferenceKey {
     }
 }
 
+private struct StagedRowFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 private struct CommittedMetadataHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -2332,6 +2494,21 @@ private struct UnstagedRowFrameReporter: ViewModifier {
                 Color.clear.preference(
                     key: UnstagedRowFrameKey.self,
                     value: [filePath: geo.frame(in: .named("unstagedArea"))]
+                )
+            }
+        )
+    }
+}
+
+private struct StagedRowFrameReporter: ViewModifier {
+    let filePath: String
+
+    func body(content: Content) -> some View {
+        content.background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: StagedRowFrameKey.self,
+                    value: [filePath: geo.frame(in: .named("stagedArea"))]
                 )
             }
         )
