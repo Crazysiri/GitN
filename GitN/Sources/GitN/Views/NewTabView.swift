@@ -207,6 +207,7 @@ private struct RecentRepoRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -223,6 +224,8 @@ private struct RecentRepoRow: View {
             .opacity(isHovering ? 1 : 0)
             .padding(.trailing, 48)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .background(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.12) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .padding(.horizontal, 40)

@@ -425,6 +425,7 @@ struct RepoContainerView: View {
                             .font(AppTypography.Chrome.toolbarMiniLabel)
                     }
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -436,6 +437,7 @@ struct RepoContainerView: View {
                 toolbarButtonSurface(width: 44, disabled: viewModel.isLoading) {
                     animatedRefreshLabel(isActive: viewModel.isLoading)
                 }
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isLoading)
@@ -468,6 +470,7 @@ struct RepoContainerView: View {
             toolbarButtonSurface(width: TopBarLayout.syncButtonWidth, disabled: viewModel.operationInProgress) {
                 animatedFetchLabel(isActive: viewModel.activeToolbarOperation == .fetch)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(viewModel.operationInProgress)
@@ -498,6 +501,7 @@ struct RepoContainerView: View {
                         .font(AppTypography.Chrome.toolbarMiniLabel)
                 }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -512,13 +516,14 @@ struct RepoContainerView: View {
         isMenuPresented: Binding<Bool>,
         @ViewBuilder menuContent: @escaping () -> MenuContent
     ) -> some View {
-        RepoToolbarSplitHoverSurface(
-            width: TopBarLayout.syncButtonWidth + 14,
+        let totalWidth = TopBarLayout.syncButtonWidth + 14
+        return RepoToolbarSplitHoverSurface(
+            width: totalWidth,
             height: TopBarLayout.height,
             isEnabled: !viewModel.operationInProgress
         ) {
-            HStack(spacing: 0) {
-                Button(action: action) {
+            Button(action: action) {
+                HStack(spacing: 0) {
                     animatedTransferLabel(
                         title: title,
                         systemImage: direction == .down ? "arrow.down.to.line" : "arrow.up.to.line",
@@ -526,18 +531,22 @@ struct RepoContainerView: View {
                         isActive: viewModel.activeToolbarOperation == activeOperation
                     )
                     .frame(width: TopBarLayout.syncButtonWidth, height: TopBarLayout.height)
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.operationInProgress)
 
+                    Spacer(minLength: 0)
+                }
+                .frame(width: totalWidth, height: TopBarLayout.height)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.operationInProgress)
+            .overlay(alignment: .trailing) {
                 Button {
                     isMenuPresented.wrappedValue.toggle()
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
                         .scaleEffect(x: 0.82, y: 1.0)
-                        .offset(x: -2)
-                        .frame(width: 13, height: TopBarLayout.height)
+                        .frame(width: 14, height: TopBarLayout.height)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -683,6 +692,8 @@ struct RepoContainerView: View {
             }
             .menuStyle(.borderlessButton)
             .foregroundStyle(.secondary)
+            .frame(width: 28, height: TopBarLayout.height)
+            .contentShape(Rectangle())
             .hoverTooltip("More\nAdditional repository actions")
             .fixedSize()
             .sheet(isPresented: $showIgnoreEditor) {

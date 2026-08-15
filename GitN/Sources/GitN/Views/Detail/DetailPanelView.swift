@@ -60,15 +60,6 @@ struct DetailPanelView: View {
     @State private var splitDragStartHeight: CGFloat?
     @FocusState private var focusedTarget: FocusTarget?
 
-    private var supportsUnstagedRubberBandSelection: Bool {
-        let version = ProcessInfo.processInfo.operatingSystemVersion
-        if version.majorVersion >= 16 { return true }
-        if version.majorVersion == 15 {
-            return version.minorVersion < 6
-        }
-        return false
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.isWorkingTreeConflictSelection, viewModel.isInConflict, let cType = viewModel.conflictType {
@@ -892,19 +883,13 @@ struct DetailPanelView: View {
     private var stagingFileList: some View {
         let stagedList = stagedFiles
         let unstagedList = unstagedFiles
-        let stagedPaths = stagedList.map(\.path)
-        let unstagedPaths = unstagedList.map(\.path)
 
         return fileListContainer(maxHeight: .infinity) {
             GeometryReader { viewportGeo in
-                let unstagedContentBottomY = unstagedRowFrames.values.map(\.maxY).max()
-                    ?? (unstagedSectionMinY ?? viewportGeo.size.height)
-                let unstagedBlankSelectionHeight = max(0, viewportGeo.size.height - unstagedContentBottomY)
-
                 ScrollViewReader { proxy in
                     let scrollView = ScrollView {
-                        LazyVStack(spacing: 0) {
-                        // Staged section — entire area is a drop target (works even when empty)
+                        VStack(spacing: 0) {
+                            // MARK: Staged section
                             LazyVStack(spacing: 0) {
                                 stagingSectionHeader(
                                     title: "已暂存",
@@ -927,27 +912,27 @@ struct DetailPanelView: View {
                                         isSelected: isStatusFileSelected(file.path, in: .staged),
                                         isStaged: true,
                                         onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                        dragPayload: dragPayload(for: file.path, sourceArea: .staged)
+                                        dragPayload: dragPayload(for: file.path, sourceArea: .staged),
+                                        onClick: { flags in
+                                            focusedTarget = .fileList
+                                            suppressNextFileListAutoScroll = true
+                                            viewModel.toggleFileSelection(
+                                                file.path,
+                                                context: .staged,
+                                                isMulti: flags.contains(.command),
+                                                isRange: flags.contains(.shift),
+                                                orderedPaths: stagedFiles.map(\.path)
+                                            )
+                                            Task {
+                                                let diffFile = matchingDiffFile(for: file)
+                                                await viewModel.selectDiffFile(diffFile, context: .staged)
+                                                await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
+                                            }
+                                        }
                                     )
                                     .equatable()
                                     .id(fileRowID(for: file.path, context: .staged))
-                                    .onTapGesture {
-                                        focusedTarget = .fileList
-                                        suppressNextFileListAutoScroll = true
-                                        let flags = NSEvent.modifierFlags
-                                        viewModel.toggleFileSelection(
-                                            file.path,
-                                            context: .staged,
-                                            isMulti: flags.contains(.command),
-                                            isRange: flags.contains(.shift),
-                                            orderedPaths: stagedPaths
-                                        )
-                                        Task {
-                                            let diffFile = matchingDiffFile(for: file)
-                                            await viewModel.selectDiffFile(diffFile, context: .staged)
-                                            await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
-                                        }
-                                    }
+                                    .padding(.horizontal, 16)
                                     .contextMenu { stagedFileContextMenu(file) }
                                 }
 
@@ -964,10 +949,11 @@ struct DetailPanelView: View {
 
                             Divider().padding(.vertical, 2)
 
-                            applyUnstagedSelectionGesture(to: LazyVStack(spacing: 0) {
-                                stagingSectionHeader(
-                                    title: "未暂存",
-                                    count: unstagedList.count,
+                            // MARK: Unstaged section
+                            LazyVStack(spacing: 0) {
+                                    stagingSectionHeader(
+                                        title: "未暂存",
+                                        count: unstagedList.count,
                                     allSelected: false,
                                     onToggle: {
                                         Task { await viewModel.stageAllFiles() }
@@ -990,32 +976,28 @@ struct DetailPanelView: View {
                                         isSelected: isStatusFileSelected(file.path, in: .unstaged),
                                         isStaged: false,
                                         onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                        dragPayload: isRubberBanding ? nil : dragPayload(for: file.path, sourceArea: .unstaged)
+                                        dragPayload: dragPayload(for: file.path, sourceArea: .unstaged),
+                                        onClick: { flags in
+                                            focusedTarget = .fileList
+                                            suppressNextFileListAutoScroll = true
+                                            viewModel.toggleFileSelection(
+                                                file.path,
+                                                context: .unstaged,
+                                                isMulti: flags.contains(.command),
+                                                isRange: flags.contains(.shift),
+                                                orderedPaths: unstagedFiles.map(\.path)
+                                            )
+                                            Task {
+                                                let diffFile = matchingDiffFile(for: file)
+                                                await viewModel.selectDiffFile(diffFile, context: .unstaged)
+                                                await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
+                                            }
+                                        }
                                     )
                                     .equatable()
                                     .id(fileRowID(for: file.path, context: .unstaged))
-                                    .modifier(UnstagedRowFrameReporter(
-                                        isEnabled: supportsUnstagedRubberBandSelection,
-                                        filePath: file.path
-                                    ))
-                                    .onTapGesture {
-                                        guard !isRubberBanding else { return }
-                                        focusedTarget = .fileList
-                                        suppressNextFileListAutoScroll = true
-                                        let flags = NSEvent.modifierFlags
-                                        viewModel.toggleFileSelection(
-                                            file.path,
-                                            context: .unstaged,
-                                            isMulti: flags.contains(.command),
-                                            isRange: flags.contains(.shift),
-                                            orderedPaths: unstagedPaths
-                                        )
-                                        Task {
-                                            let diffFile = matchingDiffFile(for: file)
-                                            await viewModel.selectDiffFile(diffFile, context: .unstaged)
-                                            await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
-                                        }
-                                    }
+                                    .modifier(UnstagedRowFrameReporter(filePath: file.path))
+                                    .padding(.horizontal, 16)
                                     .contextMenu { unstagedFileContextMenu(file) }
                                 }
 
@@ -1026,116 +1008,73 @@ struct DetailPanelView: View {
                                         .frame(maxWidth: .infinity, minHeight: 28)
                                 }
                             }
-                            .modifier(UnstagedSectionBoundsReporter(
-                                isEnabled: supportsUnstagedRubberBandSelection
-                            ))
-                            .overlay(alignment: .topLeading) {
-                                if unstagedBlankSelectionHeight > 0,
-                                   let unstagedSectionMinY {
-                                    UnstagedBlankSelectionHitView(
-                                        originY: unstagedContentBottomY,
-                                        debugColor: .clear,
-                                        onBegin: beginRubberBandSelection,
-                                        onChange: updateRubberBandSelection,
-                                        onEnd: endRubberBandSelection
-                                    )
-                                    .frame(
-                                        width: viewportGeo.size.width,
-                                        height: unstagedBlankSelectionHeight
-                                    )
-                                    .offset(y: unstagedContentBottomY - unstagedSectionMinY)
-                                }
-                            }
+                            .modifier(UnstagedSectionBoundsReporter())
                             .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
-                                guard supportsUnstagedRubberBandSelection else { return }
                                 unstagedRowFrames = frames
                             }
                             .onDrop(of: [.text], isTargeted: nil) { providers in
                                 handleDrop(providers: providers, to: .unstaged)
-                            })
+                            }
+
+                            // Guaranteed blank space at the bottom for marquee selection,
+                            // even when the list content exceeds the viewport height.
+                            Spacer().frame(minHeight: 40)
                         }
+                        .frame(minHeight: viewportGeo.size.height, alignment: .top)
+                        // Full-area background for marquee/rubber-band selection.
+                        // Sits behind all content in the scroll area. Events only reach
+                        // this view when they don't hit a row's ImmediateDragNSView
+                        // overlay (i.e. left/right 16px margins, bottom blank space,
+                        // and the 40px spacer). Row overlays sit on top and intercept
+                        // events in the center column where rows exist.
+                        .background(
+                            MarqueeCanvasView(
+                                rowFrames: $unstagedRowFrames,
+                                onBegin: beginRubberBandSelection,
+                                onChange: updateRubberBandSelection,
+                                onEnd: endRubberBandSelection
+                            )
+                        )
+                        .overlay(alignment: .topLeading) {
+                            if isRubberBanding {
+                                rubberBandOverlay
+                            }
+                        }
+                        .coordinateSpace(name: "unstagedArea")
                     }
-                    .coordinateSpace(name: "unstagedArea")
                     .onPreferenceChange(UnstagedSectionBoundsKey.self) { minY in
-                        guard supportsUnstagedRubberBandSelection else { return }
                         unstagedSectionMinY = minY
-                    }
-                    .overlay(alignment: .topLeading) {
-                        if supportsUnstagedRubberBandSelection && isRubberBanding {
-                            rubberBandOverlay
-                        }
                     }
                     .onChange(of: selectedStatusRowID) { _, rowID in
                         handleFileListSelectionChange(rowID, with: proxy)
                     }
                     scrollView
                 }
-            }
-            .allowsHitTesting(!viewModel.isStageOperationInProgress)
-            .overlay(alignment: .topTrailing) {
-                if viewModel.isStageOperationInProgress {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Processing...")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(Color(.windowBackgroundColor).opacity(0.72))
-                    )
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
-                    )
-                    .padding(8)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func applyUnstagedSelectionGesture<Content: View>(to content: Content) -> some View {
-        if supportsUnstagedRubberBandSelection {
-            content.simultaneousGesture(unstagedRubberBandGesture)
-        } else {
-            content
-        }
-    }
-
-    private var unstagedRubberBandGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.25)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("unstagedArea")))
-            .onChanged { value in
-                switch value {
-                case .first(true):
-                    break
-                case .second(true, let drag?):
-                    guard isValidRubberBandStart(drag.startLocation) else {
-                        if isRubberBanding {
-                            isRubberBanding = false
+                .allowsHitTesting(!viewModel.isStageOperationInProgress)
+                .overlay(alignment: .topTrailing) {
+                    if viewModel.isStageOperationInProgress {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Processing...")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
                         }
-                        return
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(Color(.windowBackgroundColor).opacity(0.72))
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(Color(.separatorColor).opacity(0.45), lineWidth: 0.5)
+                        )
+                        .padding(8)
                     }
-                    if !isRubberBanding {
-                        isRubberBanding = true
-                        rubberBandOrigin = drag.startLocation
-                        viewModel.selectedFilePaths = []
-                        viewModel.selectedFileListContext = .unstaged
-                        viewModel.selectedDiffFile = nil
-                    }
-                    rubberBandCurrent = drag.location
-                    updateRubberBandSelection()
-                default:
-                    break
                 }
             }
-            .onEnded { _ in
-                isRubberBanding = false
-            }
+        }
     }
 
     // MARK: - Conflict Staging File List (Staged / Unstaged during conflict resolution)
@@ -1170,26 +1109,26 @@ struct DetailPanelView: View {
                                     isSelected: isStatusFileSelected(file.path, in: .staged),
                                     isStaged: true,
                                     onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path, sourceArea: .staged)
+                                    dragPayload: dragPayload(for: file.path, sourceArea: .staged),
+                                    onClick: { flags in
+                                        focusedTarget = .fileList
+                                        suppressNextFileListAutoScroll = true
+                                        viewModel.toggleFileSelection(
+                                            file.path,
+                                            context: .staged,
+                                            isMulti: flags.contains(.command),
+                                            isRange: flags.contains(.shift),
+                                            orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                                        )
+                                        Task {
+                                            let diffFile = matchingDiffFile(for: file)
+                                            await viewModel.selectDiffFile(diffFile, context: .staged)
+                                            await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
+                                        }
+                                    }
                                 )
                                 .id(fileRowID(for: file.path, context: .staged))
-                                .onTapGesture {
-                                    focusedTarget = .fileList
-                                    suppressNextFileListAutoScroll = true
-                                    let flags = NSEvent.modifierFlags
-                                    viewModel.toggleFileSelection(
-                                        file.path,
-                                        context: .staged,
-                                        isMulti: flags.contains(.command),
-                                        isRange: flags.contains(.shift),
-                                        orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
-                                    )
-                                    Task {
-                                        let diffFile = matchingDiffFile(for: file)
-                                        await viewModel.selectDiffFile(diffFile, context: .staged)
-                                        await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
-                                    }
-                                }
+                                .padding(.horizontal, 16)
                                 .contextMenu {
                                     conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
                                 }
@@ -1224,26 +1163,26 @@ struct DetailPanelView: View {
                                     isSelected: isStatusFileSelected(file.path, in: .unstaged),
                                     isStaged: false,
                                     onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path, sourceArea: .unstaged)
+                                    dragPayload: dragPayload(for: file.path, sourceArea: .unstaged),
+                                    onClick: { flags in
+                                        focusedTarget = .fileList
+                                        suppressNextFileListAutoScroll = true
+                                        viewModel.toggleFileSelection(
+                                            file.path,
+                                            context: .unstaged,
+                                            isMulti: flags.contains(.command),
+                                            isRange: flags.contains(.shift),
+                                            orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
+                                        )
+                                        Task {
+                                            let diffFile = matchingDiffFile(for: file)
+                                            await viewModel.selectDiffFile(diffFile, context: .unstaged)
+                                            await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
+                                        }
+                                    }
                                 )
                                 .id(fileRowID(for: file.path, context: .unstaged))
-                                .onTapGesture {
-                                    focusedTarget = .fileList
-                                    suppressNextFileListAutoScroll = true
-                                    let flags = NSEvent.modifierFlags
-                                    viewModel.toggleFileSelection(
-                                        file.path,
-                                        context: .unstaged,
-                                        isMulti: flags.contains(.command),
-                                        isRange: flags.contains(.shift),
-                                        orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
-                                    )
-                                    Task {
-                                        let diffFile = matchingDiffFile(for: file)
-                                        await viewModel.selectDiffFile(diffFile, context: .unstaged)
-                                        await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
-                                    }
-                                }
+                                .padding(.horizontal, 16)
                                 .contextMenu {
                                     conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
                                 }
@@ -1609,7 +1548,18 @@ struct DetailPanelView: View {
 
     private func isValidRubberBandStart(_ location: CGPoint) -> Bool {
         guard let unstagedSectionMinY else { return false }
-        return location.y >= unstagedSectionMinY
+        guard location.y >= unstagedSectionMinY else { return false }
+        // Never start a marquee on top of an existing row — a press-drag that
+        // begins on a row must be free to become a native item drag
+        // (`.draggable`) instead of being captured by the long-press-based
+        // rubber-band recognizer.
+        return !Self.isPoint(location, insideAnyOf: unstagedRowFrames)
+    }
+
+    /// Pure helper (no SwiftUI/view state) so this containment check is
+    /// independently unit-testable.
+    static func isPoint(_ point: CGPoint, insideAnyOf frames: [String: CGRect]) -> Bool {
+        frames.values.contains { $0.contains(point) }
     }
 
     // MARK: - AI Commit Button
@@ -2372,44 +2322,32 @@ private struct UnstagedSectionBoundsKey: PreferenceKey {
     }
 }
 
+
 private struct UnstagedRowFrameReporter: ViewModifier {
-    let isEnabled: Bool
     let filePath: String
 
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if isEnabled {
-            content.background(
-                GeometryReader { geo in
-                    Color.clear.preference(
-                        key: UnstagedRowFrameKey.self,
-                        value: [filePath: geo.frame(in: .named("unstagedArea"))]
-                    )
-                }
-            )
-        } else {
-            content
-        }
+        content.background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: UnstagedRowFrameKey.self,
+                    value: [filePath: geo.frame(in: .named("unstagedArea"))]
+                )
+            }
+        )
     }
 }
 
 private struct UnstagedSectionBoundsReporter: ViewModifier {
-    let isEnabled: Bool
-
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if isEnabled {
-            content.background(
-                GeometryReader { geo in
-                    Color.clear.preference(
-                        key: UnstagedSectionBoundsKey.self,
-                        value: geo.frame(in: .named("unstagedArea")).minY
-                    )
-                }
-            )
-        } else {
-            content
-        }
+        content.background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: UnstagedSectionBoundsKey.self,
+                    value: geo.frame(in: .named("unstagedArea")).minY
+                )
+            }
+        )
     }
 }
 
@@ -2440,16 +2378,284 @@ private struct UnstagedBlankSelectionHitView: NSViewRepresentable {
     }
 }
 
-private struct StatusRowContentDragModifier: ViewModifier {
-    let payload: String?
+// MARK: - Marquee Canvas (full-area overlay with hit-test pass-through)
 
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if let payload {
-            content.draggable(payload)
-        } else {
-            content
+/// Full-area transparent overlay placed on top of the ScrollView. Uses AppKit's
+/// `hitTest` to decide event ownership at the NSView level:
+/// - If the click lands inside a row frame → returns nil → event passes through
+///   to the row's `ImmediateDragNSView` (drag/click).
+/// - If the click lands in blank space (left/right margins, bottom area) →
+///   returns self → runs the marquee drag-tracking loop.
+///
+/// This mirrors Finder's model: the "canvas" owns the marquee, items own their
+/// own drag, and hit-testing cleanly separates the two without any gesture-arena
+/// competition.
+private struct MarqueeCanvasView: NSViewRepresentable {
+    @Binding var rowFrames: [String: CGRect]
+    let onBegin: (CGPoint) -> Void
+    let onChange: (CGPoint) -> Void
+    let onEnd: () -> Void
+
+    func makeNSView(context: Context) -> MarqueeCanvasNSView {
+        let view = MarqueeCanvasNSView()
+        view.onBegin = onBegin
+        view.onChange = onChange
+        view.onEnd = onEnd
+        view.rowFrames = rowFrames
+        return view
+    }
+
+    func updateNSView(_ nsView: MarqueeCanvasNSView, context: Context) {
+        nsView.onBegin = onBegin
+        nsView.onChange = onChange
+        nsView.onEnd = onEnd
+        nsView.rowFrames = rowFrames
+    }
+}
+
+private final class MarqueeCanvasNSView: NSView {
+    var onBegin: ((CGPoint) -> Void)?
+    var onChange: ((CGPoint) -> Void)?
+    var onEnd: (() -> Void)?
+    var rowFrames: [String: CGRect] = [:]
+    /// Horizontal inset matching the row padding. Clicks within this margin
+    /// on either side are always handled by the marquee (blank space).
+    /// Clicks in the center column are passed through to the row overlays.
+    var horizontalInset: CGFloat = 16
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+
+        // Left or right margin → always handle (marquee blank space).
+        if local.x < horizontalInset || local.x > bounds.width - horizontalInset {
+            return self
         }
+
+        // Center column: check if any row frame contains this point.
+        // Row frames are in the scroll content coordinate space which matches
+        // our local space (we're overlaid on the ScrollView, both use flipped coords).
+        // However, row frames shift as the user scrolls. We must account for the
+        // scroll offset. Since we can't easily get it here, we use a different
+        // heuristic: check if ANY subview (the row's ImmediateDragNSView) would
+        // handle this point by walking the view tree below us.
+        //
+        // Simpler reliable approach: if the point is in the center column,
+        // always pass through. The rows cover the center column where they
+        // exist. Below the last row the center column has no row overlay, so
+        // events will fall to the scroll view which doesn't handle left-clicks
+        // on blank content — they'll bubble back up. Unfortunately this means
+        // the bottom blank center area won't trigger marquee either.
+        //
+        // FINAL approach: pass through in center ONLY if the ScrollView has a
+        // subview (ImmediateDragNSView) at that point. Use the recursive
+        // hitTest of the underlying view hierarchy.
+
+        // Let the normal NSView hit-test walk find if there's an
+        // ImmediateDragNSView below us at this point. We temporarily remove
+        // ourselves from the hit-test by returning nil and letting the
+        // superview re-evaluate. But we can't do that from here...
+        //
+        // Instead: always pass through in center column, and handle the bottom
+        // blank space by detecting that we're below all rows. Use rowFrames.
+        let maxRowY = rowFrames.values.map(\.maxY).max() ?? 0
+        if maxRowY > 0, local.y > maxRowY {
+            // Below all rows, even in center column → marquee.
+            return self
+        }
+
+        // Inside center column where rows exist → pass through to rows.
+        return nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let start = convert(event.locationInWindow, from: nil)
+        onBegin?(start)
+
+        guard let window else {
+            onEnd?()
+            return
+        }
+
+        while let next = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            switch next.type {
+            case .leftMouseDragged:
+                let current = convert(next.locationInWindow, from: nil)
+                onChange?(current)
+            case .leftMouseUp:
+                onEnd?()
+                return
+            default:
+                break
+            }
+        }
+
+        onEnd?()
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        // Let right-clicks pass to SwiftUI context menus via responder chain.
+        super.rightMouseDown(with: event)
+    }
+}
+
+/// Pure decision helper: has the pointer moved far enough from the initial
+/// mouse-down point to be treated as the start of a drag rather than a click?
+/// Kept free of AppKit event plumbing so it can be unit tested directly.
+enum ImmediateDragDecider {
+    static func shouldBeginDrag(from start: CGPoint, to current: CGPoint, threshold: CGFloat = 3) -> Bool {
+        let dx = current.x - start.x
+        let dy = current.y - start.y
+        return (dx * dx + dy * dy) >= threshold * threshold
+    }
+}
+
+/// A transparent AppKit view placed over a file row's content that owns the
+/// row's left-mouse interaction:
+/// - a small pointer move after mouse-down begins a native `NSDraggingSession`
+///   immediately (no press-and-hold, unlike SwiftUI `.draggable()`),
+/// - a press released without crossing the threshold is reported as a click,
+/// - right-clicks are forwarded up the responder chain so the SwiftUI
+///   `.contextMenu` attached to the row still works.
+private struct ImmediateDragSourceView: NSViewRepresentable {
+    let payload: String
+    let onClick: (NSEvent.ModifierFlags) -> Void
+    var excludeTrailingWidth: CGFloat = 0
+
+    func makeNSView(context: Context) -> ImmediateDragNSView {
+        let view = ImmediateDragNSView()
+        view.payload = payload
+        view.onClick = onClick
+        view.excludeTrailingWidth = excludeTrailingWidth
+        return view
+    }
+
+    func updateNSView(_ nsView: ImmediateDragNSView, context: Context) {
+        nsView.payload = payload
+        nsView.onClick = onClick
+        nsView.excludeTrailingWidth = excludeTrailingWidth
+    }
+}
+
+private final class ImmediateDragNSView: NSView, NSDraggingSource {
+    var payload: String = ""
+    var onClick: ((NSEvent.ModifierFlags) -> Void)?
+    var excludeTrailingWidth: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+
+    // Right-clicks: defer to the responder chain (the SwiftUI-hosted context
+    // menu lives on an ancestor), so we don't swallow the row's context menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        superview?.menu(for: event) ?? super.menu(for: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let localPoint = convert(event.locationInWindow, from: nil)
+
+        // If the click is in the trailing exclusion zone (the +/- button area),
+        // forward it up the responder chain so the SwiftUI Button handles it.
+        if excludeTrailingWidth > 0, localPoint.x >= bounds.width - excludeTrailingWidth {
+            super.mouseDown(with: event)
+            return
+        }
+
+        guard let window else {
+            onClick?(event.modifierFlags)
+            return
+        }
+
+        let start = localPoint
+
+        while let next = window.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp],
+            until: .distantFuture,
+            inMode: .eventTracking,
+            dequeue: true
+        ) {
+            switch next.type {
+            case .leftMouseDragged:
+                let current = convert(next.locationInWindow, from: nil)
+                if ImmediateDragDecider.shouldBeginDrag(from: start, to: current) {
+                    beginDrag(with: next)
+                    return
+                }
+            case .leftMouseUp:
+                onClick?(next.modifierFlags)
+                return
+            default:
+                break
+            }
+        }
+    }
+
+    private func beginDrag(with event: NSEvent) {
+        let decoded = StageFileDragPayload.decode(payload)
+        guard !decoded.paths.isEmpty else { return }
+
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(payload, forType: .string)
+
+        let image = Self.dragImage(for: decoded)
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        let origin = convert(event.locationInWindow, from: nil)
+        draggingItem.setDraggingFrame(
+            NSRect(
+                x: origin.x - image.size.width / 2,
+                y: origin.y - image.size.height / 2,
+                width: image.size.width,
+                height: image.size.height
+            ),
+            contents: image
+        )
+
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        .move
+    }
+
+    static func dragImage(for payload: StageFileDragPayload) -> NSImage {
+        let label: String
+        if payload.paths.count > 1 {
+            label = "\(payload.paths.count) files"
+        } else {
+            label = (payload.paths.first as NSString?)?.lastPathComponent ?? "file"
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let textSize = (label as NSString).size(withAttributes: attributes)
+        let horizontalPadding: CGFloat = 8
+        let verticalPadding: CGFloat = 4
+        let size = NSSize(
+            width: ceil(textSize.width) + horizontalPadding * 2,
+            height: ceil(textSize.height) + verticalPadding * 2
+        )
+
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+        NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 4, yRadius: 4).fill()
+        (label as NSString).draw(
+            at: NSPoint(x: horizontalPadding, y: verticalPadding),
+            withAttributes: attributes
+        )
+        image.unlockFocus()
+        return image
     }
 }
 
@@ -2696,7 +2902,11 @@ struct StagingFileRow: View, Equatable {
     let isSelected: Bool
     let isStaged: Bool
     let onToggle: () -> Void
-    let dragPayload: String?
+    let dragPayload: String
+    /// Invoked when the row is clicked (pointer pressed and released without
+    /// moving past the drag threshold). Carries the modifier flags at click
+    /// time so the caller can apply ⌘/⇧ multi-select semantics.
+    let onClick: (NSEvent.ModifierFlags) -> Void
 
     static func == (lhs: StagingFileRow, rhs: StagingFileRow) -> Bool {
         lhs.file == rhs.file &&
@@ -2723,8 +2933,6 @@ struct StagingFileRow: View, Equatable {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .modifier(StatusRowContentDragModifier(payload: dragPayload))
 
             Button(action: onToggle) {
                 Image(systemName: isStaged ? "minus.circle" : "plus.circle")
@@ -2740,6 +2948,17 @@ struct StagingFileRow: View, Equatable {
         .padding(.vertical, 3)
         .background(isSelected ? Color(.selectedContentBackgroundColor).opacity(0.2) : Color.clear)
         .contentShape(Rectangle())
+        // Custom AppKit drag source covers the full row so dragging starts
+        // immediately on a small pointer move (Finder-like). The +/- button
+        // in the rightmost 24px is excluded: clicks there fall through to
+        // the button via the responder chain.
+        .overlay {
+            ImmediateDragSourceView(
+                payload: dragPayload,
+                onClick: onClick,
+                excludeTrailingWidth: 24
+            )
+        }
     }
 
     private var statusColor: Color {
