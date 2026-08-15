@@ -2,7 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     private enum ChromeLayout {
-        static let tabRowHeight: CGFloat = 47
+        /// Minimal system titlebar row — just enough for traffic lights
+        static let titlebarHeight: CGFloat = 25
+        /// Tab row below the titlebar
+        static let tabRowHeight: CGFloat = 43
+        /// Total top chrome height (titlebar + tab row)
+        static let totalChromeHeight: CGFloat = titlebarHeight + tabRowHeight
         static let leadingTrafficLightInset: CGFloat = 86
     }
 
@@ -15,7 +20,7 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { proxy in
             let topInset = proxy.safeAreaInsets.top
-            let contentOffset = max(0, ChromeLayout.tabRowHeight - topInset)
+            let contentOffset = max(0, ChromeLayout.totalChromeHeight - topInset)
 
             ZStack(alignment: .top) {
                 ZStack {
@@ -35,7 +40,7 @@ struct ContentView: View {
                 }
                 .padding(.top, contentOffset)
 
-                topChromeBar
+                topChromeArea
                     .ignoresSafeArea(.container, edges: .top)
             }
         }
@@ -75,11 +80,29 @@ struct ContentView: View {
             || (!appModel.showNewTab && tab.id == appModel.selectedTabID)
     }
 
-    private var topChromeBar: some View {
-        HStack(spacing: 0) {
-            Color.clear
-                .frame(width: ChromeLayout.leadingTrafficLightInset, height: ChromeLayout.tabRowHeight)
+    /// Top chrome area: a minimal titlebar row (draggable, for traffic lights) + a separate tab row below
+    private var topChromeArea: some View {
+        VStack(spacing: 0) {
+            // Row 1: Minimal system titlebar — traffic lights live here, window draggable
+            titlebarRow
 
+            // Row 2: Tab bar — NOT in the titlebar, so no window drag interference
+            tabRow
+        }
+    }
+
+    /// Minimal titlebar row: traffic light area, window draggable
+    private var titlebarRow: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+        }
+        .frame(height: ChromeLayout.titlebarHeight)
+        .background(ChromePalette.navigationBackground)
+    }
+
+    /// Tab row: sits below the titlebar, separate from the system chrome
+    private var tabRow: some View {
+        HStack(spacing: 0) {
             TabBarView()
 
             Spacer(minLength: 0)
@@ -90,7 +113,7 @@ struct ContentView: View {
                 Image(systemName: "sparkles.rectangle.stack")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 22, height: 22)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(isHoveringFeaturesButton ? ChromePalette.chromeButtonHoverFill : ChromePalette.chromeButtonFill)
@@ -104,7 +127,6 @@ struct ContentView: View {
                     )
             }
             .buttonStyle(.plain)
-            .frame(width: 34, height: 34)
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .onHover { isHoveringFeaturesButton = $0 }
             .hoverTooltip("Features")

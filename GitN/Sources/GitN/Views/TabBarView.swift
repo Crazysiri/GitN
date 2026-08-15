@@ -8,16 +8,18 @@ struct TabBarView: View {
     @State private var hostingWindow: NSWindow? = nil
     @State private var isHoveringAddButton = false
 
+    // Drag-to-reorder state
+    @State private var dragState = TabDragState()
+
     private enum Layout {
-        static let barHeight: CGFloat = 47
+        static let barHeight: CGFloat = 43
         static let trailingControlsWidth: CGFloat = 30
         static let trailingGap: CGFloat = 10
-        static let addButtonSize = CGSize(width: 24, height: 24)
+        static let addButtonSize = CGSize(width: 22, height: 22)
         static let maxTabWidth: CGFloat = 220
         static let contentHorizontalPadding: CGFloat = 10
         static let maxToolbarFraction: CGFloat = 0.68
         static let tabCornerRadius: CGFloat = 7
-        /// Fixed chrome overhead: left-pad(12) + SF-symbol(~20) + spacing(8) + spacing(8) + close(16) + right-pad(12) + safety(8)
         static let tabChromeOverhead: CGFloat = 84
         static let maxVisibleCharacters = 20
     }
@@ -33,15 +35,25 @@ struct TabBarView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(Array(zip(appModel.tabs.indices, appModel.tabs)), id: \.1.id) { index, tab in
+                        let isDragging = dragState.draggingTabID == tab.id && dragState.phase == .dragging
+                        let visualOffset = computeVisualOffset(for: tab, at: index, tabWidths: tabWidths)
+
                         TabItemView(
                             tab: tab,
                             isSelected: tab.id == appModel.selectedTabID,
                             maxWidth: tabWidths[index],
+                            isDragActive: isDragging,
                             onSelect: {
                                 appModel.selectedTabID = tab.id
                                 appModel.showNewTab = false
                             },
                             onClose: { appModel.closeTab(tab.id) }
+                        )
+                        .offset(x: visualOffset)
+                        .zIndex(isDragging ? 100 : 0)
+                        .animation(isDragging ? nil : .easeInOut(duration: 0.2), value: visualOffset)
+                        .simultaneousGesture(
+                            tabDragGesture(for: tab, index: index, tabWidths: tabWidths)
                         )
                     }
                 }
@@ -89,6 +101,82 @@ struct TabBarView: View {
         }
     }
 
+    // MARK: - Drag Gesture (long-press activated via timer)
+
+    /// A DragGesture that only activates reorder mode after being held for 0.6s.
+    /// Before that threshold, dragging is a no-op and normal clicks pass through.
+    private func tabDragGesture(for tab: RepoTab, index: Int, tabWidths: [CGFloat]) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let elapsed = Date().timeIntervalSince(value.time)
+
+                if dragState.phase == .idle {
+                    // Check if we've been pressing long enough
+                    if elapsed >= 0.6 {
+                        // Activate drag
+                        NSCursor.closedHand.push()
+                        dragState.phase = .dragging
+                        dragState.draggingTabID = tab.id
+                        dragState.startX = value.startLocation.x
+                        dragState.currentOffset = value.translation.width
+                    }
+                    // Otherwise still waiting — do nothing (no visual effect)
+                } else if dragState.phase == .dragging && dragState.draggingTabID == tab.id {
+                    // Already dragging — update offset
+                    dragState.currentOffset = value.translation.width
+                }
+            }
+            .onEnded { value in
+                guard dragState.phase == .dragging, dragState.draggingTabID == tab.id else {
+                    // Was never activated — this was a short press, ignore
+                    dragState.reset()
+                    return
+                }
+
+                // Compute destination
+                let currentIndex = appModel.tabs.firstIndex(where: { $0.id == tab.id }) ?? index
+                let destIndex = dragState.proposedDestinationIndex(
+                    dragIndex: currentIndex,
+                    tabWidths: tabWidths
+                )
+
+                withAnimation(.easeOut(duration: 0.2)) {
+                    dragState.reset()
+                }
+
+                if destIndex != currentIndex {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        appModel.moveTab(fromIndex: currentIndex, toIndex: destIndex)
+                    }
+                }
+
+                NSCursor.pop()
+            }
+    }
+
+    /// Compute visual X offset for each tab during drag
+    private func computeVisualOffset(for tab: RepoTab, at index: Int, tabWidths: [CGFloat]) -> CGFloat {
+        guard dragState.phase == .dragging, let dragID = dragState.draggingTabID else { return 0 }
+
+        if tab.id == dragID {
+            return dragState.currentOffset
+        }
+
+        guard let dragIndex = appModel.tabs.firstIndex(where: { $0.id == dragID }) else { return 0 }
+        let proposedSlot = dragState.proposedDestinationIndex(
+            dragIndex: dragIndex,
+            tabWidths: tabWidths
+        )
+
+        if dragIndex < index && index <= proposedSlot {
+            return -tabWidths[dragIndex]
+        } else if dragIndex > index && index >= proposedSlot {
+            return tabWidths[dragIndex]
+        }
+
+        return 0
+    }
+
     private func resolvedTabWidths(for availableWidth: CGFloat) -> [CGFloat] {
         appModel.tabs.map(idealWidth(for:))
     }
@@ -98,11 +186,50 @@ struct TabBarView: View {
     private func idealWidth(for tab: RepoTab) -> CGFloat {
         let displayName = String(tab.name.prefix(Layout.maxVisibleCharacters))
         let textWidth = (displayName as NSString).size(withAttributes: [.font: Self.tabLabelFont]).width
-        // Pure content-driven width — no minTabWidth floor applied here.
-        // minTabWidth is only a compression floor in resolvedTabWidths.
         return min(Layout.maxTabWidth, Layout.tabChromeOverhead + ceil(textWidth))
     }
 }
+
+// MARK: - Drag State
+
+struct TabDragState {
+    enum Phase {
+        case idle
+        case dragging
+    }
+
+    var phase: Phase = .idle
+    var draggingTabID: UUID? = nil
+    var currentOffset: CGFloat = 0
+    var startX: CGFloat = 0
+
+    mutating func reset() {
+        phase = .idle
+        draggingTabID = nil
+        currentOffset = 0
+        startX = 0
+    }
+
+    func proposedDestinationIndex(dragIndex: Int, tabWidths: [CGFloat]) -> Int {
+        var originX: CGFloat = 0
+        for i in 0..<dragIndex {
+            originX += tabWidths[i]
+        }
+        let draggedCenter = originX + tabWidths[dragIndex] / 2 + currentOffset
+
+        var slotX: CGFloat = 0
+        for i in 0..<tabWidths.count {
+            let slotEnd = slotX + tabWidths[i]
+            if draggedCenter < slotEnd {
+                return i
+            }
+            slotX = slotEnd
+        }
+        return tabWidths.count - 1
+    }
+}
+
+// MARK: - Helpers
 
 private struct HostingWindowAccessor: NSViewRepresentable {
     let onWindow: (NSWindow?) -> Void
@@ -135,7 +262,6 @@ struct FeaturesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar
             HStack(spacing: 12) {
                 Image(systemName: "sparkles.rectangle.stack")
                     .font(AppTypography.Chrome.toolbarTitle)
@@ -172,16 +298,17 @@ struct FeaturesView: View {
     }
 }
 
-// MARK: -
+// MARK: - Tab Item
 
 struct TabItemView: View {
     private static let tabCornerRadius: CGFloat = 7
-    private static let topInset: CGFloat = 5
-    private static let innerHeight: CGFloat = 42
+    private static let topInset: CGFloat = 3
+    private static let innerHeight: CGFloat = 40
 
     let tab: RepoTab
     let isSelected: Bool
     let maxWidth: CGFloat
+    var isDragActive: Bool = false
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -189,9 +316,9 @@ struct TabItemView: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            if !isSelected {
+            if !isSelected && !isDragActive {
                 TabDivider()
-                    .padding(.vertical, 7)
+                    .padding(.vertical, 6)
             }
 
             HStack(spacing: 8) {
@@ -225,10 +352,14 @@ struct TabItemView: View {
             .background(tabShape.fill(backgroundColor))
         }
         .padding(.top, Self.topInset)
-        .frame(width: maxWidth, height: 47, alignment: .top)
+        .frame(width: maxWidth, height: 43, alignment: .top)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .scaleEffect(isDragActive ? 1.05 : 1.0)
+        .shadow(color: isDragActive ? Color.black.opacity(0.4) : .clear, radius: isDragActive ? 8 : 0, y: 2)
+        .opacity(isDragActive ? 0.9 : 1.0)
+        .animation(.easeInOut(duration: 0.2), value: isDragActive)
         .hoverTooltip(tooltipText, placement: .below)
     }
 
@@ -237,6 +368,9 @@ struct TabItemView: View {
     }
 
     private var backgroundColor: Color {
+        if isDragActive {
+            return ChromePalette.toolbarBackground
+        }
         if isSelected {
             return ChromePalette.selectedTabBackground
         }

@@ -136,6 +136,15 @@ final class AppModel {
         persistRepos()
     }
 
+    func moveTab(fromIndex: Int, toIndex: Int) {
+        guard fromIndex != toIndex,
+              fromIndex >= 0, fromIndex < tabs.count,
+              toIndex >= 0, toIndex < tabs.count else { return }
+        let tab = tabs.remove(at: fromIndex)
+        tabs.insert(tab, at: toIndex)
+        persistRepos()
+    }
+
     func addTab(path: String, name: String) {
         _addTab(path: path, name: name)
     }
