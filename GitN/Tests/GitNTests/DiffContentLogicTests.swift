@@ -897,6 +897,91 @@ final class DiffContentLogicTests: XCTestCase {
         XCTAssertFalse(viewModel.fileInspectorContent.isEmpty,
             "file content should be loaded as text when opened directly in preview mode")
     }
+
+    // MARK: - Newly-added empty file must not show the raw git diff header
+    //
+    // Reported bug: opening the file inspector (diff mode) for a brand-new,
+    // completely empty file (e.g. an empty README.md or an empty favicon.ico
+    // placeholder) shows the raw git patch header as the file content:
+    //   diff --git a/README.md b/README.md
+    //   new file mode 100644
+    //   index 0000000..e69de29
+    //   --- /dev/null
+    //   +++ b/README.md
+    //
+    // Root cause: git's diff for a zero-byte add has no hunks, so `parsedDiff`
+    // is nil and `usesRawDiffFallback` kicks in, which — outside the rename
+    // path — falls back to `displayTextForRawDiffFallback(fileDiffContent)`,
+    // i.e. the raw header text, instead of showing the (correctly) empty file
+    // content.
+    func testFileInspectorDiffModeForNewlyAddedEmptyFileShowsEmptyContentNotRawHeader() async throws {
+        let repo = try TemporaryGitRepository()
+        // A prior commit ensures the empty-file add is NOT the repository's
+        // root commit — this matches the reported scenario (README.md added
+        // as a later, non-root commit).
+        try repo.writeFile("existing.txt", contents: "hello\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("README.md", contents: "")
+        try repo.commitAll(message: "add empty readme")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let commit = try XCTUnwrap(viewModel.commits.first(where: { $0.message == "add empty readme" }))
+        await viewModel.selectCommit(commit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "README.md" }))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertFalse(
+            viewModel.fileInspectorDisplayContent.contains("diff --git"),
+            "empty new file must not show the raw git diff header as content; got:\n\(viewModel.fileInspectorDisplayContent)"
+        )
+        XCTAssertEqual(viewModel.fileInspectorDisplayContent, "")
+        XCTAssertEqual(viewModel.fileInspectorContent, "")
+
+        // This is the actual bug: Monaco's diff editor uses `fileInspectorDiffBaseText`
+        // as the "original" (left) side of the diff. For a new empty file it must be
+        // empty too — not the raw git diff header — otherwise the header text renders
+        // as if it were the file's "before" content.
+        XCTAssertFalse(
+            viewModel.fileInspectorDiffBaseText.contains("diff --git"),
+            "fileInspectorDiffBaseText (Monaco's diff base/left side) must not contain the raw git diff header; got:\n\(viewModel.fileInspectorDiffBaseText)"
+        )
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "")
+    }
+
+    /// Same bug, but for a binary-looking extension (.ico) that happens to be
+    /// zero bytes. Zero-byte content decodes as empty text (not binary), so
+    /// it must be treated the same as the README case above — not shown as
+    /// a raw diff header, and not misrouted into the binary/image placeholder.
+    func testFileInspectorDiffModeForNewlyAddedEmptyIcoFileShowsEmptyContentNotRawHeader() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("existing.txt", contents: "hello\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("favicon.ico", contents: "")
+        try repo.commitAll(message: "add empty favicon")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        let commit = try XCTUnwrap(viewModel.commits.first(where: { $0.message == "add empty favicon" }))
+        await viewModel.selectCommit(commit)
+
+        let file = try XCTUnwrap(viewModel.diffFiles.first(where: { $0.path == "favicon.ico" }))
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertFalse(
+            viewModel.fileInspectorDisplayContent.contains("diff --git"),
+            "empty new .ico file must not show the raw git diff header as content; got:\n\(viewModel.fileInspectorDisplayContent)"
+        )
+        XCTAssertEqual(viewModel.fileInspectorDisplayContent, "")
+        XCTAssertFalse(
+            viewModel.fileInspectorDiffBaseText.contains("diff --git"),
+            "fileInspectorDiffBaseText must not contain the raw git diff header for an empty new .ico file; got:\n\(viewModel.fileInspectorDiffBaseText)"
+        )
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "")
+    }
 }
 
 private func requireGitLFS(file: StaticString = #filePath, line: UInt = #line) throws {

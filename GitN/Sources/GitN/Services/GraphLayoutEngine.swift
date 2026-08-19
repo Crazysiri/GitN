@@ -89,14 +89,27 @@ final class IncrementalGraphLayoutEngine: @unchecked Sendable {
         }
 
         // Phase 2: create lane for first parent if not already handled
-        if !didFirst && nParents > 0 {
-            let newLane = Lane(colorIndex: nextLaneIndex, parentHash: parents[0], fromUncommitted: commit.isUncommitted)
-            nextLaneIndex += 1
-            currentLanes.append(newLane)
-            currentLane = newLane
-            newPos = currentLanes.count
-            dotColorIndex = newLane.colorIndex
-            lines.append(GraphLine(upper: false, from: newPos, to: newPos, colorIndex: newLane.colorIndex))
+        if !didFirst {
+            if nParents > 0 {
+                let newLane = Lane(colorIndex: nextLaneIndex, parentHash: parents[0], fromUncommitted: commit.isUncommitted)
+                nextLaneIndex += 1
+                currentLanes.append(newLane)
+                currentLane = newLane
+                newPos = currentLanes.count
+                dotColorIndex = newLane.colorIndex
+                lines.append(GraphLine(upper: false, from: newPos, to: newPos, colorIndex: newLane.colorIndex))
+            } else {
+                // Root commit with no parents, and not awaited by any existing lane
+                // (i.e. a genuinely disconnected/orphan history root, such as an
+                // independent branch's initial commit). Reserve a brand-new column
+                // instead of defaulting to column 1 — column 1 may already be
+                // occupied by an unrelated pass-through lane, which would make this
+                // commit's dot visually merge with that unrelated lane/line.
+                currentLanes.append(nil)
+                newPos = currentLanes.count
+                dotColorIndex = nextLaneIndex
+                nextLaneIndex += 1
+            }
         }
 
         // Phase 3: create lanes for additional parents (merge commits)

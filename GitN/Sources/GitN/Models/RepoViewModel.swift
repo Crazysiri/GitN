@@ -534,6 +534,16 @@ final class RepoViewModel {
                 inspectorBaseText = oldDecoded.text ?? loadedText
                 inspectorDisplayContent = loadedText
                 inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
+            } else if usesRawDiffFallback, loadedText.isEmpty, !loaded.content.isBinary, loaded.visualContent == nil {
+                // The diff has no content hunks (git shows only the header, e.g. for a
+                // brand-new zero-byte file: "diff --git a/… b/…\nnew file mode …\nindex
+                // 0000000..e69de29"), and the file's actual decoded content is genuinely
+                // empty text — not binary, not an image/video. Showing the raw diff header
+                // as file content is wrong; the file has no content, so both sides of the
+                // Monaco diff should just be empty.
+                inspectorDisplayContent = ""
+                inspectorBaseText = ""
+                inspectorParsedDiff = nil
             } else if usesRawDiffFallback {
                 let fallbackText = fileDiffContent.isEmpty ? loadedText : fileDiffContent
                 let compactSubmoduleDiff = Self.compactSubmoduleDiff(fallbackText)
@@ -1430,7 +1440,8 @@ final class RepoViewModel {
         let artifacts = Self.buildFileInspectorArtifacts(
             parsedDiff: parsedDiff,
             diffBaseText: diffBaseText,
-            currentText: currentText
+            currentText: currentText,
+            maxDiffBytes: Self.maxDiffFileSize
         )
         fileInspectorDiffDocument = artifacts.diffEditorDocument
         fileInspectorDisplayContent = artifacts.renderedText
@@ -1585,14 +1596,39 @@ final class RepoViewModel {
     private nonisolated static func buildFileInspectorArtifacts(
         parsedDiff: ParsedDiff?,
         diffBaseText: String,
-        currentText: String
+        currentText: String,
+        maxDiffBytes: Int = 3_145_728
     ) -> FileInspectorArtifacts {
         let currentLines = textLines(currentText)
         let normalizedTotalLines = max(currentLines.count, 1)
-        let effectiveDiff = parsedDiff.map { _ in TextDiffEngine.diff(old: diffBaseText, new: currentText) }
-        let actionHunkMap = effectiveDiff.flatMap { displayDiff in
-            parsedDiff.map { DiffHunkMapper.mapDisplayHunksToActionHunks(displayHunks: displayDiff.hunks, actionHunks: $0.hunks) }
-        } ?? [:]
+
+        // Performance gate: skip the expensive TextDiffEngine.diff recomputation
+        // (O(n*d) LCS via CollectionDifference) when both texts are large.
+        // For huge files (e.g. 370k-line CSVs) this would hang for 30-40 s.
+        // Instead, fall back to the git-provided parsedDiff directly (which is
+        // already computed cheaply by libgit2) or show plain text with no diff
+        // highlighting when even the parsedDiff is too large to render row-by-row.
+        let inputTooLargeForRecompute = diffBaseText.utf8.count > maxDiffBytes
+            || currentText.utf8.count > maxDiffBytes
+
+        let effectiveDiff: ParsedDiff?
+        if inputTooLargeForRecompute {
+            // Use git's parsedDiff directly without recomputing via TextDiffEngine.
+            // This loses hunk-action line-ID mapping (stage/discard individual lines)
+            // for huge files, which is an acceptable tradeoff vs. a 40-second hang.
+            effectiveDiff = parsedDiff
+        } else {
+            effectiveDiff = parsedDiff.map { _ in TextDiffEngine.diff(old: diffBaseText, new: currentText) }
+        }
+
+        let actionHunkMap: [Int: Int]
+        if inputTooLargeForRecompute {
+            actionHunkMap = [:]
+        } else {
+            actionHunkMap = effectiveDiff.flatMap { displayDiff in
+                parsedDiff.map { DiffHunkMapper.mapDisplayHunksToActionHunks(displayHunks: displayDiff.hunks, actionHunks: $0.hunks) }
+            } ?? [:]
+        }
         let lineRangesInCurrentText = lineContentRanges(for: currentLines)
 
         guard let diff = effectiveDiff ?? parsedDiff else {
@@ -2086,7 +2122,8 @@ final class RepoViewModel {
         let artifacts = Self.buildFileInspectorArtifacts(
             parsedDiff: nil,
             diffBaseText: fileInspectorDiffBaseText,
-            currentText: fileInspectorContent
+            currentText: fileInspectorContent,
+            maxDiffBytes: Self.maxDiffFileSize
         )
         fileInspectorDiffDocument = artifacts.diffEditorDocument
         fileInspectorDisplayContent = artifacts.renderedText
@@ -2519,7 +2556,13 @@ final class RepoViewModel {
                     baseText = ""
                 }
 
-                let parsedDiff = TextDiffEngine.diff(old: baseText, new: currentText)
+                let parsedDiff: ParsedDiff
+                if baseText.utf8.count > Self.maxDiffFileSize || currentText.utf8.count > Self.maxDiffFileSize {
+                    // Skip expensive LCS for huge files; show plain text without diff highlights.
+                    parsedDiff = ParsedDiff(fileHeader: "", hunks: [], isNewFile: false)
+                } else {
+                    parsedDiff = TextDiffEngine.diff(old: baseText, new: currentText)
+                }
                 fileHistoryDiff = "__synthetic__"
                 fileHistoryParsedDiff = parsedDiff
                 fileHistoryCurrentText = currentText
@@ -3688,14 +3731,19 @@ final class RepoViewModel {
                 )
             }
             if let newTextForFallback, !baseText.isEmpty || !newTextForFallback.isEmpty {
-                let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
-                if !synthetic.hunks.isEmpty {
-                    return DiffLoadPayload(
-                        fileDiffContent: "No changes in this file",
-                        baseText: baseText,
-                        parsedDiff: synthetic,
-                        visualContent: nil
-                    )
+                // Skip expensive LCS diff for texts exceeding the user-configured Diff Size Limit.
+                let maxBytes = Self.maxDiffFileSize
+                let tooLargeForSynthetic = baseText.utf8.count > maxBytes || newTextForFallback.utf8.count > maxBytes
+                if !tooLargeForSynthetic {
+                    let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
+                    if !synthetic.hunks.isEmpty {
+                        return DiffLoadPayload(
+                            fileDiffContent: "No changes in this file",
+                            baseText: baseText,
+                            parsedDiff: synthetic,
+                            visualContent: nil
+                        )
+                    }
                 }
             }
             return DiffLoadPayload(
@@ -3708,12 +3756,17 @@ final class RepoViewModel {
 
         let parsed = DiffParserEngine.parse(content)
         if parsed.hunks.isEmpty, let newTextForFallback {
-            let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
-            if !synthetic.hunks.isEmpty {
-                MonacoDebugLog.emit(
-                    "synthetic diff path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(lineCount(for: baseText)) modifiedLines=\(lineCount(for: newTextForFallback)) hunks=\(synthetic.hunks.count)"
-                )
-                return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic, visualContent: nil)
+            // Skip expensive LCS diff for texts exceeding the user-configured Diff Size Limit.
+            let maxBytes = Self.maxDiffFileSize
+            let tooLargeForSynthetic = baseText.utf8.count > maxBytes || newTextForFallback.utf8.count > maxBytes
+            if !tooLargeForSynthetic {
+                let synthetic = TextDiffEngine.diff(old: baseText, new: newTextForFallback)
+                if !synthetic.hunks.isEmpty {
+                    MonacoDebugLog.emit(
+                        "synthetic diff path=\(path) context=\(String(describing: context)) status=\(statusCode) baseLines=\(lineCount(for: baseText)) modifiedLines=\(lineCount(for: newTextForFallback)) hunks=\(synthetic.hunks.count)"
+                    )
+                    return DiffLoadPayload(fileDiffContent: content, baseText: baseText, parsedDiff: synthetic, visualContent: nil)
+                }
             }
         }
         let visualContent = Self.makeVisualDiffContent(path: path, oldData: oldBinaryData, newData: newBinaryData)
