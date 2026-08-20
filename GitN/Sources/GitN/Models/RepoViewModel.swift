@@ -309,6 +309,7 @@ final class RepoViewModel {
     private var fileInspectorRedoStack: [FileInspectorEditSnapshot] = []
     private var fileInspectorEditSession: FileInspectorEditSession?
     private var fileInspectorRebuildTask: Task<Void, Never>?
+    private var fileInspectorArtifactsComputeTask: Task<Void, Never>?
     private var fileInspectorBlameTask: Task<Void, Never>?
     private var committedDiffStatsTask: Task<Void, Never>?
     private var fileInspectorPreparedEditKeepsRenderedDiff = false
@@ -505,6 +506,15 @@ final class RepoViewModel {
         fileInspectorMode = effectiveMode
         isFileInspectorPresented = true
         selectedWorkingTreeFilePath = nil
+
+        // Clear previous file's content BEFORE selectDiffFile so that if
+        // selectDiffFile triggers rebuildFileInspectorArtifacts (because
+        // isFileInspectorPresented && fileInspectorPath == new path), it won't
+        // run a massive diff against the OLD file's stale content.
+        fileInspectorContent = ""
+        fileInspectorDiffBaseText = ""
+        fileInspectorArtifactsComputeTask?.cancel()
+
         defer { isFileInspectorLoading = false }
 
         if isCompareMode {
@@ -1232,12 +1242,18 @@ final class RepoViewModel {
         visibleFolders: Set<String>
     ) {
         let selectedPath = selectedWorkingTreeFilePath
-        workingTreeFiles = folders[""] ?? []
+        let newRootFiles = folders[""] ?? []
+        if newRootFiles != workingTreeFiles {
+            workingTreeFiles = newRootFiles
+        }
         if visibleFolders.contains("") {
             hasLoadedWorkingTreeRoot = true
         }
         for folder in visibleFolders where !folder.isEmpty {
-            workingTreeFolderContents[folder] = folders[folder] ?? []
+            let newContents = folders[folder] ?? []
+            if workingTreeFolderContents[folder] != newContents {
+                workingTreeFolderContents[folder] = newContents
+            }
         }
         if let selectedPath,
            !workingTreePathExists(selectedPath) {
@@ -1437,12 +1453,48 @@ final class RepoViewModel {
         currentText: String,
         parsedDiff: ParsedDiff? = nil
     ) {
-        let artifacts = Self.buildFileInspectorArtifacts(
-            parsedDiff: parsedDiff,
-            diffBaseText: diffBaseText,
-            currentText: currentText,
-            maxDiffBytes: Self.maxDiffFileSize
-        )
+        // Cancel any previous background artifacts computation to avoid stale
+        // results overwriting a newer selection.
+        fileInspectorArtifactsComputeTask?.cancel()
+
+        let maxDiffBytes = Self.maxDiffFileSize
+        // Fast path: if inputs are small enough, compute synchronously to avoid
+        // a flicker of empty state. Threshold: ~50 KB combined is instant.
+        let combinedSize = diffBaseText.utf8.count + currentText.utf8.count
+        if combinedSize <= 50_000 {
+            let artifacts = Self.buildFileInspectorArtifacts(
+                parsedDiff: parsedDiff,
+                diffBaseText: diffBaseText,
+                currentText: currentText,
+                maxDiffBytes: maxDiffBytes
+            )
+            applyFileInspectorArtifacts(artifacts)
+            return
+        }
+
+        // Heavy path: compute off the main thread so the UI stays responsive
+        // during large diffs.
+        fileInspectorArtifactsComputeTask = Task { @MainActor [weak self] in
+            let artifacts = await Task.detached(priority: .userInitiated) {
+                Self.buildFileInspectorArtifacts(
+                    parsedDiff: parsedDiff,
+                    diffBaseText: diffBaseText,
+                    currentText: currentText,
+                    maxDiffBytes: maxDiffBytes
+                )
+            }.value
+
+            guard let self, !Task.isCancelled else { return }
+            // Only apply if the content hasn't been superseded by another selection.
+            guard self.fileInspectorContent == currentText,
+                  self.fileInspectorDiffBaseText == diffBaseText
+            else { return }
+            self.applyFileInspectorArtifacts(artifacts)
+            self.fileInspectorArtifactsComputeTask = nil
+        }
+    }
+
+    private func applyFileInspectorArtifacts(_ artifacts: FileInspectorArtifacts) {
         fileInspectorDiffDocument = artifacts.diffEditorDocument
         fileInspectorDisplayContent = artifacts.renderedText
         fileInspectorTotalLines = artifacts.totalLines
@@ -2974,7 +3026,9 @@ final class RepoViewModel {
             }
 
             let sts = try await git.status()
-            fileStatuses = sts
+            if sts != fileStatuses {
+                fileStatuses = sts
+            }
             if selectedCommit?.isUncommitted == true {
                 await refreshUncommittedDiffFiles()
                 if let selectedPath = selectedDiffFile?.path,
@@ -3369,6 +3423,8 @@ final class RepoViewModel {
 
         fileInspectorRebuildTask?.cancel()
         fileInspectorRebuildTask = nil
+        fileInspectorArtifactsComputeTask?.cancel()
+        fileInspectorArtifactsComputeTask = nil
         fileInspectorBlameTask?.cancel()
         fileInspectorBlameTask = nil
         committedDiffStatsTask?.cancel()

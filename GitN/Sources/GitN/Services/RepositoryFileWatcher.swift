@@ -93,6 +93,39 @@ final class RepositoryFileWatcher {
 
     // MARK: - Event Handling
 
+    /// Directories commonly ignored by git that produce high-frequency filesystem
+    /// churn (builds, dependency installs, etc.). Events originating from these
+    /// paths are discarded early to avoid triggering expensive refresh cycles.
+    private static let ignoredDirectoryComponents: Set<String> = [
+        "node_modules",
+        ".venv",
+        "__pycache__",
+        ".build",
+        "DerivedData",
+        "Pods",
+        ".gradle",
+        "build",
+        ".next",
+        ".nuxt",
+        "dist",
+        ".turbo",
+        ".cache",
+    ]
+
+    /// Returns `true` if `path` is inside a commonly-ignored directory subtree.
+    private func isInsideIgnoredDirectory(_ path: String) -> Bool {
+        // Fast path: check if the path contains any of the ignored components as a
+        // path segment (bounded by '/').
+        let pathSlice = path[...]
+        for component in Self.ignoredDirectoryComponents {
+            let needle = "/\(component)/"
+            if pathSlice.contains(needle) { return true }
+            // Also catch the case where the event IS the ignored directory itself
+            if pathSlice.hasSuffix("/\(component)") { return true }
+        }
+        return false
+    }
+
     private func handleEvents(_ paths: [String], flags: UnsafePointer<FSEventStreamEventFlags>, count: Int) {
         var changes = Set<ChangeKind>()
 
@@ -121,7 +154,11 @@ final class RepositoryFileWatcher {
                     changes.insert(.head)
                 }
             } else if path.hasPrefix(repoPath) {
-                changes.insert(.workingDirectory)
+                // Skip events from commonly-ignored directories to avoid
+                // continuous refresh cycles in repos with large dependency trees.
+                if !isInsideIgnoredDirectory(path) {
+                    changes.insert(.workingDirectory)
+                }
             }
         }
 

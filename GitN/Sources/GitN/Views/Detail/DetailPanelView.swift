@@ -60,6 +60,10 @@ struct DetailPanelView: View {
     @State private var splitDragStartHeight: CGFloat?
     @State private var stagingSplitRatio: CGFloat = 0.5
     @State private var stagingSplitDragStartRatio: CGFloat?
+    @State private var conflictSplitRatio: CGFloat = 0.35
+    @State private var conflictSplitDragStartRatio: CGFloat?
+    @State private var conflictStagingSplitRatio: CGFloat = 0.5
+    @State private var conflictStagingSplitDragStartRatio: CGFloat?
 
     // MARK: - Rubber-band selection (staged area)
     @State private var isStagedRubberBanding = false
@@ -1003,7 +1007,9 @@ struct DetailPanelView: View {
                         }
                     }
                     .onPreferenceChange(StagedRowFrameKey.self) { frames in
-                        stagedRowFrames = frames
+                        if frames != stagedRowFrames {
+                            stagedRowFrames = frames
+                        }
                     }
                     .onDrop(of: [.text], isTargeted: nil) { providers in
                         handleDrop(providers: providers, to: .staged)
@@ -1098,7 +1104,9 @@ struct DetailPanelView: View {
                     }
                     .modifier(UnstagedSectionBoundsReporter())
                     .onPreferenceChange(UnstagedRowFrameKey.self) { frames in
-                        unstagedRowFrames = frames
+                        if frames != unstagedRowFrames {
+                            unstagedRowFrames = frames
+                        }
                     }
                     .onDrop(of: [.text], isTargeted: nil) { providers in
                         handleDrop(providers: providers, to: .unstaged)
@@ -1174,136 +1182,6 @@ struct DetailPanelView: View {
                     NSCursor.pop()
                 }
             }
-    }
-
-    // MARK: - Conflict Staging File List (Staged / Unstaged during conflict resolution)
-
-    private func conflictStagingFileList(conflictedFiles: [ConflictFile], resolvedFiles: [ConflictFile]) -> some View {
-        let conflictPaths = Set(conflictedFiles.map(\.path))
-        let resolvedPaths = Set(resolvedFiles.map(\.path))
-
-        return fileListContainer(maxHeight: .infinity) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 0) {
-                        VStack(spacing: 0) {
-                            stagingSectionHeader(
-                                title: "已暂存",
-                                count: conflictStagedFiles(excludingConflicts: conflictPaths).count,
-                                allSelected: !conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty,
-                                onToggle: {
-                                    Task {
-                                        if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                                            await viewModel.stageAllFiles()
-                                        } else {
-                                            await viewModel.unstageAllFiles()
-                                        }
-                                    }
-                                }
-                            )
-
-                            ForEach(conflictStagedFiles(excludingConflicts: conflictPaths)) { file in
-                                StagingFileRow(
-                                    file: file,
-                                    isSelected: isStatusFileSelected(file.path, in: .staged),
-                                    isStaged: true,
-                                    onToggle: { Task { await viewModel.unstageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path, sourceArea: .staged),
-                                    onClick: { flags in
-                                        focusedTarget = .fileList
-                                        suppressNextFileListAutoScroll = true
-                                        viewModel.toggleFileSelection(
-                                            file.path,
-                                            context: .staged,
-                                            isMulti: flags.contains(.command),
-                                            isRange: flags.contains(.shift),
-                                            orderedPaths: conflictStagedFiles(excludingConflicts: conflictPaths).map(\.path)
-                                        )
-                                        Task {
-                                            let diffFile = matchingDiffFile(for: file)
-                                            await viewModel.selectDiffFile(diffFile, context: .staged)
-                                            await viewModel.openFileInspector(diffFile, context: .staged, preferredMode: .diff)
-                                        }
-                                    }
-                                )
-                                .id(fileRowID(for: file.path, context: .staged))
-                                .padding(.horizontal, 16)
-                                .contextMenu {
-                                    conflictStagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
-                                }
-                            }
-
-                            if conflictStagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                                Text("Drag files here to stage")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(maxWidth: .infinity, minHeight: 28)
-                            }
-                        }
-                        .onDrop(of: [.text], isTargeted: nil) { providers in
-                            handleDrop(providers: providers, to: .staged)
-                        }
-
-                        Divider().padding(.vertical, 2)
-
-                        VStack(spacing: 0) {
-                            stagingSectionHeader(
-                                title: "未暂存",
-                                count: conflictUnstagedFiles(excludingConflicts: conflictPaths).count,
-                                allSelected: false,
-                                onToggle: {
-                                    Task { await viewModel.stageAllFiles() }
-                                }
-                            )
-
-                            ForEach(conflictUnstagedFiles(excludingConflicts: conflictPaths)) { file in
-                                StagingFileRow(
-                                    file: file,
-                                    isSelected: isStatusFileSelected(file.path, in: .unstaged),
-                                    isStaged: false,
-                                    onToggle: { Task { await viewModel.stageFile(file.path) } },
-                                    dragPayload: dragPayload(for: file.path, sourceArea: .unstaged),
-                                    onClick: { flags in
-                                        focusedTarget = .fileList
-                                        suppressNextFileListAutoScroll = true
-                                        viewModel.toggleFileSelection(
-                                            file.path,
-                                            context: .unstaged,
-                                            isMulti: flags.contains(.command),
-                                            isRange: flags.contains(.shift),
-                                            orderedPaths: conflictUnstagedFiles(excludingConflicts: conflictPaths).map(\.path)
-                                        )
-                                        Task {
-                                            let diffFile = matchingDiffFile(for: file)
-                                            await viewModel.selectDiffFile(diffFile, context: .unstaged)
-                                            await viewModel.openFileInspector(diffFile, context: .unstaged, preferredMode: .diff)
-                                        }
-                                    }
-                                )
-                                .id(fileRowID(for: file.path, context: .unstaged))
-                                .padding(.horizontal, 16)
-                                .contextMenu {
-                                    conflictUnstagedFileContextMenu(file, wasConflicted: resolvedPaths.contains(file.path))
-                                }
-                            }
-
-                            if conflictUnstagedFiles(excludingConflicts: conflictPaths).isEmpty {
-                                Text("Drag files here to unstage")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(maxWidth: .infinity, minHeight: 28)
-                            }
-                        }
-                        .onDrop(of: [.text], isTargeted: nil) { providers in
-                            handleDrop(providers: providers, to: .unstaged)
-                        }
-                    }
-                }
-                .onChange(of: selectedStatusRowID) { _, rowID in
-                    handleFileListSelectionChange(rowID, with: proxy)
-                }
-            }
-        }
     }
 
     private func conflictStagedFiles(excludingConflicts conflictPaths: Set<String>) -> [FileStatus] {
@@ -1903,53 +1781,56 @@ struct DetailPanelView: View {
 
             Divider()
 
-            // Conflicted Files
-            VStack(spacing: 0) {
-                HStack {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8))
-                    Text("Conflicted Files (\(conflictedFiles.count))")
-                        .font(AppTypography.Detail.sectionTitle.weight(.semibold))
-                    Spacer()
-                    if !conflictedFiles.isEmpty {
-                        Button("Mark All Resolved") {
-                            Task { await viewModel.markAllFilesResolved() }
-                        }
-                        .font(AppTypography.Detail.captionMedium)
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .tint(.orange)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+            // Resizable area: Conflicted Files (top) | Staged (mid) | Unstaged (bottom)
+            GeometryReader { geo in
+                let totalHeight = geo.size.height
+                let handleHeight: CGFloat = splitHandleHeight
+                let minPaneHeight: CGFloat = 50
+                let availableHeight = totalHeight - handleHeight * 2 // two dividers
+                let conflictHeight = max(minPaneHeight, min(availableHeight - minPaneHeight * 2, availableHeight * conflictSplitRatio))
+                let remainingHeight = max(minPaneHeight * 2, availableHeight - conflictHeight)
+                let stagedHeight = max(minPaneHeight, min(remainingHeight - minPaneHeight, remainingHeight * conflictStagingSplitRatio))
+                let unstagedHeight = max(minPaneHeight, remainingHeight - stagedHeight)
 
-                ForEach(conflictedFiles) { file in
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.yellow)
-                        Text(file.path)
-                            .font(AppTypography.Detail.body)
-                            .lineLimit(1)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 3)
-                    .background(Color(.controlBackgroundColor).opacity(0.3))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        guard viewModel.conflictMergeLoadingPath == nil else { return }
-                        Task { await viewModel.openConflictMerge(file) }
-                    }
-                    .contextMenu { conflictFileContextMenu(file) }
+                let conflictPaths = Set(conflictedFiles.map(\.path))
+                let stagedList = stagedFiles.filter { !conflictPaths.contains($0.path) }
+                let unstagedList = unstagedFiles.filter { !conflictPaths.contains($0.path) }
+
+                VStack(spacing: 0) {
+                    // Conflicted Files pane (scrollable)
+                    conflictFilesPane(conflictedFiles: conflictedFiles)
+                        .frame(height: conflictHeight)
+                        .clipped()
+
+                    // Divider 1: between conflicts and staged
+                    conflictPaneDivider(
+                        totalAvailable: availableHeight,
+                        ratio: $conflictSplitRatio,
+                        dragStartRatio: $conflictSplitDragStartRatio,
+                        minRatioDenominator: minPaneHeight,
+                        maxRatioReserved: minPaneHeight * 2
+                    )
+
+                    // Staged pane (reuses the normal staged section)
+                    stagedSectionView(stagedList: stagedList)
+                        .frame(height: stagedHeight)
+                        .clipped()
+
+                    // Divider 2: between staged and unstaged
+                    conflictPaneDivider(
+                        totalAvailable: remainingHeight,
+                        ratio: $conflictStagingSplitRatio,
+                        dragStartRatio: $conflictStagingSplitDragStartRatio,
+                        minRatioDenominator: minPaneHeight,
+                        maxRatioReserved: minPaneHeight
+                    )
+
+                    // Unstaged pane (reuses the normal unstaged section)
+                    unstagedSectionView(unstagedList: unstagedList, viewportHeight: unstagedHeight)
+                        .frame(height: unstagedHeight)
+                        .clipped()
                 }
             }
-
-            Divider().padding(.vertical, 2)
-
-            // Staged Files
-            conflictStagingFileList(conflictedFiles: conflictedFiles, resolvedFiles: resolvedFiles)
 
             Divider()
 
@@ -1990,6 +1871,98 @@ struct DetailPanelView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
+    }
+
+    /// Scrollable conflict files pane (top half of the split)
+    @ViewBuilder
+    private func conflictFilesPane(conflictedFiles: [ConflictFile]) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8))
+                Text("Conflicted Files (\(conflictedFiles.count))")
+                    .font(AppTypography.Detail.sectionTitle.weight(.semibold))
+                Spacer()
+                if !conflictedFiles.isEmpty {
+                    Button("Mark All Resolved") {
+                        Task { await viewModel.markAllFilesResolved() }
+                    }
+                    .font(AppTypography.Detail.captionMedium)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .tint(.orange)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(conflictedFiles) { file in
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.yellow)
+                            Text(file.path)
+                                .font(AppTypography.Detail.body)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 3)
+                        .background(Color(.controlBackgroundColor).opacity(0.3))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard viewModel.conflictMergeLoadingPath == nil else { return }
+                            Task { await viewModel.openConflictMerge(file) }
+                        }
+                        .contextMenu { conflictFileContextMenu(file) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generic draggable divider used between panes in the conflict panel
+    private func conflictPaneDivider(
+        totalAvailable: CGFloat,
+        ratio: Binding<CGFloat>,
+        dragStartRatio: Binding<CGFloat?>,
+        minRatioDenominator: CGFloat,
+        maxRatioReserved: CGFloat
+    ) -> some View {
+        Rectangle()
+            .fill(Color(.separatorColor).opacity(0.55))
+            .frame(maxWidth: .infinity)
+            .frame(height: splitHandleHeight)
+            .overlay {
+                Capsule()
+                    .fill(Color(.tertiaryLabelColor))
+                    .frame(width: 36, height: 4)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if dragStartRatio.wrappedValue == nil {
+                            dragStartRatio.wrappedValue = ratio.wrappedValue
+                        }
+                        guard totalAvailable > 0 else { return }
+                        let delta = value.translation.height
+                        let startRatio = dragStartRatio.wrappedValue ?? ratio.wrappedValue
+                        let newRatio = startRatio + delta / totalAvailable
+                        let minRatio: CGFloat = minRatioDenominator / totalAvailable
+                        let maxRatio: CGFloat = 1.0 - (maxRatioReserved / totalAvailable)
+                        ratio.wrappedValue = min(max(newRatio, minRatio), maxRatio)
+                    }
+                    .onEnded { _ in
+                        dragStartRatio.wrappedValue = nil
+                    }
+            )
+            .onHover { inside in
+                if inside { NSCursor.resizeUpDown.push() }
+                else { NSCursor.pop() }
+            }
     }
 
     @ViewBuilder
@@ -2091,20 +2064,6 @@ struct DetailPanelView: View {
                 .background(Color(.textBackgroundColor).opacity(0.5))
                 .animatedInputBorder(isFocused: isConflictCommitMessageFocused, cornerRadius: 3, showsBaseBorder: true)
                 .frame(minHeight: 60, maxHeight: 100)
-
-            if !conflictedFiles.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("# Conflicts:")
-                        .font(AppTypography.Detail.mono)
-                        .foregroundStyle(.secondary)
-                    ForEach(conflictedFiles) { file in
-                        Text("#   \(file.path)")
-                            .font(AppTypography.Detail.mono)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-            }
 
             DisclosureGroup("Commit options") {
                 EmptyView()
