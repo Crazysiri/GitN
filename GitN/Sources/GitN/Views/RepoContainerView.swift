@@ -29,6 +29,7 @@ struct RepoContainerView: View {
     @State private var showIgnoreEditor = false
     @State private var showPullMenu = false
     @State private var showPushMenu = false
+    @State private var showHistory = false
 
     private enum TopBarLayout {
         static let height: CGFloat = 44
@@ -382,6 +383,8 @@ struct RepoContainerView: View {
                 showNewBranch = true
             }
 
+            historyToolbarButton
+
             Divider().frame(height: TopBarLayout.dividerHeight).padding(.horizontal, 4)
 
             toolbarButton("Stash", icon: "tray.and.arrow.down", disabled: viewModel.operationInProgress) {
@@ -475,6 +478,22 @@ struct RepoContainerView: View {
         .buttonStyle(.plain)
         .disabled(viewModel.operationInProgress)
         .foregroundStyle(viewModel.operationInProgress ? .tertiary : .secondary)
+    }
+
+    // MARK: - History Toolbar Button (operation history popover)
+
+    /// 「历史」入口：以 popover 打开 `HistoryView`，绑定当前 tab 的
+    /// `RepoViewModel.operationHistoryState`，从而自动限定为当前 `Repo_Context`
+    /// 的操作历史（Req 4.1 / 4.5）。复用共享 `toolbarButton` 与 `hoverTooltip`
+    /// 保持 chrome/按钮语言一致。
+    private var historyToolbarButton: some View {
+        toolbarButton("History", icon: "clock.arrow.circlepath", disabled: false) {
+            showHistory.toggle()
+        }
+        .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+            HistoryView(state: viewModel.operationHistoryState)
+        }
+        .hoverTooltip("Operation History")
     }
 
     // MARK: - Push Toolbar Button (main button + dropdown triangle)

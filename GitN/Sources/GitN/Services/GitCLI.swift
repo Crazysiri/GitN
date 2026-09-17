@@ -44,6 +44,67 @@ struct GitCLI: Sendable {
         _ = try await execute(args, env: env, input: input)
     }
 
+    /// Full result of a captured git invocation: exit code plus raw stdout/stderr
+    /// bytes. Used by capturing variants that must record output regardless of the
+    /// exit status (operation history, Req 1.5).
+    struct CaptureResult: Sendable {
+        let exitCode: Int32
+        let stdout: Data
+        let stderr: Data
+    }
+
+    /// Run one git command and return its exit code and raw output without throwing
+    /// on a non-zero exit. Thin buffered counterpart to `GitStreamingExecutor`,
+    /// reusing the same process/pipe/environment setup as `execute`; callers decide
+    /// how to treat a non-zero exit. Output bytes are preserved verbatim (no string
+    /// decoding here) so non-UTF-8 output is not lost.
+    func capture(_ args: [String], env: [String: String]? = nil, input: String? = nil) async throws -> CaptureResult {
+        let path = repoPath
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CaptureResult, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = args
+                process.currentDirectoryURL = URL(fileURLWithPath: path)
+                process.environment = Self.enrichedEnvironment(extra: env)
+
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+
+                var stdinPipe: Pipe?
+                if input != nil {
+                    let pipe = Pipe()
+                    process.standardInput = pipe
+                    stdinPipe = pipe
+                }
+
+                do {
+                    try process.run()
+
+                    if let input, let stdinPipe, let data = input.data(using: .utf8) {
+                        stdinPipe.fileHandleForWriting.write(data)
+                        stdinPipe.fileHandleForWriting.closeFile()
+                    }
+
+                    // Drain pipes before waitUntilExit to prevent pipe buffer deadlock.
+                    let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+
+                    continuation.resume(returning: CaptureResult(
+                        exitCode: process.terminationStatus,
+                        stdout: stdout,
+                        stderr: stderr
+                    ))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     private func execute(
         _ args: [String],
         env: [String: String]?,

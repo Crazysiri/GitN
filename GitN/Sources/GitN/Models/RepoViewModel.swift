@@ -147,6 +147,7 @@ final class RepoViewModel {
     let repoName: String
     private let git: GitService
     private let reflogLoader: RepoReflogLoader
+    private let operationHistory: OperationHistoryService
     private let workingTreeFileOperations: WorkingTreeFileOperations
     private let workingTreeFileSearchIndex: WorkingTreeFileSearchIndex
 
@@ -2812,6 +2813,19 @@ final class RepoViewModel {
         let gitService = GitService(repoPath: path)
         self.git = gitService
         self.reflogLoader = RepoReflogLoader(git: gitService)
+        // 操作历史服务（orchestration-only 持有）：repoContextID 用 path，注入 per-repo store。
+        // store 构造失败（无法定位/创建 Application Support 目录）时回退到临时目录下的
+        // per-repo 文件，保证 init 不 throw 且历史记录旁路语义不阻断仓库加载。
+        let historyStore: OperationHistoryStore
+        do {
+            historyStore = try OperationHistoryStore(repoPath: path)
+        } catch {
+            let fallbackURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("GitN/OperationHistory", isDirectory: true)
+                .appendingPathComponent("\(OperationHistoryStore.repoKey(for: path)).json", isDirectory: false)
+            historyStore = OperationHistoryStore(fileURL: fallbackURL)
+        }
+        self.operationHistory = OperationHistoryService(repoContextID: path, store: historyStore)
         self.workingTreeFileOperations = workingTreeFileOperations ?? WorkingTreeFileOperations(repoPath: path)
         self.workingTreeFileSearchIndex = .shared
         // 恢复上次 terminal 的打开状态
@@ -2824,6 +2838,9 @@ final class RepoViewModel {
         self.conflictUndoManager.groupsByEvent = false
         loadCollapsedSections()
     }
+
+    /// 只读操作历史投影，供 `HistoryView` 观察（4.x）。
+    var operationHistoryState: OperationHistoryState { operationHistory.state }
 
     private func applyReflogSnapshot(_ snapshot: RepoReflogSnapshot) {
         reflogEntries = snapshot.entries
@@ -3097,7 +3114,9 @@ final class RepoViewModel {
 
         do {
             // First, fetch and prune remote branches and tags
-            try await git.fetchWithPrune()
+            try await recordStreaming(kind: .fetchPrune, command: ["git", "fetch", "--prune", "--prune-tags", "--all"]) { onOutput in
+                try await git.fetchWithPruneStreaming(onOutput: onOutput)
+            }
             syncSucceeded = true
         } catch {
             // If fetch fails, still continue with loadAll
@@ -3221,6 +3240,9 @@ final class RepoViewModel {
             } else {
                 applyReflogSnapshot(.empty)
             }
+
+            // 加载持久化的操作历史，与 loadReflog() 生命周期对齐（元数据优先阶段之后，2.2）。
+            await operationHistory.loadFromDisk()
 
             // Refresh remote tags in background (best-effort, doesn't block UI load)
             Task { await refreshKnownRemoteTags() }
@@ -3941,9 +3963,17 @@ final class RepoViewModel {
         guard !commitSummary.isEmpty else { return }
         do {
             if isAmend {
-                try await git.commitAmend(message: commitMessage)
+                let command = ["git", "commit", "--amend", "-m", commitMessage]
+                try await recordCaptured(kind: .commit, command: command) {
+                    try await git.commitAmendCapturingOutput(message: commitMessage)
+                }
             } else {
-                try await git.commit(message: commitMessage)
+                let command = ["git", "commit", "-m", commitMessage]
+                try await recordCaptured(kind: .commit, command: command) {
+                    // libgit2-backed: no stdout/stderr, record exit result only.
+                    try await git.commit(message: commitMessage)
+                    return nil
+                }
             }
             commitSummary = ""
             commitDescription = ""
@@ -4253,7 +4283,11 @@ final class RepoViewModel {
     var showForcePushConfirm = false
 
     func performFetch() async {
-        await performRemoteOperation(toolbarOperation: .fetch) { try await $0.git.fetch() }
+        await performRemoteOperation(toolbarOperation: .fetch) { vm in
+            try await vm.recordStreaming(kind: .fetch, command: ["git", "fetch", "--all"]) { onOutput in
+                try await vm.git.fetchStreaming(onOutput: onOutput)
+            }
+        }
     }
 
     /// Execute pull using the current default mode.
@@ -4274,11 +4308,17 @@ final class RepoViewModel {
         do {
             switch mode {
             case .pull:
-                try await git.pull()
+                try await recordStreaming(kind: .pull, command: ["git", "pull"]) { onOutput in
+                    try await git.pullStreaming(onOutput: onOutput)
+                }
             case .pullFF:
-                try await git.pullFF()
+                try await recordStreaming(kind: .pullFF, command: ["git", "pull", "--ff-only"]) { onOutput in
+                    try await git.pullFFStreaming(onOutput: onOutput)
+                }
             case .pullRebase:
-                try await git.pullRebase()
+                try await recordStreaming(kind: .pullRebase, command: ["git", "pull", "--rebase"]) { onOutput in
+                    try await git.pullRebaseStreaming(onOutput: onOutput)
+                }
             }
             await loadAll()
             showToast(title: "Pull Complete", detail: "\(currentBranch) updated", style: .success)
@@ -4309,7 +4349,9 @@ final class RepoViewModel {
             }
         }
         do {
-            try await git.pullForce()
+            try await recordStreaming(kind: .pullForce, command: ["git", "fetch", "--all"]) { onOutput in
+                try await git.pullForceStreaming(onOutput: onOutput)
+            }
             await loadAll()
             showToast(title: "Pull Complete", detail: "\(currentBranch) updated (force)", style: .success)
         } catch {
@@ -4347,7 +4389,9 @@ final class RepoViewModel {
             }
         }
         do {
-            try await git.push()
+            try await recordStreaming(kind: .push, command: ["git", "push"]) { onOutput in
+                try await git.pushStreaming(onOutput: onOutput)
+            }
             await loadAll()
             showToast(title: "Push Complete", detail: "\(currentBranch) pushed", style: .success)
         } catch {
@@ -4377,7 +4421,9 @@ final class RepoViewModel {
             }
         }
         do {
-            try await git.pushForce()
+            try await recordStreaming(kind: .pushForce, command: ["git", "push", "--force-with-lease"]) { onOutput in
+                try await git.pushForceStreaming(onOutput: onOutput)
+            }
             await loadAll()
             showToast(title: "Push Complete", detail: "\(currentBranch) pushed (force)", style: .success)
         } catch {
@@ -4408,7 +4454,9 @@ final class RepoViewModel {
             }
         }
         do {
-            try await git.push(remoteName: remote, branchName: branch, setUpstream: true)
+            try await recordStreaming(kind: .push, command: ["git", "push", "-u", remote, branch]) { onOutput in
+                try await git.pushStreaming(remoteName: remote, branchName: branch, setUpstream: true, onOutput: onOutput)
+            }
             await loadAll()
             showToast(title: "Push Complete", detail: "\(branch) pushed to \(remote)", style: .success)
         } catch {
@@ -4451,7 +4499,15 @@ final class RepoViewModel {
     }
 
     func performStashSave(message: String? = nil) async {
-        await performRemoteOperation { try await $0.git.stashSave(message: message) }
+        var command = ["git", "stash", "push"]
+        if let message { command.append(contentsOf: ["-m", message]) }
+        await performRemoteOperation { vm in
+            try await vm.recordCaptured(kind: .stash, command: command) {
+                // libgit2-backed: no stdout/stderr, record exit result only.
+                try await vm.git.stashSave(message: message)
+                return nil
+            }
+        }
     }
 
     func performStashPop() async {
@@ -4619,7 +4675,9 @@ final class RepoViewModel {
         operationInProgress = true
         operationError = nil
         do {
-            try await git.merge(refName)
+            try await recordCaptured(kind: .merge, command: ["git", "merge", refName]) {
+                try await git.mergeCapturingOutput(refName)
+            }
             await loadAll()
         } catch {
             await checkForMergeOrStashConflict(errorMessage: error.localizedDescription, type: .merge(branch: refName))
@@ -4631,7 +4689,9 @@ final class RepoViewModel {
         operationInProgress = true
         operationError = nil
         do {
-            try await git.rebase(onto: target)
+            try await recordCaptured(kind: .rebase, command: ["git", "rebase", target]) {
+                try await git.rebaseCapturingOutput(onto: target)
+            }
             await loadAll()
         } catch {
             await checkForRebaseConflict(errorMessage: error.localizedDescription)
@@ -4641,12 +4701,24 @@ final class RepoViewModel {
 
     func performCheckoutBranch(_ name: String) async {
         closeFileInspector()
-        await performRemoteOperation { try await $0.git.checkoutBranch(name) }
+        await performRemoteOperation { vm in
+            try await vm.recordCaptured(kind: .checkout, command: ["git", "checkout", name]) {
+                // libgit2-backed: no stdout/stderr, record exit result only.
+                try await vm.git.checkoutBranch(name)
+                return nil
+            }
+        }
     }
 
     func performCheckoutCommit(_ hash: String) async {
         closeFileInspector()
-        await performRemoteOperation { try await $0.git.checkoutCommit(hash) }
+        await performRemoteOperation { vm in
+            try await vm.recordCaptured(kind: .checkout, command: ["git", "checkout", hash]) {
+                // libgit2-backed: no stdout/stderr, record exit result only.
+                try await vm.git.checkoutCommit(hash)
+                return nil
+            }
+        }
     }
 
     func performCherryPick(_ hash: String) async {
@@ -4654,7 +4726,13 @@ final class RepoViewModel {
     }
 
     func performReset(_ hash: String, mode: GitService.ResetMode) async {
-        await performRemoteOperation { try await $0.git.resetToCommit(hash, mode: mode) }
+        await performRemoteOperation { vm in
+            try await vm.recordCaptured(kind: .reset, command: ["git", "reset", mode.flag, hash]) {
+                // libgit2-backed: no stdout/stderr, record exit result only.
+                try await vm.git.resetToCommit(hash, mode: mode)
+                return nil
+            }
+        }
     }
 
     func performRevert(_ hash: String) async {
@@ -4756,7 +4834,11 @@ final class RepoViewModel {
     }
 
     func performPushTag(name: String, remote: String = "origin") async {
-        await performRemoteOperation { try await $0.git.pushTag(name: name, remote: remote) }
+        await performRemoteOperation { vm in
+            try await vm.recordStreaming(kind: .pushTag, command: ["git", "push", remote, "refs/tags/\(name)"]) { onOutput in
+                try await vm.git.pushTagStreaming(name: name, remote: remote, onOutput: onOutput)
+            }
+        }
     }
 
     func performDeleteRemoteTag(name: String, remote: String = "origin") async {
@@ -5030,6 +5112,87 @@ final class RepoViewModel {
         } catch {
             diffFiles = []
             showToast(title: "Failed to load stash diff", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    /// Streaming recording wrapper for remote/network operations (Streaming class).
+    ///
+    /// Wraps a streaming git invocation with `beginEntry → appendOutput → finish/
+    /// markInterrupted`, so every network variant produces an `Operation_Log_Entry`
+    /// with live-streamed stdout/stderr (including git hook output).
+    ///
+    /// Bypass invariant (Req 5.4 / Property 8): recording is a side effect that
+    /// never alters the git outcome. All history entry points are `Void` and never
+    /// throw; only the git result decides success/failure. On completion the entry's
+    /// exit code is derived from whether the git call threw (0 on success, non-zero
+    /// on failure), and any error is rethrown unchanged so existing host-key /
+    /// toast / refresh handling in the caller keeps working. Cancellation marks the
+    /// entry interrupted (Req 5.2) and rethrows `CancellationError`.
+    ///
+    /// - Parameters:
+    ///   - kind: the operation kind recorded in history.
+    ///   - command: the human-readable command (with leading "git") for display.
+    ///   - run: performs the actual streaming git call, forwarding output chunks to
+    ///     the provided sink. The sink hops back to the MainActor internally.
+    private func recordStreaming(
+        kind: GitOperationKind,
+        command: [String],
+        run: (_ onOutput: @escaping @Sendable (Data?, Data?) -> Void) async throws -> Void
+    ) async throws {
+        let id = operationHistory.beginEntry(kind: kind, command: command)
+        let history = operationHistory
+        do {
+            try await run { stdout, stderr in
+                Task { @MainActor in
+                    history.appendOutput(id, stdout: stdout, stderr: stderr)
+                }
+            }
+            operationHistory.finish(id, exitCode: 0, captured: nil)
+        } catch is CancellationError {
+            operationHistory.markInterrupted(id)
+            throw CancellationError()
+        } catch {
+            operationHistory.finish(id, exitCode: 1, captured: nil)
+            throw error
+        }
+    }
+
+    /// Captured-output recording wrapper for local mutation operations (Captured
+    /// class: commit / merge / rebase / checkout / reset / stash).
+    ///
+    /// Wraps a local git mutation with `beginEntry → finish(captured:)`, so every
+    /// local variant produces an `Operation_Log_Entry` recording the exit result
+    /// and, where the underlying operation runs through the git CLI, its captured
+    /// stdout/stderr (Req 1.5). libgit2-backed operations have no stdout/stderr, so
+    /// `run` returns `nil` and the entry is still recorded with an empty output
+    /// buffer plus the correct exit result.
+    ///
+    /// Bypass invariant (Req 5.4 / Property 8): recording never alters the git
+    /// outcome. All history entry points are `Void` and never throw. On success the
+    /// entry finishes with exit code 0 and any captured output; on failure it
+    /// finishes with a non-zero exit code (capturing the error's message as stderr
+    /// so the failure output is still recorded) and the original error is rethrown
+    /// unchanged, so existing conflict handling / toasts / refresh in the caller
+    /// keep working.
+    ///
+    /// - Parameters:
+    ///   - kind: the operation kind recorded in history.
+    ///   - command: the human-readable command (with leading "git") for display.
+    ///   - run: performs the actual local git call, returning the captured output
+    ///     when available (CLI-backed) or `nil` (libgit2-backed).
+    private func recordCaptured(
+        kind: GitOperationKind,
+        command: [String],
+        run: () async throws -> OperationOutput?
+    ) async rethrows {
+        let id = operationHistory.beginEntry(kind: kind, command: command)
+        do {
+            let captured = try await run()
+            operationHistory.finish(id, exitCode: 0, captured: captured)
+        } catch {
+            let stderr = Data(error.localizedDescription.utf8)
+            operationHistory.finish(id, exitCode: 1, captured: OperationOutput(stderr: stderr))
+            throw error
         }
     }
 

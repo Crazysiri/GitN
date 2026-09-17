@@ -2060,6 +2060,176 @@ actor GitService {
         invalidateRefMapCache()
     }
 
+    // MARK: - Streaming Fetch / Pull / Push
+    //
+    // Streaming variants of the network operations above. They mirror their
+    // non-streaming counterparts exactly (same args, same LFS ordering, same
+    // `invalidateRefMapCache()`), but replace the buffered `runGit(...)` core with
+    // `GitStreamingExecutor`, relaying stdout/stderr chunks (including git hook
+    // output such as `git-lfs pre-push`) to `onOutput` while the process runs.
+    //
+    // On non-zero exit they throw `GitError.operationFailed(<stderr|stdout>)`,
+    // matching `GitCLI.execute`'s error semantics so upstream host-key detection
+    // and failure toasts keep working unchanged. Task cancellation propagates as
+    // `CancellationError` (the executor terminates the process), letting callers
+    // mark the operation interrupted.
+
+    /// Run one git command via `GitStreamingExecutor`, forwarding output chunks.
+    /// Throws `GitError.operationFailed` on non-zero exit (preferring stderr),
+    /// mirroring `GitCLI.execute`.
+    private func runGitStreaming(
+        _ args: [String],
+        onOutput: @escaping @Sendable (_ stdout: Data?, _ stderr: Data?) -> Void
+    ) async throws {
+        let result = try await GitStreamingExecutor(repoPath: repoPath).stream(args, onOutput: onOutput)
+        guard result.exitCode == 0 else {
+            let preferred = result.stderr.isEmpty ? result.stdout : result.stderr
+            let message = String(data: preferred, encoding: .utf8) ?? "git \(args.first ?? "") failed"
+            throw GitError.operationFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    func fetchStreaming(
+        remoteName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["fetch"]
+        if let remoteName {
+            args.append(remoteName)
+        } else {
+            args.append("--all")
+        }
+        try await runGitStreaming(args, onOutput: onOutput)
+        invalidateRefMapCache()
+    }
+
+    func fetchWithPruneStreaming(
+        remoteName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["fetch", "--prune", "--prune-tags"]
+        if let remoteName {
+            args.append(remoteName)
+        } else {
+            args.append("--all")
+        }
+        try await runGitStreaming(args, onOutput: onOutput)
+        invalidateRefMapCache()
+    }
+
+    func pullStreaming(
+        remoteName: String? = nil,
+        branchName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["pull"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        try await runGitStreaming(args, onOutput: onOutput)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
+        invalidateRefMapCache()
+    }
+
+    func pullFFStreaming(
+        remoteName: String? = nil,
+        branchName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["pull", "--ff-only"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        try await runGitStreaming(args, onOutput: onOutput)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
+        invalidateRefMapCache()
+    }
+
+    func pullRebaseStreaming(
+        remoteName: String? = nil,
+        branchName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["pull", "--rebase"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        try await runGitStreaming(args, onOutput: onOutput)
+        try await lfsSupport.pull(remoteName: remoteName, branchName: branchName)
+        invalidateRefMapCache()
+    }
+
+    /// Force pull: `git fetch --all` (streamed) then `git reset --hard @{u}`.
+    /// Mirrors `pullForce()`; only the network fetch is streamed (reset is local).
+    func pullForceStreaming(
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        try await runGitStreaming(["fetch", "--all"], onOutput: onOutput)
+        try await runGit(["reset", "--hard", "@{u}"])
+        try await lfsSupport.pull()
+        invalidateRefMapCache()
+    }
+
+    func pushStreaming(
+        remoteName: String? = nil,
+        branchName: String? = nil,
+        setUpstream: Bool = false,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["push"]
+        if setUpstream { args.append("-u") }
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        } else {
+            args.append(contentsOf: ["-u", "origin", "HEAD"])
+        }
+        let resolvedRemote = remoteName ?? "origin"
+        let resolvedBranch: String?
+        if let branchName {
+            resolvedBranch = branchName
+        } else {
+            resolvedBranch = try? currentBranch()
+        }
+        try await lfsSupport.push(remoteName: resolvedRemote, branchName: resolvedBranch)
+        try await runGitStreaming(args, onOutput: onOutput)
+        invalidateRefMapCache()
+    }
+
+    func pushForceStreaming(
+        remoteName: String? = nil,
+        branchName: String? = nil,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        var args = ["push", "--force-with-lease"]
+        if let remoteName {
+            args.append(remoteName)
+            if let branchName { args.append(branchName) }
+        }
+        let resolvedRemote = remoteName ?? "origin"
+        let resolvedBranch: String?
+        if let branchName {
+            resolvedBranch = branchName
+        } else {
+            resolvedBranch = try? currentBranch()
+        }
+        try await lfsSupport.push(remoteName: resolvedRemote, branchName: resolvedBranch)
+        try await runGitStreaming(args, onOutput: onOutput)
+        invalidateRefMapCache()
+    }
+
+    func pushTagStreaming(
+        name: String,
+        remote: String,
+        onOutput: @escaping @Sendable (Data?, Data?) -> Void
+    ) async throws {
+        try await runGitStreaming(["push", remote, "refs/tags/\(name)"], onOutput: onOutput)
+        invalidateRefMapCache()
+    }
+
     func lfsTrackedPaths(paths: [String]) async throws -> Set<String> {
         let uniquePaths = Array(Set(paths)).sorted()
         guard !uniquePaths.isEmpty else { return [] }
@@ -2307,6 +2477,45 @@ actor GitService {
     func rebase(onto target: String) async throws {
         try await runGit(["rebase", target])
         invalidateRefMapCache()
+    }
+
+    // MARK: - Capturing variants (operation history, Req 1.5)
+    //
+    // Thin CLI-backed variants that mirror the plain `merge`/`rebase`/`commitAmend`
+    // behavior (same args, same non-zero-exit throwing so existing conflict handling
+    // keeps working) but also return the captured stdout/stderr so the operation
+    // history can record the real command output. Deliberately minimal: they only
+    // reuse `runGitCapturing` and do not add any new network/hosted/auth
+    // responsibility to `GitService`.
+
+    /// Like `merge`, but returns the captured stdout/stderr on success. On non-zero
+    /// exit it throws `GitError.operationFailed` (preferring stderr), matching
+    /// `merge`, so callers' conflict handling is unaffected.
+    func mergeCapturingOutput(_ branchOrHash: String) async throws -> OperationOutput {
+        let output = try await runGitCapturing(["merge", branchOrHash])
+        invalidateRefMapCache()
+        return output
+    }
+
+    /// Like `rebase`, but returns the captured stdout/stderr on success. On non-zero
+    /// exit it throws `GitError.operationFailed`, matching `rebase`.
+    func rebaseCapturingOutput(onto target: String) async throws -> OperationOutput {
+        let output = try await runGitCapturing(["rebase", target])
+        invalidateRefMapCache()
+        return output
+    }
+
+    /// Run one git command via `GitCLI.capture`, returning captured output on a
+    /// zero exit and throwing `GitError.operationFailed` (preferring stderr) on a
+    /// non-zero exit, mirroring `GitCLI.execute`/`runGit`.
+    private func runGitCapturing(_ args: [String]) async throws -> OperationOutput {
+        let result = try await cli.capture(args)
+        guard result.exitCode == 0 else {
+            let preferred = result.stderr.isEmpty ? result.stdout : result.stderr
+            let message = String(data: preferred, encoding: .utf8) ?? "git \(args.first ?? "") failed"
+            throw GitError.operationFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return OperationOutput(stdout: result.stdout, stderr: result.stderr)
     }
 
     func cherryPick(_ hash: String) async throws {
@@ -3895,6 +4104,14 @@ actor GitService {
     func commitAmend(message: String) async throws {
         try await runGit(["commit", "--amend", "-m", message])
         invalidateRefMapCache()
+    }
+
+    /// Like `commitAmend`, but returns the captured stdout/stderr on success (Req 1.5).
+    /// On non-zero exit it throws `GitError.operationFailed`, matching `commitAmend`.
+    func commitAmendCapturingOutput(message: String) async throws -> OperationOutput {
+        let output = try await runGitCapturing(["commit", "--amend", "-m", message])
+        invalidateRefMapCache()
+        return output
     }
 
     func commit(message: String) throws {

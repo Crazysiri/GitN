@@ -1,0 +1,378 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 定义 `GitOperationKind` 与 `OperationResult` 枚举": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269351
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608284450
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608442771
+      }
+    ],
+    "1.2 实现 `OperationOutput` 字节存储与有损解码视图": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269497
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608447933
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608529906
+      }
+    ],
+    "1.3 实现 `OperationLogEntry` 结构与派生属性": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269598
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608534804
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608643064
+      }
+    ],
+    "2.1 定义 `OperationHistoryStoring` 协议与 `OperationHistoryStore` 实现": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269669
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608655395
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609037671
+      }
+    ],
+    "3.1 实现 `OperationHistoryState`（`@Observable` 只读投影）与视图模型": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269723
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608656438
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609038618
+      }
+    ],
+    "3.2 实现 `OperationHistoryService` 记录/更新/加载/持久化编排": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269779
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609295448
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609499537
+      }
+    ],
+    "4. Checkpoint - 确保模型/持久化/服务层测试通过": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269835
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609741336
+      }
+    ],
+    "5.1 实现 `GitStreamingExecutor` 与 `GitStreamingResult`": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269932
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608657506
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609036338
+      }
+    ],
+    "6.1 在 `RepoViewModel` 持有并加载 `OperationHistoryService`": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608269986
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609520780
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609896805
+      }
+    ],
+    "6.2 远程/网络类接线（Streaming）": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270047
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610294370
+      }
+    ],
+    "6.3 本地变更类接线（Captured）与 GitService 极薄 capturing 变体": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270122
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610683385
+      }
+    ],
+    "7. Checkpoint - 确保执行器与接线测试通过": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270180
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610884702
+      }
+    ],
+    "8.1 实现 `HistoryView` 浮层界面": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270247
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609296979
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609500449
+      }
+    ],
+    "8.2 在 `RepoContainerView` 工具栏新增历史入口": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270296
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609897536
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610293511
+      }
+    ],
+    "9. Final checkpoint - 确保全部测试通过": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608270367
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610994888
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789611102410
+      }
+    ],
+    "1. 建立数据模型层（`OperationLogEntry` / `OperationOutput` / `GitOperationKind`）": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789608643098
+      }
+    ],
+    "5. 实现 `GitStreamingExecutor` 流式执行路径": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609036394
+      }
+    ],
+    "2. 实现持久化层 `OperationHistoryStore`": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609037704
+      }
+    ],
+    "1.4 编写数据模型属性测试与非 UTF-8 边界测试": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609063696
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609285194
+      }
+    ],
+    "2.2 编写持久化 round-trip 与隔离属性测试": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609064658
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609286652
+      }
+    ],
+    "2.3 编写 store 缺失与损坏的边界测试": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609066080
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609287512
+      }
+    ],
+    "5.2 编写流式执行器属性测试与装配 SMOKE": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609067092
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609288503
+      }
+    ],
+    "3. 实现服务层 `OperationHistoryService` 与投影 `OperationHistoryState`": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609499580
+      }
+    ],
+    "3.3 编写服务层记录/完成/中断属性测试": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609518058
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609707523
+      }
+    ],
+    "3.4 编写服务层渲染字段与旁路不变量属性测试": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609520513
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789609708466
+      }
+    ],
+    "8. 工具栏与 `HistoryView` UI 接入": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610293559
+      }
+    ],
+    "6. `RepoViewModel` orchestration-only 接线": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610683426
+      }
+    ],
+    "6.4 编写接线集成测试（hook 输出）": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610690218
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610859554
+      }
+    ],
+    "8.3 空状态与入口可用性校验（快照/手动）": [
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610898214
+      },
+      {
+        "executionId": "1d66eff3-5db5-47ba-bc1b-18918af95412",
+        "chatSessionId": "sess_b63cec63-c8a3-429d-b6dc-201ac1acd72d",
+        "timestamp": 1789610988814
+      }
+    ]
+  }
+}
