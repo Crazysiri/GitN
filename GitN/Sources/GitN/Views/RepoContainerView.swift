@@ -14,6 +14,7 @@ struct RepoContainerView: View {
     let tab: RepoTab
     let isActive: Bool
     @State private var viewModel: RepoViewModel
+    @State private var terminalStore: TerminalSessionStore
     @State private var didLoadInitially = false
     @State private var activationTask: Task<Void, Never>?
 
@@ -42,6 +43,7 @@ struct RepoContainerView: View {
         self.tab = tab
         self.isActive = isActive
         self._viewModel = State(initialValue: RepoViewModel(path: tab.path, name: tab.name))
+        self._terminalStore = State(initialValue: TerminalSessionStore(repoPath: tab.path))
     }
 
     var body: some View {
@@ -132,6 +134,7 @@ struct RepoContainerView: View {
         .onDisappear {
             activationTask?.cancel()
             viewModel.releaseRetainedResources()
+            terminalStore.closeAllSessions()
         }
         .sheet(isPresented: $showStashMessage) {
             stashSheet
@@ -311,7 +314,7 @@ struct RepoContainerView: View {
                 .frame(height: 8)
 
                 TerminalPanelView(
-                    repoPath: viewModel.repoPath,
+                    store: terminalStore,
                     isVisible: Binding(
                         get: { viewModel.showTerminal },
                         set: { viewModel.showTerminal = $0 }
@@ -419,7 +422,10 @@ struct RepoContainerView: View {
 
             Divider().frame(height: TopBarLayout.dividerHeight).padding(.horizontal, 4)
 
-            Button(action: { viewModel.showTerminal.toggle() }) {
+            Button(action: {
+                if !viewModel.showTerminal { terminalStore.ensureSession() }
+                viewModel.showTerminal.toggle()
+            }) {
                 toolbarButtonSurface(width: 52) {
                     VStack(spacing: 2) {
                         Image(systemName: viewModel.showTerminal ? "terminal.fill" : "terminal")

@@ -1,0 +1,3 @@
+# RFC: bounded Monaco model reuse
+
+Use an LRU map of model URI to model, scoped to the current WebView. URIs include mode side, opaque source identity and path. Eight models / four million UTF-16 text units cap idle retention. Never evict a model attached to an editor; trim after setModel and editor disposal. Model reuse compares the incoming authoritative text, resets with setValue if changed, and updates language. View state uses the same identity, so unrelated snapshots do not inherit cursor/scroll state. Dispose all cached models on page unload. The existing worker generation checks continue to govern diff decorations. Validate with host unit tests and a real WKWebView smoke/latency run.

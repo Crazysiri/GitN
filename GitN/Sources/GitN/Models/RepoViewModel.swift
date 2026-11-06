@@ -150,6 +150,7 @@ final class RepoViewModel {
     private let operationHistory: OperationHistoryService
     private let workingTreeFileOperations: WorkingTreeFileOperations
     private let workingTreeFileSearchIndex: WorkingTreeFileSearchIndex
+    private let worktreeService: WorktreeService
 
     var localBranches: [BranchInfo] = []
     var remoteBranches: [BranchInfo] = []
@@ -158,6 +159,8 @@ final class RepoViewModel {
     var knownRemoteTags: Set<String> = []
     var stashes: [StashInfo] = []
     var submodules: [SubmoduleInfo] = []
+    var worktrees: [WorktreeInfo] = []
+    var worktreeError: String?
     var currentBranch: String = ""
     var isDetachedHead: Bool = false
 
@@ -312,6 +315,8 @@ final class RepoViewModel {
     private var fileInspectorRebuildTask: Task<Void, Never>?
     private var fileInspectorArtifactsComputeTask: Task<Void, Never>?
     private var fileInspectorBlameTask: Task<Void, Never>?
+    private var fileInspectorBlameSelection = FileInspectorSelectionState()
+    private var fileInspectorOpenGeneration = 0
     private var committedDiffStatsTask: Task<Void, Never>?
     private var fileInspectorPreparedEditKeepsRenderedDiff = false
     private var fileInspectorBlameCache: [String: [Int: FileInspectorBlameInfo]] = [:]
@@ -345,7 +350,9 @@ final class RepoViewModel {
             UserDefaults.standard.set(showTerminal, forKey: "GitN.showTerminal.\(repoPath)")
         }
     }
-    var isLoading = false
+    var isLoading = false {
+        didSet { if !isLoading { scheduleDeferredFileSystemRefresh() } }
+    }
     var collapsedSections: Set<String> = []
 
     private var collapsedSectionsKey: String { "SidebarCollapsedSections.\(repoPath)" }
@@ -499,6 +506,8 @@ final class RepoViewModel {
         context: DiffContext = .committed,
         preferredMode: FileInspectorMode = .diff
     ) async {
+        fileInspectorOpenGeneration += 1
+        let openGeneration = fileInspectorOpenGeneration
         let effectiveMode = resolvedInitialFileInspectorMode(for: file.path, preferredMode: preferredMode)
         isFileInspectorLoading = true
         fileInspectorPath = file.path
@@ -516,16 +525,80 @@ final class RepoViewModel {
         fileInspectorDiffBaseText = ""
         fileInspectorArtifactsComputeTask?.cancel()
 
-        defer { isFileInspectorLoading = false }
+        defer {
+            if openGeneration == fileInspectorOpenGeneration { isFileInspectorLoading = false }
+        }
 
         if isCompareMode {
-            await openCompareFileInspector(file, effectiveMode: effectiveMode)
+            await openCompareFileInspector(file, effectiveMode: effectiveMode, openGeneration: openGeneration)
             return
         }
 
-        await selectDiffFile(file, context: context)
+        var provisionalLoaded: LoadedInspectableContent?
+        if effectiveMode == .diff {
+            // Publish readable text before the patch/action metadata completes. Keep it
+            // read-only until the final snapshot is installed so a fast edit cannot be
+            // overwritten by the second phase. A same-text baseline avoids displaying
+            // the whole file as additions while the actual old side is still loading.
+            selectedDiffFile = file
+            currentDiffContext = context
+            fileDiffContent = ""
+            diffBaseText = ""
+            parsedDiff = nil
+            selectedDiffVisualContent = nil
+            isFileTooLarge = false
+            do {
+                let loaded = try await loadInspectableFileContent(path: file.path, context: context)
+                guard openGeneration == fileInspectorOpenGeneration else { return }
+                provisionalLoaded = loaded
+                let text = loaded.content.text ?? ""
+                fileInspectorContent = text
+                fileInspectorInitialContent = text
+                fileInspectorDiffBaseText = text
+                fileInspectorDisplayContent = text
+                fileInspectorVisualContent = loaded.visualContent
+                fileInspectorEncodingName = loaded.content.encodingName
+                fileInspectorMessage = loaded.message
+                isFileInspectorEditable = false
+                fileInspectorTotalLines = max(Self.lineCount(for: text), 1)
+                fileInspectorDiffDocument = nil
+                fileInspectorLineHighlights = [:]
+                fileInspectorInlineHighlights = []
+                fileInspectorLinePairs = [:]
+                fileInspectorHunkControls = [:]
+                fileInspectorHunkToolTips = [:]
+                fileInspectorOverviewSegments = []
+                fileInspectorBlameTask?.cancel()
+                _ = fileInspectorBlameSelection.beginSelection()
+                fileInspectorLineBlames = [:]
+                isFileInspectorLoading = false
+            } catch {
+                if openGeneration == fileInspectorOpenGeneration {
+                    showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+                }
+                return
+            }
+            await selectDiffFile(file, context: context)
+        } else {
+            _ = fileInspectorSelection.beginSelection()
+            selectedDiffFile = file
+            currentDiffContext = context
+            isLoadingDiff = false
+            fileDiffContent = ""
+            diffBaseText = ""
+            parsedDiff = nil
+            selectedDiffVisualContent = nil
+            isFileTooLarge = false
+        }
+        guard openGeneration == fileInspectorOpenGeneration else { return }
         do {
-            let loaded = try await loadInspectableFileContent(path: file.path, context: context)
+            let loaded: LoadedInspectableContent
+            if let provisionalLoaded, provisionalLoaded.content.encodingName != "Submodule" {
+                loaded = provisionalLoaded
+            } else {
+                loaded = try await loadInspectableFileContent(path: file.path, context: context)
+            }
+            guard openGeneration == fileInspectorOpenGeneration else { return }
             let loadedText = loaded.content.text ?? ""
             let canEditInspectorContent = loaded.isEditable && (
                 context != .committed || isWorkingTreeConflictSelection
@@ -533,8 +606,9 @@ final class RepoViewModel {
             let inspectorDisplayContent: String
             let inspectorBaseText: String
             let usesRawDiffFallback = effectiveMode == .diff && parsedDiff == nil
+                && fileDiffContent != "Failed to load diff"
             let inspectorParsedDiff: ParsedDiff?
-            if let oldPath = file.oldPath,
+            if effectiveMode == .diff, let oldPath = file.oldPath,
                context == .committed,
                let parentHash = selectedCommit?.parentHashes.first {
                 // Committed rename: load the actual old-path content from the parent commit
@@ -542,6 +616,7 @@ final class RepoViewModel {
                 // Without this, usesRawDiffFallback would give Monaco the raw git diff
                 // header as "before" — e.g. "diff --git a/… b/…\nrename from …\nrename to …".
                 let oldDecoded = try await git.decodedFileContent(atCommit: parentHash, path: oldPath)
+                guard openGeneration == fileInspectorOpenGeneration else { return }
                 inspectorBaseText = oldDecoded.text ?? loadedText
                 inspectorDisplayContent = loadedText
                 inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
@@ -596,14 +671,20 @@ final class RepoViewModel {
                 parsedDiff: inspectorParsedDiff
             )
         } catch {
-            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            if openGeneration == fileInspectorOpenGeneration {
+                showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            }
         }
     }
 
-    private func openCompareFileInspector(_ file: DiffFile, effectiveMode: FileInspectorMode) async {
+    private func openCompareFileInspector(
+        _ file: DiffFile, effectiveMode: FileInspectorMode, openGeneration: Int
+    ) async {
         await selectCompareFile(file)
+        guard openGeneration == fileInspectorOpenGeneration else { return }
         do {
             let loaded = try await loadCompareInspectableContent(file)
+            guard openGeneration == fileInspectorOpenGeneration else { return }
             let loadedText = loaded.content.text ?? ""
             let inspectorParsedDiff = effectiveMode == .diff ? parsedDiff : nil
 
@@ -633,7 +714,9 @@ final class RepoViewModel {
                 parsedDiff: inspectorParsedDiff
             )
         } catch {
-            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            if openGeneration == fileInspectorOpenGeneration {
+                showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            }
         }
     }
 
@@ -650,6 +733,9 @@ final class RepoViewModel {
     }
 
     func openWorkingTreeFilePreview(path: String) async {
+        fileInspectorOpenGeneration += 1
+        let openGeneration = fileInspectorOpenGeneration
+        _ = fileInspectorSelection.beginSelection()
         isFileInspectorLoading = true
         fileInspectorPath = path
         fileInspectorOldPath = nil
@@ -657,16 +743,27 @@ final class RepoViewModel {
         fileInspectorMode = .preview
         isFileInspectorPresented = true
         selectedWorkingTreeFilePath = path
-        defer { isFileInspectorLoading = false }
+        fileInspectorContent = ""
+        fileInspectorDiffBaseText = ""
+        fileInspectorArtifactsComputeTask?.cancel()
+        isLoadingDiff = false
+        fileDiffContent = ""
+        diffBaseText = ""
+        parsedDiff = nil
+        selectedDiffVisualContent = nil
+        isFileTooLarge = false
+        defer {
+            if openGeneration == fileInspectorOpenGeneration { isFileInspectorLoading = false }
+        }
 
         do {
             let loaded = try await loadInspectableFileContent(path: path, context: .unstaged)
+            guard openGeneration == fileInspectorOpenGeneration else { return }
             let loadedText = loaded.content.text ?? ""
-            let diffPayload = try await loadWorkingTreeDiffPayload(path: path, fallbackText: loadedText)
 
             fileInspectorContent = loadedText
             fileInspectorInitialContent = loadedText
-            fileInspectorDiffBaseText = diffPayload.baseText.isEmpty ? loadedText : diffPayload.baseText
+            fileInspectorDiffBaseText = loadedText
             fileInspectorDisplayContent = loadedText
             fileInspectorVisualContent = loaded.visualContent
             fileInspectorSelectedRange = NSRange(location: 0, length: 0)
@@ -683,18 +780,16 @@ final class RepoViewModel {
             fileInspectorEncodingName = loaded.content.encodingName
             fileInspectorMessage = loaded.message
             selectedDiffFile = DiffFile(additions: 0, deletions: 0, path: path, changeKind: .unknown)
-            currentDiffContext = .committed
-            fileDiffContent = diffPayload.fileDiffContent
-            diffBaseText = diffPayload.baseText
-            parsedDiff = diffPayload.parsedDiff
-            selectedDiffVisualContent = diffPayload.visualContent
+            currentDiffContext = .unstaged
             rebuildFileInspectorArtifacts(
                 diffBaseText: fileInspectorDiffBaseText,
                 currentText: fileInspectorContent,
                 parsedDiff: nil
             )
         } catch {
-            showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            if openGeneration == fileInspectorOpenGeneration {
+                showToast(title: "Failed to open file", detail: error.localizedDescription, style: .error)
+            }
         }
     }
 
@@ -708,7 +803,9 @@ final class RepoViewModel {
     }
 
     func closeFileInspector() {
+        fileInspectorOpenGeneration += 1
         isFileInspectorPresented = false
+        isFileInspectorLoading = false
         isFileInspectorDiffEditing = false
         showFileInspectorExternalChangePrompt = false
         fileInspectorOldPath = nil
@@ -720,6 +817,7 @@ final class RepoViewModel {
         fileInspectorRebuildTask = nil
         fileInspectorBlameTask?.cancel()
         fileInspectorBlameTask = nil
+        _ = fileInspectorBlameSelection.beginSelection()
         fileInspectorLineBlames = [:]
         closeFileHistory()
     }
@@ -932,7 +1030,24 @@ final class RepoViewModel {
             await openFileInspector(file, context: fileInspectorContext, preferredMode: mode)
             return
         }
+        let previousMode = fileInspectorMode
+        fileInspectorOpenGeneration += 1
+        let openGeneration = fileInspectorOpenGeneration
+        _ = fileInspectorSelection.beginSelection()
+        isFileInspectorLoading = false
+        isLoadingDiff = false
         fileInspectorMode = mode
+        if previousMode == .preview, mode == .diff, let file = selectedDiffFile {
+            isFileInspectorLoading = true
+            defer {
+                if openGeneration == fileInspectorOpenGeneration { isFileInspectorLoading = false }
+            }
+            await selectDiffFile(file, context: fileInspectorContext)
+            guard openGeneration == fileInspectorOpenGeneration else { return }
+            fileInspectorDiffBaseText = diffBaseText.isEmpty
+                ? parsedDiff.map { Self.reconstructOldText(from: $0, newText: fileInspectorContent) } ?? fileInspectorContent
+                : diffBaseText
+        }
         if mode != .diff {
             isFileInspectorDiffEditing = false
         }
@@ -1021,7 +1136,7 @@ final class RepoViewModel {
                 )
             }
             let decoded = try await git.decodedFileContent(atCommit: commit.hash, path: path)
-            let data = try await loadPreviewData(path: path, context: context)
+            let data = decoded.text == nil ? try await loadPreviewData(path: path, context: context) : nil
             return LoadedInspectableContent(
                 content: decoded,
                 isEditable: decoded.text != nil,
@@ -1030,16 +1145,25 @@ final class RepoViewModel {
             )
         }
 
-        // Stash detail uses `.committed` context with `selectedCommit == nil`. New or untracked files
-        // exist only inside the stash (often `rev^3`), not on disk — load their blobs for preview/diff.
-        if context == .committed, let stash = selectedStash, selectedCommit == nil,
-           let decoded = await git.stashPathDecodedContent(stashRef: stash.index, path: path) {
-            let data = try await loadPreviewData(path: path, context: context)
+        // A stash is an immutable snapshot. Even a deleted path that still exists
+        // on disk must never fall through to working-tree content.
+        if context == .committed, let stash = selectedStash, selectedCommit == nil {
+            let file = selectedDiffFile?.path == path ? selectedDiffFile : diffFiles.first { $0.path == path }
+            let versions = try await git.stashFileVersions(
+                stashOID: stash.oid,
+                path: path,
+                oldPath: file?.oldPath,
+                changeKind: file?.changeKind ?? .unknown
+            )
+            let decoded = versions.newContent
+                ?? GitService.DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
             return LoadedInspectableContent(
                 content: decoded,
                 isEditable: false,
                 message: decoded.isBinary ? "Binary files can't be edited here." : nil,
-                visualContent: visualContent(for: path, decoded: decoded, currentData: data)
+                visualContent: Self.makeVisualDiffContent(
+                    path: path, oldData: versions.oldData, newData: versions.newData
+                )
             )
         }
 
@@ -1060,7 +1184,7 @@ final class RepoViewModel {
             case .unstaged, .committed:
                 decoded = try await git.decodedWorkingTreeFileContent(path: path)
             }
-            let data = try await loadPreviewData(path: path, context: context)
+            let data = decoded.text == nil ? try await loadPreviewData(path: path, context: context) : nil
             return LoadedInspectableContent(
                 content: decoded,
                 isEditable: decoded.text != nil,
@@ -1380,6 +1504,15 @@ final class RepoViewModel {
             return try await git.fileData(atCommit: commit.hash, path: path)
         }
 
+        if context == .committed, let stash = selectedStash, selectedCommit == nil {
+            let file = selectedDiffFile?.path == path ? selectedDiffFile : diffFiles.first { $0.path == path }
+            let versions = try await git.stashFileVersions(
+                stashOID: stash.oid, path: path, oldPath: file?.oldPath,
+                changeKind: file?.changeKind ?? .unknown
+            )
+            return versions.newData
+        }
+
         switch context {
         case .staged:
             return try await git.stagedFileData(path: path)
@@ -1458,6 +1591,21 @@ final class RepoViewModel {
         // results overwriting a newer selection.
         fileInspectorArtifactsComputeTask?.cancel()
 
+        guard fileInspectorMode != .preview else {
+            fileInspectorDiffDocument = nil
+            fileInspectorDisplayContent = currentText
+            fileInspectorTotalLines = max(Self.lineCount(for: currentText), 1)
+            fileInspectorLineHighlights = [:]
+            fileInspectorInlineHighlights = []
+            fileInspectorLinePairs = [:]
+            fileInspectorHunkControls = [:]
+            fileInspectorHunkToolTips = [:]
+            fileInspectorOverviewSegments = []
+            fileInspectorBlameTask?.cancel()
+            fileInspectorLineBlames = [:]
+            return
+        }
+
         let maxDiffBytes = Self.maxDiffFileSize
         // Fast path: if inputs are small enough, compute synchronously to avoid
         // a flicker of empty state. Threshold: ~50 KB combined is instant.
@@ -1510,6 +1658,7 @@ final class RepoViewModel {
 
     private func refreshFileInspectorLineBlames() {
         fileInspectorBlameTask?.cancel()
+        let blameToken = fileInspectorBlameSelection.beginSelection()
 
         guard fileInspectorMode == .diff,
               let file = selectedDiffFile,
@@ -1524,6 +1673,8 @@ final class RepoViewModel {
         let selectedCommit = selectedCommit
         let cacheSnapshot = fileInspectorBlameCache
         let git = git
+        let openGeneration = fileInspectorOpenGeneration
+        let selectionGeneration = fileInspectorSelection.generation
 
         fileInspectorBlameTask = Task { [weak self] in
             guard let self else { return }
@@ -1640,7 +1791,14 @@ final class RepoViewModel {
                 }
             }
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  self.fileInspectorBlameSelection.canApply(token: blameToken),
+                  self.fileInspectorOpenGeneration == openGeneration,
+                  self.fileInspectorSelection.generation == selectionGeneration,
+                  self.fileInspectorMode == .diff,
+                  self.selectedDiffFile?.path == file.path,
+                  self.fileInspectorPath == file.path
+            else { return }
             self.fileInspectorBlameCache = cache
             self.fileInspectorLineBlames = resolved
         }
@@ -2560,8 +2718,10 @@ final class RepoViewModel {
     var fileHistoryCurrentText: String = ""
     var fileHistoryDiff: String = ""
     var fileHistoryParsedDiff: ParsedDiff?
+    private var fileHistorySelection = FileInspectorSelectionState()
 
     func openFileHistory(path: String, context: DiffContext = .committed) async {
+        let selectionToken = fileHistorySelection.beginSelection()
         fileInspectorPath = path
         fileInspectorContext = context
         fileInspectorMode = .history
@@ -2576,46 +2736,67 @@ final class RepoViewModel {
         fileHistoryCurrentText = ""
         fileHistoryDiff = ""
         fileHistoryParsedDiff = nil
-        defer { isLoadingFileHistory = false }
+        defer {
+            if fileHistorySelection.canApply(token: selectionToken) {
+                isLoadingFileHistory = false
+            }
+        }
         do {
-            fileHistoryWorkingTreePrefix = (try? await git.currentWorkingTreePrefix()) ?? ""
+            let workingTreePrefix = (try? await git.currentWorkingTreePrefix()) ?? ""
+            guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == path else { return }
+            fileHistoryWorkingTreePrefix = workingTreePrefix
             let revision: String? = if context == .committed, let selectedCommit, !selectedCommit.isUncommitted {
                 selectedCommit.hash
             } else {
                 nil
             }
             let entries = try await git.fileLogEntries(path: path, revision: revision)
+            guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == path else { return }
             fileHistoryCommits = entries.map { $0.commit }
             fileHistoryPathsByCommitHash = Dictionary(
                 uniqueKeysWithValues: entries.map { ($0.commit.hash, $0.pathAtCommit) }
             )
         } catch {
-            showToast(title: "Failed to load file history", detail: error.localizedDescription, style: .error)
+            if fileHistorySelection.canApply(token: selectionToken) {
+                showToast(title: "Failed to load file history", detail: error.localizedDescription, style: .error)
+            }
         }
     }
 
     func selectFileHistoryCommit(_ commit: CommitInfo) async {
+        guard !fileHistoryPath.isEmpty else { return }
+        let selectionToken = fileHistorySelection.beginSelection()
+        let selectedPath = fileHistoryPath
         fileHistorySelectedCommit = commit
+        fileHistoryBaseText = ""
+        fileHistoryCurrentText = ""
+        fileHistoryDiff = ""
+        fileHistoryParsedDiff = nil
         do {
             let resolvedPath = fileHistoryPathsByCommitHash[commit.hash] ?? fileHistoryPath
             let repositoryPath = repositoryFileHistoryPath(resolvedPath)
+            let olderEntry = olderFileHistoryEntry(for: commit)
 
             if let currentText = await fileHistoryText(atCommit: commit.hash, path: repositoryPath) {
                 let baseText: String
-                if let olderEntry = olderFileHistoryEntry(for: commit) {
+                if let olderEntry {
                     let olderPath = repositoryFileHistoryPath(olderEntry.path)
                     baseText = await fileHistoryText(atCommit: olderEntry.commit.hash, path: olderPath) ?? ""
                 } else {
                     baseText = ""
                 }
+                guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == selectedPath else { return }
 
                 let parsedDiff: ParsedDiff
                 if baseText.utf8.count > Self.maxDiffFileSize || currentText.utf8.count > Self.maxDiffFileSize {
                     // Skip expensive LCS for huge files; show plain text without diff highlights.
                     parsedDiff = ParsedDiff(fileHeader: "", hunks: [], isNewFile: false)
                 } else {
-                    parsedDiff = TextDiffEngine.diff(old: baseText, new: currentText)
+                    parsedDiff = await Task.detached(priority: .userInitiated) {
+                        TextDiffEngine.diff(old: baseText, new: currentText)
+                    }.value
                 }
+                guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == selectedPath else { return }
                 fileHistoryDiff = "__synthetic__"
                 fileHistoryParsedDiff = parsedDiff
                 fileHistoryCurrentText = currentText
@@ -2628,18 +2809,20 @@ final class RepoViewModel {
             let newPath = repositoryFileHistoryPath(parsedDiff.newPath ?? resolvedPath)
             let currentText = await fileHistoryText(atCommit: commit.hash, path: newPath)
             let baseText: String
-            if let olderEntry = olderFileHistoryEntry(for: commit) {
+            if let olderEntry {
                 let olderPath = repositoryFileHistoryPath(olderEntry.path)
                 baseText = await fileHistoryText(atCommit: olderEntry.commit.hash, path: olderPath) ?? ""
             } else {
                 baseText = ""
             }
 
+            guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == selectedPath else { return }
             fileHistoryDiff = diff
             fileHistoryParsedDiff = parsedDiff
             fileHistoryCurrentText = currentText ?? ""
             fileHistoryBaseText = baseText
         } catch {
+            guard fileHistorySelection.canApply(token: selectionToken), fileHistoryPath == selectedPath else { return }
             fileHistoryBaseText = ""
             fileHistoryCurrentText = ""
             fileHistoryDiff = ""
@@ -2648,6 +2831,7 @@ final class RepoViewModel {
     }
 
     func closeFileHistory() {
+        _ = fileHistorySelection.beginSelection()
         isLoadingFileHistory = false
         fileHistoryPath = ""
         fileHistoryCommits = []
@@ -2711,6 +2895,8 @@ final class RepoViewModel {
     var conflictMergeFile: ConflictFile?
     var conflictMergeLoadingPath: String?
     var conflictSides: ConflictSides?
+    private var conflictFileSnapshot: ConflictFileSnapshot?
+    private var conflictMergeGeneration = 0
     var conflictEditorDocument: ConflictEditorDocument?
     var conflictFallbackMessage: String?
     var conflictOutputText: String = ""
@@ -2762,7 +2948,11 @@ final class RepoViewModel {
     private var toastAutoDismissTask: Task<Void, Never>?
 
     private var fileWatcher: RepositoryFileWatcher?
-    private var isRefreshing = false
+    private var isRefreshing = false {
+        didSet { if !isRefreshing { scheduleDeferredFileSystemRefresh() } }
+    }
+    private var pendingFileSystemChanges = Set<RepositoryFileWatcher.ChangeKind>()
+    private var isDrainingFileSystemChanges = false
     private var refreshTimer: Timer?
     private var lastFetchDate: Date?
 
@@ -2828,6 +3018,7 @@ final class RepoViewModel {
         self.operationHistory = OperationHistoryService(repoContextID: path, store: historyStore)
         self.workingTreeFileOperations = workingTreeFileOperations ?? WorkingTreeFileOperations(repoPath: path)
         self.workingTreeFileSearchIndex = .shared
+        self.worktreeService = WorktreeService(repoPath: path)
         // 恢复上次 terminal 的打开状态
         self.showTerminal = UserDefaults.standard.bool(forKey: "GitN.showTerminal.\(path)")
         self.graphDisplayMode = GraphDisplayMode(
@@ -2991,9 +3182,35 @@ final class RepoViewModel {
         }
     }
 
-    private func handleFileSystemChanges(_ changes: Set<RepositoryFileWatcher.ChangeKind>) async {
-        guard !isLoading, !operationInProgress else { return }
+    func handleFileSystemChanges(_ changes: Set<RepositoryFileWatcher.ChangeKind>) async {
+        pendingFileSystemChanges.formUnion(changes)
+        scheduleDeferredFileSystemRefresh()
+    }
 
+    private func scheduleDeferredFileSystemRefresh() {
+        guard !pendingFileSystemChanges.isEmpty,
+              !isLoading, !operationInProgress, !isRefreshing,
+              !isDrainingFileSystemChanges else { return }
+        isDrainingFileSystemChanges = true
+        Task { @MainActor in
+            await drainPendingFileSystemChanges()
+        }
+    }
+
+    private func drainPendingFileSystemChanges() async {
+        defer {
+            isDrainingFileSystemChanges = false
+            scheduleDeferredFileSystemRefresh()
+        }
+        while !isLoading, !operationInProgress, !isRefreshing,
+              !pendingFileSystemChanges.isEmpty {
+            let changes = pendingFileSystemChanges
+            pendingFileSystemChanges.removeAll()
+            await processFileSystemChanges(changes)
+        }
+    }
+
+    private func processFileSystemChanges(_ changes: Set<RepositoryFileWatcher.ChangeKind>) async {
         await workingTreeFileSearchIndex.invalidate(repositoryPath: repoPath)
 
         let needsFullReload = changes.contains(.head) || changes.contains(.refs)
@@ -3001,7 +3218,12 @@ final class RepoViewModel {
         if needsFullReload {
             await loadAll()
         } else {
-            await refreshStatusAndGraph()
+            if changes.count != 1 || !changes.contains(.worktrees) {
+                await refreshStatusAndGraph()
+            }
+            if changes.contains(.worktrees) {
+                await refreshWorktrees()
+            }
         }
 
         if changes.contains(.workingDirectory) {
@@ -3010,7 +3232,11 @@ final class RepoViewModel {
     }
 
     func refreshAfterWorkingTreeMutation() async {
-        guard !isLoading, !operationInProgress else { return }
+        if isLoading || operationInProgress || isRefreshing {
+            pendingFileSystemChanges.insert(.workingDirectory)
+            scheduleDeferredFileSystemRefresh()
+            return
+        }
         await refreshStatusAndGraph()
         await refreshFileInspectorForExternalChangeIfNeeded()
     }
@@ -3057,7 +3283,6 @@ final class RepoViewModel {
             let hc = refreshedHeadCommitHash
             headCommitHash = hc
             isDetachedHead = refreshedDetachedState
-            currentBranchHashes = await git.commitHashesOnCurrentBranch()
             normalizeGraphDisplayMode()
 
             let hadUncommitted = commits.first?.isUncommitted == true
@@ -3107,29 +3332,47 @@ final class RepoViewModel {
     }
 
     func refreshWithSync() async {
+        guard !isLoading, !operationInProgress else { return }
         isLoading = true
         defer { isLoading = false }
 
-        var syncSucceeded = false
-
+        let tagPruner = RemoteTagPruner(repoPath: repoPath)
+        var tagPreflight: (remotes: [RemoteInfo], localTags: [String: String])?
+        var tagCleanupError: Error?
         do {
-            // First, fetch and prune remote branches and tags
-            try await recordStreaming(kind: .fetchPrune, command: ["git", "fetch", "--prune", "--prune-tags", "--all"]) { onOutput in
-                try await git.fetchWithPruneStreaming(onOutput: onOutput)
-            }
-            syncSucceeded = true
+            tagPreflight = (try await git.remotes(), try await tagPruner.localTagOIDs())
         } catch {
-            // If fetch fails, still continue with loadAll
-            // The error will be shown if needed
+            // A failed provenance read must never become permission to delete tags.
+            tagCleanupError = error
         }
 
-        // Get remote tags and delete local tags that don't exist on remote
-        await deleteLocalTagsNotOnRemote()
+        var fetchError: Error?
+        do {
+            try await recordStreaming(kind: .fetchPrune, command: ["git", "fetch", "--prune", "--tags", "--all"]) { onOutput in
+                try await git.fetchWithPruneStreaming(onOutput: onOutput)
+            }
+        } catch {
+            fetchError = error
+        }
 
-        // After fetch, load all data
+        if fetchError == nil, let tagPreflight {
+            do {
+                _ = try await tagPruner.pruneAfterSuccessfulFetch(
+                    remotes: tagPreflight.remotes,
+                    localTagsBeforeFetch: tagPreflight.localTags
+                )
+            } catch {
+                tagCleanupError = error
+            }
+        }
+
         await loadAll()
 
-        if syncSucceeded {
+        if let fetchError {
+            showToast(title: "Sync failed", detail: fetchError.localizedDescription, style: .error)
+        } else if let tagCleanupError {
+            showToast(title: "Tag cleanup skipped", detail: tagCleanupError.localizedDescription, style: .error)
+        } else {
             showToast(title: "Sync Complete", detail: "Remote refs refreshed", style: .success)
         }
     }
@@ -3147,46 +3390,49 @@ final class RepoViewModel {
         knownRemoteTags = fetched
     }
 
-    private func deleteLocalTagsNotOnRemote() async {
-        // Load remotes first
+    func refreshWorktrees() async {
         do {
-            remotes = try await git.remotes()
+            worktrees = try await worktreeService.list()
         } catch {
-            return
+            showToast(title: "Worktrees Unavailable", detail: error.localizedDescription, style: .error)
         }
+    }
 
-        // If no remotes, don't delete anything
-        guard !remotes.isEmpty else { return }
-
-        await refreshKnownRemoteTags()
-        let remoteTags = knownRemoteTags
-
-        // Get all local tags
+    @discardableResult
+    func performCreateWorktree(path: String, branch: String, createBranch: Bool) async -> String? {
+        guard !operationInProgress else { return nil }
+        worktreeError = nil
+        operationInProgress = true
+        defer { operationInProgress = false }
         do {
-            let localTags = try await git.tags()
-
-            // Delete local tags that don't exist on remote
-            // Note: --prune-tags only removes tags that were fetched from remote.
-            // This ensures we also remove purely local tags that don't exist on remote.
-            var deletedCount = 0
-            for localTag in localTags {
-                if !remoteTags.contains(localTag) {
-                    do {
-                        try await git.deleteTag(name: localTag)
-                        deletedCount += 1
-                    } catch {
-                        // Continue with other tags if one fails
-                        print("Failed to delete tag \(localTag): \(error.localizedDescription)")
-                    }
-                }
-            }
-
-            if deletedCount > 0 {
-                print("Deleted \(deletedCount) local tag(s) that don't exist on remote")
-            }
+            try await worktreeService.add(path: path, branch: branch, createBranch: createBranch)
+            await refreshWorktrees()
+            showToast(title: "Worktree Created", detail: path, style: .success)
+            return WorktreeService.canonicalPath(path)
         } catch {
-            // If we can't get local tags, skip deletion
-            print("Failed to get local tags: \(error.localizedDescription)")
+            worktreeError = error.localizedDescription
+            showToast(title: "Create Worktree Failed", detail: error.localizedDescription, style: .error)
+            return nil
+        }
+    }
+
+    @discardableResult
+    func performRemoveWorktree(_ worktree: WorktreeInfo, openPaths: Set<String>) async -> Bool {
+        guard !operationInProgress else { return false }
+        guard !openPaths.contains(WorktreeService.canonicalPath(worktree.path)) else {
+            showToast(title: "Close Worktree Tab First", detail: worktree.path, style: .error)
+            return false
+        }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        do {
+            try await worktreeService.remove(worktree)
+            await refreshWorktrees()
+            showToast(title: "Worktree Removed", detail: worktree.path, style: .success)
+            return true
+        } catch {
+            showToast(title: "Remove Worktree Failed", detail: error.localizedDescription, style: .error)
+            return false
         }
     }
 
@@ -3210,6 +3456,7 @@ final class RepoViewModel {
             async let t = git.tags()
             async let st = git.stashes()
             async let sub = git.submodules()
+            async let wt = worktreeService.list()
             async let cur = git.currentBranch()
             async let stat = git.status()
             async let hch = git.headCommitHash()
@@ -3225,6 +3472,7 @@ final class RepoViewModel {
             tags = tgs
             stashes = sth
             submodules = subs
+            worktrees = (try? await wt) ?? []
             currentBranch = cb
             fileStatuses = sts
             scheduleVisibleWorkingTreeFoldersRefresh()
@@ -3664,7 +3912,7 @@ final class RepoViewModel {
 
             let path = file.path
             let statusCode = fileStatuses.first(where: { $0.path == path })?.statusCode ?? "M "
-            let stashIndex = selectedStash?.index
+            let stashIndex = selectedStash?.oid
             let commitHash = selectedCommit?.hash
             let parentCommitHash = selectedCommit?.parentHashes.first
             let oldPath = file.oldPath
@@ -3679,7 +3927,8 @@ final class RepoViewModel {
                     stashIndex: stashIndex,
                     commitHash: commitHash,
                     parentCommitHash: parentCommitHash,
-                    statusCode: statusCode
+                    statusCode: statusCode,
+                    changeKind: file.changeKind
                 )
             }
             let payload = try await payloadTask.value
@@ -3713,6 +3962,7 @@ final class RepoViewModel {
             diffBaseText = ""
             parsedDiff = nil
             selectedDiffVisualContent = nil
+            showToast(title: "Failed to load diff", detail: error.localizedDescription, style: .error)
         }
         if fileInspectorSelection.canApply(token: token) {
             isLoadingDiff = false
@@ -3728,7 +3978,8 @@ final class RepoViewModel {
         stashIndex: String?,
         commitHash: String?,
         parentCommitHash: String?,
-        statusCode: String
+        statusCode: String,
+        changeKind: DiffChangeKind = .unknown
     ) async throws -> DiffLoadPayload {
         let content: String
         let baseText: String
@@ -3743,11 +3994,14 @@ final class RepoViewModel {
         let priorPath = oldPath ?? path
 
         if let stashIndex {
-            content = try await git.stashFileDiff(stashIndex, path: path)
-            baseText = ""
-            newTextForFallback = nil
-            oldBinaryData = nil
-            newBinaryData = nil
+            content = try await git.stashFileDiff(stashIndex, path: path, oldPath: oldPath)
+            let versions = try await git.stashFileVersions(
+                stashOID: stashIndex, path: path, oldPath: oldPath, changeKind: changeKind
+            )
+            baseText = versions.oldContent?.text ?? ""
+            newTextForFallback = versions.newContent?.text ?? ""
+            oldBinaryData = versions.oldData
+            newBinaryData = versions.newData
         } else if isUncommitted {
             switch context {
             case .staged:
@@ -4242,7 +4496,9 @@ final class RepoViewModel {
 
     // MARK: - Remote Operations
 
-    var operationInProgress = false
+    var operationInProgress = false {
+        didSet { if !operationInProgress { scheduleDeferredFileSystemRefresh() } }
+    }
     var operationError: String?
 
     enum ToolbarOperation {
@@ -4531,11 +4787,10 @@ final class RepoViewModel {
 
     /// Apply a specific stash (apply without deleting)
     func performStashApplyAt(stash: StashInfo) async {
-        let idx = stashNumericIndex(stash)
         operationInProgress = true
         operationError = nil
         do {
-            try await git.stashApply(index: idx)
+            try await git.stashApply(oid: stash.oid)
             await loadAll()
             showToast(title: "Stash Applied", detail: stash.message, style: .success)
         } catch {
@@ -4546,11 +4801,10 @@ final class RepoViewModel {
 
     /// Pop a specific stash (apply and delete)
     func performStashPopAt(stash: StashInfo) async {
-        let idx = stashNumericIndex(stash)
         operationInProgress = true
         operationError = nil
         do {
-            try await git.stashPop(index: idx)
+            try await git.stashPop(oid: stash.oid)
             await loadAll()
             showToast(title: "Stash Popped", detail: stash.message, style: .success)
         } catch {
@@ -4561,25 +4815,17 @@ final class RepoViewModel {
 
     /// Drop (delete) a specific stash
     func performStashDrop(stash: StashInfo) async {
-        let idx = stashNumericIndex(stash)
         operationInProgress = true
         operationError = nil
         do {
-            try await git.stashDrop(index: idx)
+            try await git.stashDrop(oid: stash.oid)
             await loadAll()
             showToast(title: "Stash Deleted", detail: stash.message, style: .success)
         } catch {
             operationError = "Stash drop failed: \(error.localizedDescription)"
+            showToast(title: "Stash Delete Failed", detail: error.localizedDescription, style: .error)
         }
         operationInProgress = false
-    }
-
-    /// Extract numeric index from stash ref string like "stash@{0}"
-    private func stashNumericIndex(_ stash: StashInfo) -> Int {
-        if let range = stash.index.range(of: #"\d+"#, options: .regularExpression) {
-            return Int(stash.index[range]) ?? 0
-        }
-        return 0
     }
 
     /// Pull a specific branch. If current, just pull. If not, try fast-forward fetch first,
@@ -4615,11 +4861,13 @@ final class RepoViewModel {
         // Fall back: stash → checkout → pull → checkout back → pop stash
         let originalBranch = currentBranch
         let hasChanges = !fileStatuses.isEmpty
+        var autoStashOID: String?
+        var attemptedRestore = false
 
         do {
             // 1. Stash if there are uncommitted changes
             if hasChanges {
-                try await git.stashSave(message: "Auto-stash before pulling \(branch.name)")
+                autoStashOID = try await git.stashSave(message: "Auto-stash before pulling \(branch.name)")
             }
 
             // 2. Checkout target branch
@@ -4632,19 +4880,44 @@ final class RepoViewModel {
             try await git.checkoutBranch(originalBranch)
 
             // 5. Pop stash if we stashed
-            if hasChanges {
-                try await git.stashPop()
+            if let autoStashOID {
+                attemptedRestore = true
+                try await git.stashPop(oid: autoStashOID)
             }
 
             await loadAll()
             showToast(title: "Pull Complete", detail: "\(branch.name) updated", style: .success)
         } catch {
-            // Try to recover: checkout back to original branch
-            try? await git.checkoutBranch(originalBranch)
-            if hasChanges {
-                try? await git.stashPop()
+            // Never apply the original branch's stash on the target branch.
+            var recoveryNotes: [String] = []
+            var onOriginalBranch = false
+            do {
+                if try await git.currentBranch() != originalBranch {
+                    try await git.checkoutBranch(originalBranch)
+                }
+                onOriginalBranch = try await git.currentBranch() == originalBranch
+                if !onOriginalBranch {
+                    recoveryNotes.append("Could not verify the original branch \(originalBranch).")
+                }
+            } catch {
+                recoveryNotes.append("Could not return to \(originalBranch): \(error.localizedDescription)")
             }
-            showToast(title: "Pull Failed", detail: "Pull \(branch.name) failed: \(error.localizedDescription)", style: .error)
+            if let autoStashOID, !attemptedRestore {
+                if onOriginalBranch {
+                    do {
+                        try await git.stashPop(oid: autoStashOID)
+                    } catch {
+                        recoveryNotes.append("Auto-stash \(autoStashOID) was not fully restored: \(error.localizedDescription)")
+                    }
+                } else {
+                    recoveryNotes.append("Auto-stash \(autoStashOID) was kept for recovery.")
+                }
+            }
+            await loadAll()
+            let details = (["Pull \(branch.name) failed: \(error.localizedDescription)"] + recoveryNotes)
+                .joined(separator: " ")
+            operationError = details
+            showToast(title: "Pull Failed", detail: details, style: .error)
         }
     }
 
@@ -4745,7 +5018,7 @@ final class RepoViewModel {
         let runner = AutoStashRunner(
             isDirty: { [git] in await git.hasWorkingTreeChanges() },
             stashPush: { [git] in try await git.stashSave(message: "GitN: auto-stash before squash", includeUntracked: true) },
-            stashPop: { [git] in try await git.stashPop(index: 0) },
+            stashPop: { [git] oid in try await git.stashPop(oid: oid) },
             hasUnmergedPaths: { [git] in await git.hasIndexConflicts() }
         )
         do {
@@ -5102,16 +5375,24 @@ final class RepoViewModel {
         if isCompareMode { exitCompareMode() }
         closeFileInspector()
         invalidateCommittedDiffLoading()
+        let generation = committedDiffGeneration
         selectedStash = stash
         selectedCommit = nil
         selectedDiffFile = nil
         fileDiffContent = ""
         parsedDiff = nil
+        diffFiles = []
         do {
-            diffFiles = await annotateLFSTracking(for: (try await git.stashDiffFiles(stash.index)))
+            let files = try await git.stashDiffFiles(stash.oid)
+            guard generation == committedDiffGeneration, selectedStash?.oid == stash.oid else { return }
+            let annotated = await annotateLFSTracking(for: files)
+            guard generation == committedDiffGeneration, selectedStash?.oid == stash.oid else { return }
+            diffFiles = annotated
         } catch {
-            diffFiles = []
-            showToast(title: "Failed to load stash diff", detail: error.localizedDescription, style: .error)
+            if generation == committedDiffGeneration, selectedStash?.oid == stash.oid {
+                diffFiles = []
+                showToast(title: "Failed to load stash diff", detail: error.localizedDescription, style: .error)
+            }
         }
     }
 
@@ -5301,9 +5582,13 @@ final class RepoViewModel {
                 showToast(title: type.title, detail: "There are merge conflicts that need to be resolved", style: .error)
             } else {
                 operationError = errorMessage
+                showToast(title: type == .stashApply ? "Stash Failed" : "Merge Failed",
+                          detail: errorMessage, style: .error)
             }
         } catch {
             operationError = errorMessage
+            showToast(title: type == .stashApply ? "Stash Failed" : "Merge Failed",
+                      detail: errorMessage, style: .error)
         }
         // Always refresh after any failed stash/merge operation so the file list
         // reflects whatever partial state libgit2 left in the working directory.
@@ -5509,17 +5794,28 @@ final class RepoViewModel {
         mergeConflictedFiles = []
         mergeResolvedFiles = []
         conflictMergeFile = nil
+        conflictFileSnapshot = nil
+        conflictMergeGeneration += 1
         showConflictMergeView = false
         conflictFallbackMessage = nil
     }
 
     func openConflictMerge(_ file: ConflictFile) async {
         guard conflictMergeLoadingPath != file.path else { return }
+        conflictMergeGeneration += 1
+        let generation = conflictMergeGeneration
         conflictMergeLoadingPath = file.path
         conflictMergeFile = file
+        conflictFileSnapshot = nil
+        conflictSides = nil
+        conflictEditorDocument = nil
+        showConflictMergeView = false
         do {
             conflictUndoManager.removeAllActions()
-            let sides = try await git.readConflictSides(path: file.path)
+            let session = try await git.loadConflictSession(path: file.path)
+            guard generation == conflictMergeGeneration else { return }
+            let sides = session.sides
+            conflictFileSnapshot = session.snapshot
             conflictSides = sides
             conflictFallbackMessage = nil
             let document = ConflictEditorDocument(sides: sides)
@@ -5529,6 +5825,8 @@ final class RepoViewModel {
             conflictOutputExternalRevision += 1
             showConflictMergeView = true
         } catch {
+            guard generation == conflictMergeGeneration else { return }
+            conflictFileSnapshot = nil
             conflictSides = nil
             conflictEditorDocument = nil
             conflictOutputText = ""
@@ -5537,13 +5835,15 @@ final class RepoViewModel {
             conflictFallbackMessage = error.localizedDescription
             showConflictMergeView = true
         }
-        conflictMergeLoadingPath = nil
+        if generation == conflictMergeGeneration { conflictMergeLoadingPath = nil }
     }
 
     func closeConflictMerge() {
+        conflictMergeGeneration += 1
         showConflictMergeView = false
         conflictMergeLoadingPath = nil
         conflictMergeFile = nil
+        conflictFileSnapshot = nil
         conflictSides = nil
         conflictEditorDocument = nil
         conflictFallbackMessage = nil
@@ -5710,6 +6010,14 @@ final class RepoViewModel {
         updateConflictDocument(document)
     }
 
+    func keepConflictAncestor(_ regionIndex: Int) {
+        guard var document = conflictEditorDocument,
+              document.blocks.contains(where: { $0.id == regionIndex && $0.mode == .attached }) else { return }
+        registerConflictUndo(actionName: "Keep Base")
+        document.keepAncestor(blockID: regionIndex)
+        updateConflictDocument(document)
+    }
+
     func setConflictBothOrder(_ order: ConflictEditorBlock.BothOrder, regionIndex: Int) {
         guard var document = conflictEditorDocument else { return }
         registerConflictUndo(actionName: order == .currentFirst ? "Current Then Incoming" : "Incoming Then Current")
@@ -5735,6 +6043,7 @@ final class RepoViewModel {
                 showConflictMergeView = false
                 conflictMergeLoadingPath = nil
                 conflictMergeFile = nil
+                conflictFileSnapshot = nil
                 conflictSides = nil
                 conflictEditorDocument = nil
                 conflictFallbackMessage = nil
@@ -5752,23 +6061,29 @@ final class RepoViewModel {
             return
         }
         guard let document = conflictEditorDocument else { return }
-        let hasSelectedHunks = document.blocks.contains(where: { $0.selectedSources.hasSelection })
-        guard hasSelectedHunks || document.hasOutputChanges else {
+        let unresolved = document.unresolvedBlockIDs
+        guard unresolved.isEmpty else {
             showToast(
-                title: "No Hunks Selected",
-                detail: "Select at least one conflict hunk or edit the output before saving",
+                title: "Unresolved Conflicts",
+                detail: "Resolve all \(unresolved.count) remaining conflict block(s) before marking this file resolved",
                 style: .warning
             )
             return
         }
+        guard let snapshot = conflictFileSnapshot else {
+            showToast(title: "Conflict Changed", detail: "Reopen the conflict before saving.", style: .warning)
+            return
+        }
         let content = conflictOutputText
         do {
-            try await git.saveConflictResolution(path: file.path, content: content)
-            try await git.markConflictResolved(path: file.path)
+            try await git.saveConflictResolution(
+                path: file.path, content: content, expectedSnapshot: snapshot
+            )
             showToast(title: "Saved", detail: "\(file.path) marked as resolved", style: .success)
             showConflictMergeView = false
             conflictMergeLoadingPath = nil
             conflictMergeFile = nil
+            conflictFileSnapshot = nil
             conflictSides = nil
             conflictEditorDocument = nil
             conflictFallbackMessage = nil
@@ -5778,6 +6093,15 @@ final class RepoViewModel {
             conflictUndoManager.removeAllActions()
             await refreshRebaseState()
             await refreshStatusAndGraph()
+        } catch ConflictSaveError.stageFailed(let detail, let retrySnapshot) {
+            conflictFileSnapshot = retrySnapshot
+            showToast(
+                title: "File Saved, Stage Failed",
+                detail: retrySnapshot == nil ? "\(detail) Reopen the conflict before retrying." : "\(detail) Remove the Git index lock and retry.",
+                style: .error
+            )
+        } catch ConflictSaveError.sourceChanged {
+            showToast(title: "Conflict Changed", detail: "The file or index changed. Reopen it before saving.", style: .warning)
         } catch {
             showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
         }

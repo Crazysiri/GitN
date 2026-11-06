@@ -15,26 +15,27 @@ final class RepositoryFileWatcher {
         case index
         case head
         case refs
+        case worktrees
         case workingDirectory
     }
 
-    private let repoPath: String
-    private let gitDirPath: String
+    private let commonDirPath: String
+    private let metadataPaths: GitRepositoryMetadataPaths
     private let onChange: (Set<ChangeKind>) -> Void
 
     private var stream: FSEventStreamRef?
     private var debounceTimer: DispatchSourceTimer?
     private var pendingChanges = Set<ChangeKind>()
     private let queue = DispatchQueue(label: "com.gitx.fswatcher", qos: .utility)
-    private var lastIndexModDate: Date?
 
     /// - Parameters:
     ///   - repoPath: The working-tree root (e.g. `/Users/me/project`).
     ///   - onChange: Called on the **main thread** with the set of change kinds
     ///     detected since the last callback.
     init(repoPath: String, onChange: @escaping (Set<ChangeKind>) -> Void) {
-        self.repoPath = (repoPath as NSString).standardizingPath
-        self.gitDirPath = (repoPath as NSString).appendingPathComponent(".git")
+        let paths = GitRepositoryMetadataPaths(repoPath: repoPath)
+        self.commonDirPath = paths.commonDirPath
+        self.metadataPaths = paths
         self.onChange = onChange
         startWatching()
     }
@@ -56,16 +57,14 @@ final class RepositoryFileWatcher {
     // MARK: - FSEventStream Setup
 
     private func startWatching() {
-        lastIndexModDate = indexModificationDate()
-
         let selfPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         var context = FSEventStreamContext(
             version: 0, info: selfPtr,
             retain: nil, release: nil, copyDescription: nil
         )
 
-        let paths = [repoPath, gitDirPath] as CFArray
-        let objectsPath = (gitDirPath as NSString).appendingPathComponent("objects")
+        let paths = metadataPaths.watchPaths as CFArray
+        let objectsPath = (commonDirPath as NSString).appendingPathComponent("objects")
 
         let callback: FSEventStreamCallback = { (_, clientInfo, numEvents, eventPaths, eventFlags, _) in
             guard let clientInfo else { return }
@@ -75,7 +74,7 @@ final class RepositoryFileWatcher {
             watcher.handleEvents(cfPaths, flags: eventFlags, count: numEvents)
         }
 
-        let stream = FSEventStreamCreate(
+        guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
             callback,
             &context,
@@ -83,88 +82,71 @@ final class RepositoryFileWatcher {
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.5,
             UInt32(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents)
-        )!
+        ) else { return }
 
         FSEventStreamSetExclusionPaths(stream, [objectsPath] as CFArray)
         FSEventStreamSetDispatchQueue(stream, queue)
-        FSEventStreamStart(stream)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
+        }
         self.stream = stream
     }
 
     // MARK: - Event Handling
-
-    /// Directories commonly ignored by git that produce high-frequency filesystem
-    /// churn (builds, dependency installs, etc.). Events originating from these
-    /// paths are discarded early to avoid triggering expensive refresh cycles.
-    private static let ignoredDirectoryComponents: Set<String> = [
-        "node_modules",
-        ".venv",
-        "__pycache__",
-        ".build",
-        "DerivedData",
-        "Pods",
-        ".gradle",
-        "build",
-        ".next",
-        ".nuxt",
-        "dist",
-        ".turbo",
-        ".cache",
-    ]
-
-    /// Returns `true` if `path` is inside a commonly-ignored directory subtree.
-    private func isInsideIgnoredDirectory(_ path: String) -> Bool {
-        // Fast path: check if the path contains any of the ignored components as a
-        // path segment (bounded by '/').
-        let pathSlice = path[...]
-        for component in Self.ignoredDirectoryComponents {
-            let needle = "/\(component)/"
-            if pathSlice.contains(needle) { return true }
-            // Also catch the case where the event IS the ignored directory itself
-            if pathSlice.hasSuffix("/\(component)") { return true }
-        }
-        return false
-    }
 
     private func handleEvents(_ paths: [String], flags: UnsafePointer<FSEventStreamEventFlags>, count: Int) {
         var changes = Set<ChangeKind>()
 
         for i in 0..<count {
             let path = (paths[i] as NSString).standardizingPath
-
-            if path.hasSuffix(".lock") { continue }
-
-            if path.hasPrefix(gitDirPath) {
-                if path.contains("/objects/") { continue }
-
-                let relative = String(path.dropFirst(gitDirPath.count + 1))
-
-                if relative == "index" || relative.hasPrefix("index") {
-                    if indexDidChange() {
-                        changes.insert(.index)
-                    }
-                } else if relative == "HEAD" {
-                    changes.insert(.head)
-                } else if relative.hasPrefix("refs/") {
-                    changes.insert(.refs)
-                } else if relative == "packed-refs" {
-                    changes.insert(.refs)
-                } else if relative == "MERGE_HEAD" || relative == "REBASE_HEAD"
-                            || relative == "CHERRY_PICK_HEAD" {
-                    changes.insert(.head)
-                }
-            } else if path.hasPrefix(repoPath) {
-                // Skip events from commonly-ignored directories to avoid
-                // continuous refresh cycles in repos with large dependency trees.
-                if !isInsideIgnoredDirectory(path) {
-                    changes.insert(.workingDirectory)
-                }
-            }
+            changes.formUnion(Self.changeKinds(for: path, metadataPaths: metadataPaths))
         }
 
         guard !changes.isEmpty else { return }
         pendingChanges.formUnion(changes)
         scheduleDebouncedNotification()
+    }
+
+    /// Classify against the real per-worktree gitdir before the common gitdir:
+    /// the former can be nested inside the latter for linked worktrees.
+    static func changeKinds(
+        for path: String,
+        metadataPaths: GitRepositoryMetadataPaths
+    ) -> Set<ChangeKind> {
+        let path = (path as NSString).standardizingPath
+        if path.hasSuffix(".lock") { return [] }
+
+        if let relative = GitRepositoryMetadataPaths.relativePath(path, inside: metadataPaths.gitDirPath) {
+            if relative.isEmpty { return [.head, .refs, .index] }
+            if relative == "worktrees" || relative.hasPrefix("worktrees/") { return [.worktrees] }
+            if relative == "index" { return [.index] }
+            if relative == "HEAD" || ["MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD"].contains(relative) {
+                return [.head]
+            }
+            if relative == "packed-refs" || relative == "refs" || relative.hasPrefix("refs/") {
+                return [.refs]
+            }
+            if relative == "config" { return [.refs] }
+            return []
+        }
+
+        if let relative = GitRepositoryMetadataPaths.relativePath(path, inside: metadataPaths.commonDirPath) {
+            if relative.isEmpty { return [.refs] }
+            if relative == "worktrees" || relative.hasPrefix("worktrees/") { return [.worktrees] }
+            if relative == "packed-refs" || relative == "refs" || relative.hasPrefix("refs/") {
+                return [.refs]
+            }
+            if relative == "config" { return [.refs] }
+            return []
+        }
+
+        if let relative = GitRepositoryMetadataPaths.relativePath(path, inside: metadataPaths.workTreePath) {
+            if relative == ".git" { return [.head, .refs, .index] }
+            return [.workingDirectory]
+        }
+        return []
     }
 
     private func scheduleDebouncedNotification() {
@@ -185,22 +167,5 @@ final class RepositoryFileWatcher {
         DispatchQueue.main.async { [onChange] in
             onChange(changes)
         }
-    }
-
-    // MARK: - Index Helpers
-
-    private func indexModificationDate() -> Date? {
-        let indexPath = (gitDirPath as NSString).appendingPathComponent("index")
-        let attrs = try? FileManager.default.attributesOfItem(atPath: indexPath)
-        return attrs?[.modificationDate] as? Date
-    }
-
-    private func indexDidChange() -> Bool {
-        let newDate = indexModificationDate()
-        if newDate != lastIndexModDate {
-            lastIndexModDate = newDate
-            return true
-        }
-        return false
     }
 }

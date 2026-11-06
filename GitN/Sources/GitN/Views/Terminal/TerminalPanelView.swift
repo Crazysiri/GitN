@@ -3,29 +3,45 @@ import AppKit
 import SwiftTerm
 
 struct TerminalPanelView: View {
-    let repoPath: String
+    let store: TerminalSessionStore
     @Binding var isVisible: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             terminalHeader
             Divider()
-            SwiftTermView(repoPath: repoPath)
+            if let activeView = store.activeView {
+                TerminalSessionHost(terminalView: activeView)
+            } else {
+                ContentUnavailableView("No Terminal Session", systemImage: "terminal")
+            }
         }
         .background(ChromePalette.toolbarBackground)
+        .onAppear { store.ensureSession() }
     }
 
     // MARK: - Header
 
     private var terminalHeader: some View {
-        HStack {
+        HStack(spacing: 7) {
             Image(systemName: "terminal")
                 .font(.caption)
                 .foregroundStyle(ChromePalette.terminalAccent)
-            Text("Terminal")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(ChromePalette.terminalPrimaryText)
-            Spacer()
+            ScrollView(.horizontal) {
+                HStack(spacing: 4) {
+                    ForEach(store.sessions) { session in
+                        terminalTab(session)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+
+            Button { store.createSession() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .hoverTooltip("New Terminal")
 
             Button(action: { isVisible = false }) {
                 Image(systemName: "chevron.down")
@@ -39,75 +55,48 @@ struct TerminalPanelView: View {
         .padding(.vertical, 5)
         .background(ChromePalette.toolbarBackground)
     }
-}
 
-// MARK: - SwiftTerm NSViewRepresentable
+    private func terminalTab(_ session: TerminalSessionInfo) -> some View {
+        let isSelected = session.id == store.activeID
+        return HStack(spacing: 3) {
+            Button { store.selectSession(session.id) } label: {
+                HStack(spacing: 4) {
+                    if !session.isRunning {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(session.title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 110)
+                }
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(ChromePalette.terminalPrimaryText)
+            }
+            .buttonStyle(.plain)
 
-struct SwiftTermView: NSViewRepresentable {
-    let repoPath: String
-
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let termView = DropReceivingTerminalView(frame: .zero)
-        termView.wantsLayer = true
-        termView.processDelegate = context.coordinator
-
-        let fontSize: CGFloat = 12
-        termView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        termView.optionAsMetaKey = true
-
-        applyTheme(termView)
-
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
-        env.append("LANG=en_US.UTF-8")
-        env.append("TERM_PROGRAM=GitN")
-        if let home = ProcessInfo.processInfo.environment["HOME"] {
-            env.append("HOME=\(home)")
+            Button { store.closeSession(session.id) } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(ChromePalette.terminalSecondaryText)
+            }
+            .buttonStyle(.plain)
+            .hoverTooltip("Close Terminal")
         }
-
-        termView.startProcess(
-            executable: shell,
-            args: ["-l"],
-            environment: env,
-            execName: "-" + (shell as NSString).lastPathComponent,
-            currentDirectory: repoPath
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isSelected ? ChromePalette.chromeButtonHoverFill : ChromePalette.chromeButtonFill)
         )
-
-        context.coordinator.terminalView = termView
-        return termView
-    }
-
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
-        applyTheme(nsView)
-    }
-
-    private func applyTheme(_ termView: LocalProcessTerminalView) {
-        termView.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-        termView.nativeBackgroundColor = .textBackgroundColor
-        termView.nativeForegroundColor = .labelColor
-        termView.caretColor = .controlAccentColor
-        termView.selectedTextBackgroundColor = .selectedTextBackgroundColor
-        termView.appearance = nil
-        termView.needsDisplay = true
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
-        weak var terminalView: LocalProcessTerminalView?
-
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {
-        }
-
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
-        }
-
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-        }
-
-        func processTerminated(source: TerminalView, exitCode: Int32?) {
+        .contextMenu {
+            Button("Move Left") { store.moveSession(session.id, by: -1) }
+            Button("Move Right") { store.moveSession(session.id, by: 1) }
+            Divider()
+            Button("Close Others") { store.closeOtherSessions(keeping: session.id) }
+                .disabled(store.sessions.count < 2)
+            Button("Close Terminal") { store.closeSession(session.id) }
         }
     }
 }
@@ -127,7 +116,7 @@ enum TerminalDropInsertionFormatter {
     }
 }
 
-private final class DropReceivingTerminalView: LocalProcessTerminalView {
+final class DropReceivingTerminalView: LocalProcessTerminalView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerForDraggedTypes([.fileURL])

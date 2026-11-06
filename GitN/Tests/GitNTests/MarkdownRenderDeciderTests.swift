@@ -6,6 +6,15 @@ import XCTest
 /// These tests exercise `MarkdownRenderDecider.decide(text:forceRich:)` directly and
 /// MUST NOT instantiate any SwiftUI view bodies.
 final class MarkdownRenderDeciderTests: XCTestCase {
+    func testLargeMarkdownEditorSkipsWholeDocumentHighlighting() {
+        XCTAssertTrue(MarkdownEditorHighlightPolicy.shouldHighlight(utf16Length: 0))
+        XCTAssertTrue(MarkdownEditorHighlightPolicy.shouldHighlight(
+            utf16Length: MarkdownPreviewPerformance.renderCapBytes
+        ))
+        XCTAssertFalse(MarkdownEditorHighlightPolicy.shouldHighlight(
+            utf16Length: MarkdownPreviewPerformance.renderCapBytes + 1
+        ))
+    }
     private let cap = MarkdownPreviewPerformance.renderCapBytes
 
     func testCapValueIsTheExpected256KiB() {

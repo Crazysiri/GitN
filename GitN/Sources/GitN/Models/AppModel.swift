@@ -72,24 +72,8 @@ final class AppModel {
     }
 
     func cloneRepository(urlString: String, destinationPath: String, name: String) async throws {
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["clone", urlString, destinationPath]
-
-            let pipe = Pipe()
-            process.standardError = pipe
-
-            try process.run()
-            process.waitUntilExit()
-
-            if process.terminationStatus != 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errMsg = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Clone failed"
-                throw GitError.operationFailed(errMsg)
-            }
-        }.value
+        let parent = URL(fileURLWithPath: destinationPath).deletingLastPathComponent().path
+        try await GitCLI(repoPath: parent).run(["clone", "--", urlString, destinationPath])
 
         _addTab(path: destinationPath, name: name)
     }

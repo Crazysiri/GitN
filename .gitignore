@@ -11,6 +11,7 @@ UserInterfaceState.xcuserstate
 # Preserved in git: host.js, host.css, index.html
 GitN/Monaco/node_modules/
 GitN/Monaco/dist/
+GitN/Monaco/.worker-build/
 GitN/Sources/GitN/Resources/Monaco/app.js
 GitN/Sources/GitN/Resources/Monaco/app.js.map
 GitN/Sources/GitN/Resources/Monaco/app.js.LICENSE.txt

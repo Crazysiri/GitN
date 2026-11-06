@@ -1761,7 +1761,6 @@ struct DetailPanelView: View {
 
     private func conflictPanel(_ type: ConflictType) -> some View {
         let conflictedFiles = viewModel.currentConflictedFiles
-        let resolvedFiles = viewModel.currentResolvedFiles
 
         return VStack(spacing: 0) {
             // Header

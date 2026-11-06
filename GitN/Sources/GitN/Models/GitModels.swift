@@ -29,8 +29,9 @@ struct RemoteInfo: Identifiable, Equatable {
 }
 
 struct StashInfo: Identifiable, Equatable {
-    var id: String { index }
+    var id: String { oid }
     let index: String
+    let oid: String
     let message: String
     let date: String
 }
@@ -386,6 +387,15 @@ struct ConflictSides: Equatable {
     let theirsLines: [String]
     let mergedText: String
     let markers: [ConflictRegion]
+}
+
+/// Identity of the conflict inputs and working-tree file presented to the user.
+/// A missing worktree file is distinct from an empty file.
+struct ConflictFileSnapshot: Equatable, Sendable {
+    let ancestorOID: String?
+    let currentOID: String?
+    let incomingOID: String?
+    let workingTreeSHA256: String?
 }
 
 struct ConflictRegion: Identifiable, Equatable {

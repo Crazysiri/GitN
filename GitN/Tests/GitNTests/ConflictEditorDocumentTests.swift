@@ -33,6 +33,66 @@ final class ConflictEditorDocumentTests: XCTestCase {
         )
     }
 
+    func testUpdatingWithIdenticalTextPreservesBlockAndLineOrigins() {
+        var document = makeDocument()
+        document.toggleIncoming(blockID: 0)
+        let before = document
+
+        document.updateOutputText(document.outputText)
+
+        XCTAssertEqual(document, before)
+    }
+
+    func testLateEditInLargeOutputPreservesEarlierOriginsAndBlockRange() {
+        var document = makeDocument()
+        document.toggleIncoming(blockID: 0)
+        var lines = document.outputLines
+        lines.insert(contentsOf: (0..<12_000).map { "line-\($0)" }, at: 3)
+        document.updateOutputText(lines.joined(separator: "\n"))
+
+        lines[lines.count - 1] = "omega edited"
+        document.updateOutputText(lines.joined(separator: "\n"))
+
+        XCTAssertEqual(document.outputLineOrigins.count, lines.count)
+        XCTAssertEqual(Array(document.outputLineOrigins.prefix(4)), [.common, .incoming, .incoming, .manual])
+        XCTAssertEqual(document.outputLineOrigins[lines.count - 2], .manual)
+        XCTAssertEqual(document.outputLineOrigins.last, .manual)
+        XCTAssertEqual(document.blocks[0].controlledBlock?.lineRange, 1..<3)
+        XCTAssertEqual(document.blocks[0].resolutionIntent, .selected)
+    }
+
+    func testPartialSelectionCannotResolveAnotherBlock() {
+        var document = makeTwoBlockDocument()
+        XCTAssertEqual(document.unresolvedBlockIDs, [0, 1])
+
+        document.toggleCurrent(blockID: 0)
+        XCTAssertEqual(document.unresolvedBlockIDs, [1])
+
+        document.keepAncestor(blockID: 1)
+        XCTAssertEqual(document.unresolvedBlockIDs, [])
+        XCTAssertEqual(document.blocks[1].resolutionIntent, .ancestor)
+
+        document.toggleCurrent(blockID: 0)
+        XCTAssertEqual(document.unresolvedBlockIDs, [0])
+        document.resetAll()
+        XCTAssertEqual(document.unresolvedBlockIDs, [0, 1])
+    }
+
+    func testEditingOrDeletingAConflictBlockMarksOnlyThatBlockResolved() {
+        var edited = makeTwoBlockDocument()
+        edited.updateOutputText("alpha\nmanual-1\nmiddle\nbase-2\nomega")
+        XCTAssertEqual(edited.unresolvedBlockIDs, [1])
+        XCTAssertEqual(edited.blocks[0].resolutionIntent, .manual)
+
+        var cleared = makeDocument()
+        cleared.updateOutputText("alpha\nomega")
+        XCTAssertEqual(cleared.unresolvedBlockIDs, [])
+
+        var outside = makeDocument()
+        outside.updateOutputText("new heading\nalpha\nbase-1\nbase-2\nomega")
+        XCTAssertEqual(outside.unresolvedBlockIDs, [0])
+    }
+
     func testEditingInsideAttachedBlockKeepsItAttached() {
         var document = makeDocument()
 
@@ -805,6 +865,20 @@ final class ConflictEditorDocumentTests: XCTestCase {
                 ].joined(separator: "\n")
             )
         )
+    }
+
+    private func makeTwoBlockDocument() -> ConflictEditorDocument {
+        ConflictEditorDocument(sides: makeSides(
+            baseLines: ["alpha", "base-1", "middle", "base-2", "omega"],
+            oursLines: ["alpha", "current-1", "middle", "current-2", "omega"],
+            theirsLines: ["alpha", "incoming-1", "middle", "incoming-2", "omega"],
+            mergedText: [
+                "alpha", "<<<<<<< Current", "current-1", "||||||| Base", "base-1",
+                "=======", "incoming-1", ">>>>>>> Incoming", "middle",
+                "<<<<<<< Current", "current-2", "||||||| Base", "base-2",
+                "=======", "incoming-2", ">>>>>>> Incoming", "omega",
+            ].joined(separator: "\n")
+        ))
     }
 
     private func makeSides(

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     let viewModel: RepoViewModel
+    @Environment(AppModel.self) private var appModel
 
     private static let animatedSectionItemLimit = 60
     private static let animatedRemoteDisclosureItemLimit = 120
@@ -53,6 +54,12 @@ struct SidebarView: View {
     @State private var newBranchFromTagName = ""
 
     @State private var stashPendingDrop: StashInfo?
+    @State private var showCreateWorktree = false
+    @State private var worktreeCreateBranch = true
+    @State private var worktreeBranch = ""
+    @State private var worktreePath = ""
+    @State private var isCreatingWorktree = false
+    @State private var worktreePendingRemoval: WorktreeInfo?
     @State private var activeFileTreeEdit: FileTreeEditState?
     @State private var pendingWorkingTreeDelete: PendingWorkingTreeDelete?
     @State private var fileSearchText = ""
@@ -132,6 +139,7 @@ struct SidebarView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     localBranchesSection
+                    worktreesSection
                     remotesSection
                     tagsSection
                     stashesSection
@@ -182,6 +190,7 @@ struct SidebarView: View {
         .sheet(isPresented: $showRenameBranch) { renameBranchSheet }
         .sheet(isPresented: $showCreateTagAtBranch) { createTagAtBranchSheet }
         .sheet(isPresented: $showCreateBranchFrom) { createBranchFromSheet }
+        .sheet(isPresented: $showCreateWorktree) { createWorktreeSheet }
         .sheet(isPresented: $showSetUpstream) { setUpstreamSheet }
         .sheet(isPresented: $showAnnotateTag) { annotateTagSheet }
         .sheet(isPresented: $showCreateBranchFromTag) { createBranchFromTagSheet }
@@ -223,6 +232,22 @@ struct SidebarView: View {
                 let summary = stash.message.trimmingCharacters(in: .whitespacesAndNewlines)
                 let detail = summary.isEmpty ? stash.index : "“\(summary)” (\(stash.index))"
                 Text("Remove \(detail)? The stashed changes will be discarded. This cannot be undone.")
+            }
+        }
+        .alert("Remove Worktree", isPresented: Binding(
+            get: { worktreePendingRemoval != nil },
+            set: { if !$0 { worktreePendingRemoval = nil } }
+        )) {
+            Button("Remove Worktree", role: .destructive) {
+                guard let worktree = worktreePendingRemoval else { return }
+                worktreePendingRemoval = nil
+                let openPaths = Set(appModel.tabs.map { WorktreeService.canonicalPath($0.path) })
+                Task { await viewModel.performRemoveWorktree(worktree, openPaths: openPaths) }
+            }
+            Button("Cancel", role: .cancel) { worktreePendingRemoval = nil }
+        } message: {
+            if let worktreePendingRemoval {
+                Text("Remove the clean worktree at \(worktreePendingRemoval.path)? Its branch will be kept. Git will refuse removal if it has local changes.")
             }
         }
         .alert("Delete \(pendingWorkingTreeDelete?.isFolder == true ? "Folder" : "File")", isPresented: Binding(
@@ -821,6 +846,10 @@ struct SidebarView: View {
             newBranchFromName = ""
             showCreateBranchFrom = true
         }
+        Button("Create Worktree for \(branch.name)…") {
+            presentCreateWorktree(for: branch.name)
+        }
+        .disabled(branch.isCurrent || viewModel.worktrees.contains { $0.branchName == branch.name })
         if !branch.isCurrent {
             Button("Cherry pick commit") {
                 Task { await viewModel.performCherryPick(branch.shortHash) }
@@ -1143,6 +1172,188 @@ struct SidebarView: View {
                             collapsedLocalFolders.insert(node.fullPath)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // MARK: - Worktrees
+
+    private var availableWorktreeBranches: [BranchInfo] {
+        let checkedOut = Set(viewModel.worktrees.compactMap(\.branchName))
+        return viewModel.localBranches.filter { !$0.isCurrent && !checkedOut.contains($0.name) }
+    }
+
+    private var suggestedWorktreeFolderName: String {
+        let leaf = worktreeBranch.split(separator: "/").last.map(String.init) ?? "new-worktree"
+        return "\(viewModel.repoName)-\(leaf)"
+    }
+
+    private func presentCreateWorktree(for branch: String? = nil) {
+        worktreeCreateBranch = branch == nil
+        worktreeBranch = branch ?? ""
+        let parent = URL(fileURLWithPath: viewModel.repoPath).deletingLastPathComponent()
+        let suffix = branch?.split(separator: "/").last.map(String.init) ?? "new-worktree"
+        worktreePath = parent.appendingPathComponent("\(viewModel.repoName)-\(suffix)").path
+        viewModel.worktreeError = nil
+        showCreateWorktree = true
+    }
+
+    private func chooseWorktreeDestinationParent() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the parent folder for the new worktree"
+        panel.directoryURL = URL(fileURLWithPath: viewModel.repoPath).deletingLastPathComponent()
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        worktreePath = parent.appendingPathComponent(suggestedWorktreeFolderName).path
+    }
+
+    private var createWorktreeSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Create Worktree")
+                .font(.headline)
+            Picker("Source", selection: $worktreeCreateBranch) {
+                Text("New branch from HEAD").tag(true)
+                Text("Existing local branch").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: worktreeCreateBranch) { _, createBranch in
+                worktreeBranch = createBranch ? "" : (availableWorktreeBranches.first?.name ?? "")
+                viewModel.worktreeError = nil
+            }
+
+            if worktreeCreateBranch {
+                TextField("New branch name", text: $worktreeBranch)
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                Picker("Branch", selection: $worktreeBranch) {
+                    ForEach(availableWorktreeBranches) { branch in
+                        Text(branch.name).tag(branch.name)
+                    }
+                }
+                if availableWorktreeBranches.isEmpty {
+                    Text("No unchecked-out local branches are available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                TextField("Absolute destination path", text: $worktreePath)
+                    .textFieldStyle(.roundedBorder)
+                Button("Browse…") { chooseWorktreeDestinationParent() }
+            }
+            Text("The branch remains after the worktree is removed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error = viewModel.worktreeError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { showCreateWorktree = false }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isCreatingWorktree)
+                Button("Create and Open") {
+                    let path = worktreePath
+                    let branch = worktreeBranch
+                    let createBranch = worktreeCreateBranch
+                    isCreatingWorktree = true
+                    Task {
+                        defer { isCreatingWorktree = false }
+                        if let createdPath = await viewModel.performCreateWorktree(
+                            path: path, branch: branch, createBranch: createBranch
+                        ) {
+                            showCreateWorktree = false
+                            let name = URL(fileURLWithPath: createdPath).lastPathComponent
+                            appModel.openRepository(path: createdPath, name: name)
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isCreatingWorktree || viewModel.operationInProgress
+                    || worktreeBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !worktreePath.hasPrefix("/"))
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
+    }
+
+    private var worktreesSection: some View {
+        SidebarSection(
+            title: "WORKTREES",
+            icon: "square.stack.3d.up",
+            count: viewModel.worktrees.count,
+            isCollapsed: viewModel.isSectionCollapsed("worktrees"),
+            onToggle: { viewModel.toggleSection("worktrees") },
+            animateCollapse: viewModel.worktrees.count <= Self.animatedSectionItemLimit,
+            onAdd: { presentCreateWorktree() },
+            onRefresh: { Task { await viewModel.refreshWorktrees() } }
+        ) {
+            ForEach(viewModel.worktrees) { worktree in
+                let isCurrent = WorktreeService.canonicalPath(worktree.path)
+                    == WorktreeService.canonicalPath(viewModel.repoPath)
+                let isOpen = appModel.tabs.contains {
+                    WorktreeService.canonicalPath($0.path) == WorktreeService.canonicalPath(worktree.path)
+                }
+                Button {
+                    let name = URL(fileURLWithPath: worktree.path).lastPathComponent
+                    appModel.openRepository(path: worktree.path, name: name)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: worktree.isMain ? "house" : "square.stack.3d.up")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Text(worktree.branchName ?? (worktree.isDetached ? "Detached HEAD" : "Worktree"))
+                                    .font(AppTypography.Sidebar.row)
+                                    .lineLimit(1)
+                                if isCurrent { Text("Current").foregroundStyle(.secondary) }
+                                if worktree.isLocked { Image(systemName: "lock.fill") }
+                                if worktree.isPrunable { Image(systemName: "exclamationmark.triangle") }
+                            }
+                            Text(worktree.path)
+                                .font(AppTypography.Sidebar.rowMeta)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(worktree.isPrunable || worktree.isBare)
+                .hoverTooltip(worktree.path)
+                .contextMenu {
+                    Button("Open in Tab") {
+                        let name = URL(fileURLWithPath: worktree.path).lastPathComponent
+                        appModel.openRepository(path: worktree.path, name: name)
+                    }
+                    .disabled(worktree.isPrunable || worktree.isBare)
+                    Button("Reveal in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.path)])
+                    }
+                    .disabled(worktree.isPrunable)
+                    Button("Copy Path") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(worktree.path, forType: .string)
+                    }
+                    Divider()
+                    Button(isOpen ? "Close Tab Before Removing" : "Remove Worktree…", role: .destructive) {
+                        worktreePendingRemoval = worktree
+                    }
+                    .disabled(worktree.isMain || isCurrent || isOpen || worktree.isLocked || worktree.isPrunable)
                 }
             }
         }

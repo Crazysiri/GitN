@@ -48,6 +48,52 @@ struct MonacoHostPayload: Encodable, Equatable {
     let isDark: Bool
     let preview: MonacoPreviewPayload?
     let items: [MonacoDiffPayload]
+    var sourceID: String = ""
+}
+
+struct MonacoLocalEdit: Equatable {
+    let path: String
+    let content: String
+}
+
+enum MonacoLocalEditEchoPolicy {
+    static func isEcho(
+        _ next: MonacoHostPayload,
+        after edit: MonacoLocalEdit,
+        comparedTo previous: MonacoHostPayload?
+    ) -> Bool {
+        guard let previous, next.mode == previous.mode else { return false }
+        switch previous.mode {
+        case "preview":
+            guard let preview = previous.preview, preview.path == edit.path else { return false }
+            let editedPreview = MonacoPreviewPayload(
+                path: preview.path, language: preview.language, content: edit.content,
+                isEditable: preview.isEditable
+            )
+            return next == MonacoHostPayload(
+                mode: previous.mode, isDark: previous.isDark,
+                preview: editedPreview, items: previous.items, sourceID: previous.sourceID
+            )
+        case "diff":
+            guard previous.items.filter({ $0.path == edit.path }).count == 1 else { return false }
+            let editedItems = previous.items.map { item in
+                guard item.path == edit.path else { return item }
+                return MonacoDiffPayload(
+                    path: item.path, language: item.language, originalText: item.originalText,
+                    modifiedText: edit.content, isEditable: item.isEditable,
+                    primaryHunkAction: item.primaryHunkAction,
+                    showsDiscardAction: item.showsDiscardAction,
+                    hunkControls: item.hunkControls, lineBlames: item.lineBlames
+                )
+            }
+            return next == MonacoHostPayload(
+                mode: previous.mode, isDark: previous.isDark,
+                preview: previous.preview, items: editedItems, sourceID: previous.sourceID
+            )
+        default:
+            return false
+        }
+    }
 }
 
 final class MonacoCommandBridge {
@@ -69,6 +115,7 @@ struct MonacoInspectorView: NSViewRepresentable {
     let onContentChange: (String, String) -> Void
     let onHunkAction: ((String, Int, [Int], String) -> Void)?
     let onSaveRequest: (() -> Void)?
+    var sourceIdentity: String = ""
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -81,6 +128,7 @@ struct MonacoInspectorView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "monaco")
+        controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "monacoWorker")
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
@@ -115,17 +163,25 @@ struct MonacoInspectorView: NSViewRepresentable {
             mode: mode.rawValue,
             isDark: isDark,
             preview: preview,
-            items: items
+            items: items,
+            sourceID: sourceIdentity
         )
     }
 }
 
 extension MonacoInspectorView {
+    private static let isDebugEnabled = ProcessInfo.processInfo.environment["GITN_MONACO_DEBUG"] == "1"
+
     private static func emitDebugLog(_ message: @autoclosure () -> String) {
+        guard isDebugEnabled else { return }
         print("[MonacoBridge] \(message())")
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply {
+        private static let workerFiles: Set<String> = [
+            "editor.worker.js", "json.worker.js", "css.worker.js",
+            "html.worker.js", "ts.worker.js"
+        ]
         var onContentChange: (String, String) -> Void
         var onHunkAction: ((String, Int, [Int], String) -> Void)?
         var onSaveRequest: (() -> Void)?
@@ -134,7 +190,8 @@ extension MonacoInspectorView {
 
         private var isNavigationFinished = false
         private var isHostReady = false
-        private var isApplyingLocalEdit = false
+        private var pendingLocalEdit: MonacoLocalEdit?
+        private var lastHostPayload: MonacoHostPayload?
         private var lastPayloadData: Data?
 
         init(
@@ -182,7 +239,7 @@ extension MonacoInspectorView {
                let encodedContent = body["content"] as? String,
                let data = Data(base64Encoded: encodedContent),
                let content = String(data: data, encoding: .utf8) {
-                isApplyingLocalEdit = true
+                pendingLocalEdit = MonacoLocalEdit(path: path, content: content)
                 onContentChange(path, content)
                 return
             }
@@ -218,6 +275,7 @@ extension MonacoInspectorView {
             }
 
             if event == "debug" {
+                guard MonacoInspectorView.isDebugEnabled else { return }
                 let message = body["message"] as? String ?? "Unknown Monaco debug log"
                 let detail = body["detail"] as? String ?? ""
                 if detail.isEmpty {
@@ -225,6 +283,27 @@ extension MonacoInspectorView {
                 } else {
                     print("[MonacoDebug] \(message) \(detail)")
                 }
+            }
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage,
+            replyHandler: @escaping (Any?, String?) -> Void
+        ) {
+            guard message.name == "monacoWorker",
+                  let request = message.body as? [String: Any],
+                  let filename = request["filename"] as? String,
+                  Self.workerFiles.contains(filename),
+                  let directory = GitNResources.monacoDirectoryURL else {
+                replyHandler(nil, "Invalid Monaco worker request")
+                return
+            }
+            do {
+                let source = try String(contentsOf: directory.appendingPathComponent(filename), encoding: .utf8)
+                replyHandler(source, nil)
+            } catch {
+                replyHandler(nil, "Monaco worker resource unavailable: \(filename)")
             }
         }
 
@@ -240,11 +319,13 @@ extension MonacoInspectorView {
             let previewPath = payload.preview?.path ?? ""
             let diffPath = payload.items.first?.path ?? ""
             MonacoInspectorView.emitDebugLog(
-                "flushPayloadIfReady mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath) applyingLocalEdit=\(isApplyingLocalEdit) samePayload=\(data == lastPayloadData)"
+                "flushPayloadIfReady mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath) pendingLocalEdit=\(pendingLocalEdit != nil) samePayload=\(data == lastPayloadData)"
             )
 
-            if isApplyingLocalEdit {
-                isApplyingLocalEdit = false
+            if let edit = pendingLocalEdit,
+               MonacoLocalEditEchoPolicy.isEcho(payload, after: edit, comparedTo: lastHostPayload) {
+                pendingLocalEdit = nil
+                lastHostPayload = payload
                 lastPayloadData = data
                 MonacoInspectorView.emitDebugLog(
                     "flushPayloadIfReady skippedLocalEcho mode=\(mode) previewPath=\(previewPath) diffPath=\(diffPath)"
@@ -258,6 +339,8 @@ extension MonacoInspectorView {
                 )
                 return
             }
+            pendingLocalEdit = nil
+            lastHostPayload = payload
             lastPayloadData = data
             let encodedPayload = data.base64EncodedString()
             let script = "window.gitnMonaco && window.gitnMonaco.loadPayload('\(encodedPayload)');"

@@ -66,6 +66,14 @@ enum MarkdownPreviewPerformance {
     }
 }
 
+enum MarkdownEditorHighlightPolicy {
+    // Whole-document regex passes run on the main thread. Above this size the
+    // editor keeps its plain-text presentation instead of rescanning on each key.
+    static func shouldHighlight(utf16Length: Int) -> Bool {
+        utf16Length <= MarkdownPreviewPerformance.renderCapBytes
+    }
+}
+
 /// Outcome of the Markdown preview render decision (R2).
 enum MarkdownRenderDecision: Equatable {
     case rich
@@ -270,7 +278,7 @@ private enum MDHighlighter {
         let str = storage.string
         let fullRange = NSRange(location: 0, length: (str as NSString).length)
         storage.beginEditing()
-        storage.addAttributes([.font: baseFont, .foregroundColor: EditorColors.text], range: fullRange)
+        storage.setAttributes([.font: baseFont, .foregroundColor: EditorColors.text], range: fullRange)
         for rule in rules {
             guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: rule.options) else { continue }
             regex.enumerateMatches(in: str, range: fullRange) { match, _, _ in
@@ -278,6 +286,15 @@ private enum MDHighlighter {
                 rule.apply(storage, match.range)
             }
         }
+        storage.endEditing()
+    }
+
+    static func resetToPlain(_ storage: NSTextStorage) {
+        storage.beginEditing()
+        storage.setAttributes(
+            [.font: baseFont, .foregroundColor: EditorColors.text],
+            range: NSRange(location: 0, length: storage.length)
+        )
         storage.endEditing()
     }
 }
@@ -1328,6 +1345,8 @@ struct MarkdownEditorView: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.backgroundColor = EditorColors.background
         textView.drawsBackground = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        textView.textColor = EditorColors.text
         textView.selectedTextAttributes = [.backgroundColor: EditorColors.selection]
         textView.insertionPointColor = EditorColors.cursor
         textView.isVerticallyResizable = true
@@ -1352,9 +1371,8 @@ struct MarkdownEditorView: NSViewRepresentable {
         guard textView.string != text else { return }
         textView.string = text
         if let storage = textView.textStorage {
-            MDHighlighter.highlight(storage)
+            context.coordinator.updateHighlighting(storage)
         }
-        _ = textView.layoutManager?.numberOfGlyphs
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1362,9 +1380,22 @@ struct MarkdownEditorView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownEditorView
         var isUpdating = false
+        private var hasHighlightedContent = false
 
         init(_ parent: MarkdownEditorView) {
             self.parent = parent
+        }
+
+        func updateHighlighting(_ storage: NSTextStorage) {
+            if MarkdownEditorHighlightPolicy.shouldHighlight(utf16Length: storage.length) {
+                MDHighlighter.highlight(storage)
+                hasHighlightedContent = true
+            } else if hasHighlightedContent {
+                // Reset once when a small styled document grows beyond the cap.
+                // Subsequent keystrokes leave the large document untouched.
+                MDHighlighter.resetToPlain(storage)
+                hasHighlightedContent = false
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -1373,7 +1404,7 @@ struct MarkdownEditorView: NSViewRepresentable {
             parent.text = textView.string
             if let storage = textView.textStorage {
                 let selection = textView.selectedRange()
-                MDHighlighter.highlight(storage)
+                updateHighlighting(storage)
                 textView.setSelectedRange(selection)
             }
             isUpdating = false

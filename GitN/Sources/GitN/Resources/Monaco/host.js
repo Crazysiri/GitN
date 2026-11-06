@@ -18,8 +18,21 @@
     currentDiffIdentity: null,
     currentPreviewIdentity: null,
     currentEditorPath: null,
+    currentEditorSourceID: null,
+    currentSourceID: "",
+    modelCache: new Map(),
     pendingViewState: null,
+    viewStates: new Map(),
     pendingGutterAnimationFrame: null,
+    diffGeneration: 0,
+    diffTimer: null,
+    diffStatus: null,
+    currentDiffOriginalText: "",
+    currentDiffLanguage: "plaintext",
+    currentDiffEditable: false,
+    currentPreviewLanguage: "plaintext",
+    currentPreviewEditable: false,
+    isReplacingModel: false,
   };
   
 
@@ -54,6 +67,7 @@
   }
 
   function reportDebug(message, payload) {
+    if (!window.gitnMonacoDebug) return;
     postMessage("debug", {
       message: String(message || ""),
       detail: payload ? JSON.stringify(payload) : "",
@@ -75,6 +89,11 @@
     };
   }
 
+  function diffLineNumberMinChars(lineCount) {
+    const digits = String(Math.max(1, lineCount || 1)).length;
+    return Math.max(10, digits * 2 + 2);
+  }
+
   function formatLineNumber(value) {
     return typeof value === "number" ? String(value) : "";
   }
@@ -87,6 +106,14 @@
   }
 
   function disposeAllEditors() {
+    state.diffGeneration += 1;
+    if (state.diffTimer !== null) {
+      clearTimeout(state.diffTimer);
+      state.diffTimer = null;
+    }
+    if (window.gitnDiffScheduler) {
+      window.gitnDiffScheduler.cancel();
+    }
     if (state.pendingGutterAnimationFrame !== null) {
       try {
         window.cancelAnimationFrame(state.pendingGutterAnimationFrame);
@@ -111,50 +138,81 @@
     state.diffZoneIds = [];
     state.gutterOverlay = null;
     state.contentOverlay = null;
+    state.diffStatus = null;
     state.currentDiffIdentity = null;
     state.currentPreviewIdentity = null;
     state.currentEditorPath = null;
-
-    const models = window.monaco && window.monaco.editor ? window.monaco.editor.getModels() : [];
-    for (const model of models) {
-      try {
-        if (model.uri && model.uri.scheme === "gitn") {
-          model.dispose();
-        }
-      } catch (_) {}
-    }
+    state.currentEditorSourceID = null;
+    trimModelCache();
   }
 
   function modelUri(path, side) {
-    return window.monaco.Uri.parse(`gitn://${side}/${encodeURIComponent(path)}`);
+    return window.monaco.Uri.parse(`gitn://${side}/${encodeURIComponent(state.currentSourceID)}/${encodeURIComponent(path)}`);
+  }
+
+  function trimModelCache() {
+    const active = new Set(state.editors.map((editor) => editor.getModel()));
+    let units = 0;
+    for (const model of state.modelCache.values()) units += model.getValue().length;
+    while (state.modelCache.size > 8 || units > 4_000_000) {
+      const oldest = [...state.modelCache].find(([, model]) => !active.has(model));
+      if (!oldest) break; // An active large file must stay readable.
+      const [key, model] = oldest;
+      state.modelCache.delete(key);
+      units -= model.getValue().length;
+      model.dispose();
+    }
+  }
+
+  function disposeModelCache() {
+    for (const model of state.modelCache.values()) model.dispose();
+    state.modelCache.clear();
   }
 
   function buildDiffIdentity(item) {
-    return JSON.stringify({
+    return {
       path: item && item.path ? item.path : "",
+      sourceID: state.currentSourceID,
       language: item && item.language ? item.language : "",
       isEditable: !!(item && item.isEditable),
       originalText: item && typeof item.originalText === "string" ? item.originalText : "",
       modifiedText: item && typeof item.modifiedText === "string" ? item.modifiedText : "",
-    });
+    };
   }
 
   function buildPreviewIdentity(item) {
-    return JSON.stringify({
+    return {
       path: item && item.path ? item.path : "",
+      sourceID: state.currentSourceID,
       language: item && item.language ? item.language : "",
       isEditable: !!(item && item.isEditable),
       content: item && typeof item.content === "string" ? item.content : "",
-    });
+    };
+  }
+
+  function sameIdentity(a, b) {
+    return !!a && !!b && a.path === b.path && a.sourceID === b.sourceID &&
+      a.language === b.language &&
+      a.isEditable === b.isEditable && a.originalText === b.originalText &&
+      a.modifiedText === b.modifiedText && a.content === b.content;
   }
 
   function createModel(text, language, path, side) {
     const uri = modelUri(path, side);
-    const existingModel = window.monaco.editor.getModel(uri);
-    if (existingModel) {
-      existingModel.dispose();
+    const key = uri.toString();
+    let model = state.modelCache.get(key);
+    if (!model) {
+      model = window.monaco.editor.getModel(uri) ||
+        window.monaco.editor.createModel(text, resolveLanguage(language, path), uri);
+    } else if (model.getValue() !== text) {
+      model.setValue(text); // A changed snapshot must not retain obsolete undo history.
     }
-    return window.monaco.editor.createModel(text, resolveLanguage(language, path), uri);
+    if (typeof window.monaco.editor.setModelLanguage === "function") {
+      window.monaco.editor.setModelLanguage(model, resolveLanguage(language, path));
+    }
+    state.modelCache.delete(key);
+    state.modelCache.set(key, model);
+    return model;
   }
 
   function resolveLanguage(language, path) {
@@ -280,18 +338,26 @@
     state.pendingViewState = {
       mode: state.currentMode,
       path: state.currentEditorPath,
+      sourceID: state.currentEditorSourceID,
       viewState: editor.saveViewState(),
       scrollTop: typeof editor.getScrollTop === "function" ? editor.getScrollTop() : 0,
       scrollLeft: typeof editor.getScrollLeft === "function" ? editor.getScrollLeft() : 0,
     };
+    if (state.currentEditorPath) {
+      const key = state.currentMode + ":" + state.currentEditorSourceID + ":" + state.currentEditorPath;
+      state.viewStates.delete(key);
+      state.viewStates.set(key, state.pendingViewState);
+      if (state.viewStates.size > 8) state.viewStates.delete(state.viewStates.keys().next().value);
+    }
   }
 
   function restorePendingViewState(editor, mode, path) {
-    const pending = state.pendingViewState;
+    const pending = state.viewStates.get(mode + ":" + state.currentSourceID + ":" + path) || state.pendingViewState;
     state.pendingViewState = null;
 
-    if (!pending || pending.mode !== mode || pending.path !== path) {
-      return;
+    if (!pending || pending.mode !== mode || pending.path !== path ||
+        pending.sourceID !== state.currentSourceID) {
+      return false;
     }
 
     try {
@@ -311,6 +377,7 @@
         message: error && error.message ? error.message : String(error),
       });
     }
+    return true;
   }
 
   function renderPreview(payload) {
@@ -319,6 +386,35 @@
       contentLength: (payload.content || "").length,
       isEditable: !!payload.isEditable,
     });
+    if (state.currentMode === "preview" && state.editors.length > 0) {
+      const editor = state.editors[0];
+      const previousModel = editor.getModel();
+      const samePath = state.currentEditorPath === payload.path &&
+        state.currentEditorSourceID === state.currentSourceID;
+      if (!samePath) capturePendingViewState();
+      state.isReplacingModel = true;
+      let model;
+      if (samePath && previousModel && typeof previousModel.setValue === "function") {
+        const incomingText = payload.content || "";
+        if (previousModel.getValue() !== incomingText) previousModel.setValue(incomingText);
+        model = previousModel;
+      } else {
+        model = createModel(payload.content || "", payload.language, payload.path, "preview");
+        editor.setModel(model);
+      }
+      state.isReplacingModel = false;
+      trimModelCache();
+      editor.updateOptions(editorOptions(payload.isEditable));
+      state.currentPreviewLanguage = payload.language;
+      state.currentPreviewEditable = !!payload.isEditable;
+      state.currentPreviewIdentity = buildPreviewIdentity(payload);
+      state.currentEditorPath = payload.path;
+      state.currentEditorSourceID = state.currentSourceID;
+      if (!samePath && !restorePendingViewState(editor, "preview", payload.path)) {
+        editor.setScrollPosition({ scrollTop: 0, scrollLeft: 0 });
+      }
+      return;
+    }
     const root = resetRoot("preview");
     const editorNode = document.createElement("div");
     editorNode.className = "preview-editor";
@@ -332,21 +428,26 @@
       postMessage("saveRequest");
     });
     editor.onDidChangeModelContent(() => {
+      if (state.isReplacingModel) return;
       state.currentPreviewIdentity = buildPreviewIdentity({
-        path: payload.path,
-        language: payload.language,
-        isEditable: payload.isEditable,
+        path: state.currentEditorPath,
+        language: state.currentPreviewLanguage,
+        isEditable: state.currentPreviewEditable,
         content: editor.getValue(),
       });
       postMessage("contentChanged", {
-        path: payload.path,
+        path: state.currentEditorPath,
         content: encodeBase64(editor.getValue()),
       });
     });
+    state.currentPreviewLanguage = payload.language;
+    state.currentPreviewEditable = !!payload.isEditable;
     state.currentPreviewIdentity = buildPreviewIdentity(payload);
     state.currentEditorPath = payload.path;
+    state.currentEditorSourceID = state.currentSourceID;
     restorePendingViewState(editor, "preview", payload.path);
     state.editors.push(editor);
+    trimModelCache();
   }
 
   function addWheelForwarding(element) {
@@ -365,13 +466,41 @@
 
   function renderSingleDiff(item) {
     try {
-      console.log("[MonacoHost] render diff", {
-        path: item.path,
-        originalLines: (item.originalText || "").split("\n").length,
-        modifiedLines: (item.modifiedText || "").split("\n").length,
-        originalBytes: (item.originalText || "").length,
-        modifiedBytes: (item.modifiedText || "").length,
-      });
+      if (state.currentMode === "diff" && state.diffEditor) {
+        const editor = state.diffEditor;
+        const previousModel = editor.getModel();
+        const samePath = state.currentEditorPath === item.path &&
+          state.currentEditorSourceID === state.currentSourceID;
+        if (!samePath) capturePendingViewState();
+        state.diffGeneration += 1;
+        if (window.gitnDiffScheduler) window.gitnDiffScheduler.cancel();
+        state.currentDiffOriginalText = item.originalText || "";
+        state.currentDiffLanguage = item.language;
+        state.currentDiffEditable = !!item.isEditable;
+        state.currentEditorPath = item.path;
+        state.isReplacingModel = true;
+        let model;
+        if (samePath && previousModel && typeof previousModel.setValue === "function") {
+          const incomingText = item.modifiedText || "";
+          if (previousModel.getValue() !== incomingText) previousModel.setValue(incomingText);
+          model = previousModel;
+        } else {
+          model = createModel(item.modifiedText || "", item.language, item.path, "modified");
+          editor.setModel(model);
+        }
+        state.isReplacingModel = false;
+        trimModelCache();
+        editor.updateOptions(Object.assign(editorOptions(item.isEditable), {
+          lineNumbersMinChars: diffLineNumberMinChars(model.getLineCount()),
+        }));
+        state.currentDiffIdentity = buildDiffIdentity(item);
+        state.currentEditorSourceID = state.currentSourceID;
+        if (!samePath && !restorePendingViewState(editor, "diff", item.path)) {
+          editor.setScrollPosition({ scrollTop: 0, scrollLeft: 0 });
+        }
+        renderInlineDiff(editor, item.originalText || "", editor.getValue());
+        return;
+      }
       const root = resetRoot("diff");
       const shellNode = document.createElement("div");
       shellNode.className = "single-diff-shell";
@@ -392,13 +521,18 @@
       shellNode.appendChild(contentOverlay);
       state.contentOverlay = contentOverlay;
 
-      const originalModel = createModel(item.originalText || "", item.language, item.path, "original");
+      const statusNode = document.createElement("div");
+      statusNode.className = "gitn-diff-status";
+      statusNode.hidden = true;
+      shellNode.appendChild(statusNode);
+      state.diffStatus = statusNode;
+
       const model = createModel(item.modifiedText || "", item.language, item.path, "modified");
       const editor = window.monaco.editor.create(editorNode, Object.assign(editorOptions(item.isEditable), {
         model,
         lineDecorationsWidth: 12,
         glyphMargin: false,
-        lineNumbersMinChars: 10,
+        lineNumbersMinChars: diffLineNumberMinChars(model.getLineCount()),
         lineNumbers: (lineNumber) => {
           const entry = getLineNumberEntry(lineNumber);
           return entry && typeof entry.newLineNum === "number"
@@ -407,24 +541,30 @@
         },
       }));
       state.diffEditor = editor;
+      state.currentEditorSourceID = state.currentSourceID;
       applyEditorMetrics(shellNode, editor);
       editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS, () => {
         postMessage("saveRequest");
       });
-      renderInlineDiff(editor, item.originalText || "", model.getValue());
+      state.currentDiffOriginalText = item.originalText || "";
+      state.currentDiffLanguage = item.language;
+      state.currentDiffEditable = !!item.isEditable;
+      state.currentEditorPath = item.path;
+      renderInlineDiff(editor, item.originalText || "", editor.getValue());
 
       editor.onDidChangeModelContent(() => {
+        if (state.isReplacingModel) return;
         var currentValue = editor.getValue();
         state.currentDiffIdentity = buildDiffIdentity({
-          path: item.path,
-          language: item.language,
-          isEditable: item.isEditable,
-          originalText: item.originalText || "",
+          path: state.currentEditorPath,
+          language: state.currentDiffLanguage,
+          isEditable: state.currentDiffEditable,
+          originalText: state.currentDiffOriginalText,
           modifiedText: currentValue,
         });
-        renderInlineDiff(editor, item.originalText || "", currentValue);
+        renderInlineDiff(editor, state.currentDiffOriginalText, currentValue, 150);
         postMessage("contentChanged", {
-          path: item.path,
+          path: state.currentEditorPath,
           content: encodeBase64(currentValue),
         });
       });
@@ -437,10 +577,10 @@
         scheduleDeletionGutterRender(editor);
       });
       state.currentDiffIdentity = buildDiffIdentity(item);
-      state.currentEditorPath = item.path;
       restorePendingViewState(editor, "diff", item.path);
       syncCurrentHunkIndexToViewport(editor);
-      state.editors.push(editor, originalModel);
+      state.editors.push(editor);
+      trimModelCache();
     } catch (error) {
       reportError(
         `[renderSingleDiff] ${error && error.message ? error.message : String(error)}`,
@@ -910,207 +1050,6 @@
     state.currentHunkIndex = -1;
   }
 
-  function splitLines(text) {
-    if (!text) {
-      return [];
-    }
-    const lines = text.split("\n");
-    if (lines.length > 0 && lines[lines.length - 1] === "") {
-      lines.pop();
-    }
-    return lines;
-  }
-
-  /**
-   * Find the changed character sub-range within `source` compared to `other`.
-   * Trims the common prefix and suffix, then returns 1-based column positions
-   * (UTF-16, matching Monaco column semantics) of the differing middle region.
-   * Returns null when source === other or when the changed region is empty.
-   *
-   * Algorithm mirrors Swift's changedUTF16Range(in:comparedTo:) in RepoViewModel.
-   */
-  function findChangedCharRange(source, other) {
-    if (source === other) {
-      return null;
-    }
-    const sourceChars = Array.from(source);
-    const otherChars = Array.from(other);
-
-    let prefixLen = 0;
-    while (
-      prefixLen < sourceChars.length &&
-      prefixLen < otherChars.length &&
-      sourceChars[prefixLen] === otherChars[prefixLen]
-    ) {
-      prefixLen += 1;
-    }
-
-    let sourceSuffix = sourceChars.length;
-    let otherSuffix = otherChars.length;
-    while (
-      sourceSuffix > prefixLen &&
-      otherSuffix > prefixLen &&
-      sourceChars[sourceSuffix - 1] === otherChars[otherSuffix - 1]
-    ) {
-      sourceSuffix -= 1;
-      otherSuffix -= 1;
-    }
-
-    // Convert Unicode code-point indices to UTF-16 string lengths (JS native).
-    const startColumn = sourceChars.slice(0, prefixLen).join("").length + 1;
-    const endColumn = sourceChars.slice(0, sourceSuffix).join("").length + 1;
-
-    if (endColumn <= startColumn) {
-      return null;
-    }
-    return { startColumn, endColumn };
-  }
-
-  function buildUnifiedDiffModel(originalText, modifiedText) {
-    if (!window.JsDiff || typeof window.JsDiff.diffLines !== "function") {
-      throw new Error("JsDiff runtime is not available");
-    }
-
-    const parts = window.JsDiff.diffLines(originalText, modifiedText, {
-      newlineIsToken: false,
-      ignoreWhitespace: false,
-    });
-    const rows = [];
-    const lineNumberMap = new Map();
-    const additionDecorations = [];
-    const deletionEntries = [];
-    // Maps new line number -> { startColumn, endColumn } for paired additions.
-    const additionInlineHighlights = new Map();
-    let oldLine = 1;
-    let newLine = 1;
-
-    for (let index = 0; index < parts.length; index += 1) {
-      const part = parts[index];
-      const lines = splitLines(part.value);
-      const lineCount = lines.length;
-
-      if (part.removed) {
-        const nextPart = parts[index + 1];
-        const removedLines = lines;
-        const addedLines = nextPart && nextPart.added ? splitLines(nextPart.value) : [];
-        const anchorModifiedLineNumber = newLine;
-
-        const deletedLines = removedLines.map((content, offset) => ({
-          kind: "deletion",
-          oldLineNum: oldLine + offset,
-          newLineNum: null,
-          content,
-          inlineHighlight: null,
-        }));
-        for (const row of deletedLines) {
-          rows.push(row);
-        }
-
-        // Pair each deleted line with the corresponding added line (same algorithm as
-        // Swift's buildInlineHighlights / changedUTF16Range in RepoViewModel).
-        const pairCount = Math.min(removedLines.length, addedLines.length);
-        for (let pairIndex = 0; pairIndex < pairCount; pairIndex += 1) {
-          const delHighlight = findChangedCharRange(removedLines[pairIndex], addedLines[pairIndex]);
-          const addHighlight = findChangedCharRange(addedLines[pairIndex], removedLines[pairIndex]);
-          if (delHighlight) {
-            deletedLines[pairIndex].inlineHighlight = delHighlight;
-          }
-          if (addHighlight) {
-            additionInlineHighlights.set(newLine + pairIndex, addHighlight);
-          }
-        }
-
-        const modifiedStartLineNumber = addedLines.length > 0 ? newLine : 0;
-        const modifiedEndLineNumber = addedLines.length > 0 ? newLine + addedLines.length - 1 : 0;
-        deletionEntries.push({
-          anchorLine: Math.max(anchorModifiedLineNumber, 1),
-          modifiedStartLineNumber,
-          modifiedEndLineNumber,
-          anchorModifiedLineNumber,
-          deletedLines,
-          hasAddition: addedLines.length > 0,
-        });
-
-        for (let offset = 0; offset < addedLines.length; offset += 1) {
-          const lineNumber = newLine + offset;
-          const row = {
-            kind: "addition",
-            oldLineNum: null,
-            newLineNum: lineNumber,
-            content: addedLines[offset],
-          };
-          rows.push(row);
-          lineNumberMap.set(lineNumber, {
-            oldLineNum: null,
-            newLineNum: lineNumber,
-          });
-        }
-        if (addedLines.length > 0) {
-          additionDecorations.push({
-            startLineNumber: newLine,
-            endLineNumber: newLine + addedLines.length - 1,
-          });
-        }
-
-        oldLine += removedLines.length;
-        if (nextPart && nextPart.added) {
-          newLine += addedLines.length;
-          index += 1;
-        }
-        continue;
-      }
-
-      if (part.added) {
-        for (let offset = 0; offset < lineCount; offset += 1) {
-          const lineNumber = newLine + offset;
-          const row = {
-            kind: "addition",
-            oldLineNum: null,
-            newLineNum: lineNumber,
-            content: lines[offset],
-          };
-          rows.push(row);
-          lineNumberMap.set(lineNumber, {
-            oldLineNum: null,
-            newLineNum: lineNumber,
-          });
-        }
-        additionDecorations.push({
-          startLineNumber: newLine,
-          endLineNumber: newLine + lineCount - 1,
-        });
-        newLine += lineCount;
-        continue;
-      }
-
-      for (let offset = 0; offset < lineCount; offset += 1) {
-        const oldLineNum = oldLine + offset;
-        const newLineNum = newLine + offset;
-        const row = {
-          kind: "context",
-          oldLineNum,
-          newLineNum,
-          content: lines[offset],
-        };
-        rows.push(row);
-        lineNumberMap.set(newLineNum, {
-          oldLineNum,
-          newLineNum,
-        });
-      }
-      oldLine += lineCount;
-      newLine += lineCount;
-    }
-
-    return {
-      rows,
-      lineNumberMap,
-      additionDecorations,
-      deletionEntries,
-      additionInlineHighlights,
-    };
-  }
-
   function buildHunkControlMaps(item) {
     const controls = Array.isArray(item.hunkControls) ? item.hunkControls : [];
     const normalizedControls = controls.map((control) => ({
@@ -1240,21 +1179,54 @@
     };
   }
 
-  function renderInlineDiff(editor, originalText, modifiedText) {
-    try {
-      const diffModel = buildUnifiedDiffModel(originalText, modifiedText);
-      console.log("[MonacoHost] diff updated", {
-        path: editor.getModel().uri.path,
-        rows: diffModel.rows.length,
-        deletions: diffModel.deletionEntries.length,
-        additions: diffModel.additionDecorations.length,
-        sample: diffModel.rows.slice(0, 6).map((row) => ({
-          kind: row.kind,
-          old: row.oldLineNum,
-          new: row.newLineNum,
-        })),
+  function renderInlineDiff(editor, originalText, modifiedText, delay = 0) {
+    const generation = ++state.diffGeneration;
+    if (window.gitnDiffScheduler) window.gitnDiffScheduler.cancel();
+    if (state.diffTimer !== null) clearTimeout(state.diffTimer);
+    clearInlineDiff(editor);
+    if (state.diffStatus) {
+      state.diffStatus.textContent = "Computing diff…";
+      state.diffStatus.hidden = false;
+    }
+    const isCurrent = () => state.diffGeneration === generation &&
+      state.diffEditor === editor &&
+      state.currentDiffOriginalText === originalText &&
+      editor.getValue() === modifiedText;
+
+    // Let Monaco paint the file text before launching potentially expensive diff work.
+    state.diffTimer = setTimeout(() => {
+      state.diffTimer = null;
+      if (!isCurrent()) return;
+      if (!window.gitnDiffScheduler) {
+        if (state.diffStatus) state.diffStatus.textContent = "Diff worker unavailable. Text remains available.";
+        return;
+      }
+      window.gitnDiffScheduler.run(originalText, modifiedText).then((diffModel) => {
+        if (!isCurrent() || !diffModel) return;
+        try {
+          applyInlineDiffModel(editor, diffModel);
+          if (state.diffStatus) state.diffStatus.hidden = true;
+        } catch (error) {
+          reportError("Failed to render diff", error && error.stack ? error.stack : String(error));
+          if (state.diffStatus) state.diffStatus.textContent = "Diff rendering failed. Text remains available.";
+        }
+      }).catch((error) => {
+        if (!isCurrent()) return;
+        if (state.diffStatus) state.diffStatus.textContent = error.message || String(error);
+        reportError("Failed to compute diff", error && error.stack ? error.stack : String(error));
       });
-      clearInlineDiff(editor);
+    }, delay);
+  }
+
+  function applyInlineDiffModel(editor, diffModel) {
+    try {
+      const lastRow = diffModel.rows[diffModel.rows.length - 1];
+      const maxLine = Math.max(editor.getModel().getLineCount(),
+        lastRow && lastRow.oldLineNum || 0, lastRow && lastRow.newLineNum || 0);
+      const minChars = diffLineNumberMinChars(maxLine);
+      if (editor.getOption(window.monaco.editor.EditorOption.lineNumbersMinChars) !== minChars) {
+        editor.updateOptions({ lineNumbersMinChars: minChars });
+      }
       const decorations = buildMonacoDecorations(diffModel);
       const { deletionZones, renderDeletions } = buildRenderDeletions(editor, diffModel);
 
@@ -1338,9 +1310,11 @@
   }
 
   function updateDiffMetadata(item) {
-    if (!state.diffEditor || !state.diffModel) {
+    if (!state.diffEditor) {
       return false;
     }
+
+    if (!state.diffModel) return true;
 
     state.diffModel = Object.assign({}, state.diffModel, buildHunkControlMaps({
       path: item.path,
@@ -1463,19 +1437,20 @@
           throw new Error("Monaco editor runtime is not ready");
         }
         const payload = JSON.parse(decodeBase64(encodedPayload));
+        state.currentSourceID = typeof payload.sourceID === "string" ? payload.sourceID : "";
         applyTheme(payload.isDark);
         if (payload.mode === "preview" && payload.preview) {
           reportDebug("loadPayloadPreview", {
             path: payload.preview.path,
             contentLength: (payload.preview.content || "").length,
             currentMode: state.currentMode,
-            currentPreviewIdentity: state.currentPreviewIdentity,
+            hasCurrentPreview: !!state.currentPreviewIdentity,
           });
           state.pendingHunkActions = null;
           state.pendingLineBlames = null;
           const nextIdentity = buildPreviewIdentity(payload.preview);
           if (state.currentMode === "preview" &&
-              state.currentPreviewIdentity === nextIdentity) {
+              sameIdentity(state.currentPreviewIdentity, nextIdentity)) {
             reportDebug("loadPayloadPreviewSkippedSameIdentity", {
               path: payload.preview.path,
             });
@@ -1496,7 +1471,7 @@
 
           const nextIdentity = buildDiffIdentity(item);
           if (state.currentMode === "diff" &&
-              state.currentDiffIdentity === nextIdentity &&
+              sameIdentity(state.currentDiffIdentity, nextIdentity) &&
               updateDiffMetadata(item)) {
             return;
           }
@@ -1522,4 +1497,5 @@
   window.addEventListener("error", (event) => {
     reportError(event.message || "Window error", event.error && event.error.stack ? event.error.stack : "");
   });
+  window.addEventListener("pagehide", disposeModelCache);
 })();

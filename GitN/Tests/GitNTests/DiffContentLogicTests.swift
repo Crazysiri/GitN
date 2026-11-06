@@ -105,6 +105,54 @@ final class DiffContentLogicTests: XCTestCase {
         XCTAssertEqual("doc.markdown".sourceLanguage, .markdown)
     }
 
+    func testLargePreviewSkipsPatchAndCanSwitchBackToDiff() async throws {
+        let repo = try TemporaryGitRepository()
+        let before = (0..<12000).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        let after = before + "new tail\n"
+        try repo.writeFile("large.txt", contents: before)
+        try repo.commitAll(message: "base")
+        try repo.writeFile("large.txt", contents: after)
+        try repo.commitAll(message: "large update")
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let commit = try XCTUnwrap(viewModel.commits.first { $0.message == "large update" })
+        await viewModel.selectCommit(commit)
+        let file = try XCTUnwrap(viewModel.diffFiles.first { $0.path == "large.txt" })
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .preview)
+        XCTAssertEqual(viewModel.fileInspectorContent, after)
+        XCTAssertTrue(viewModel.fileDiffContent.isEmpty)
+        XCTAssertNil(viewModel.parsedDiff)
+        XCTAssertNil(viewModel.fileInspectorDiffDocument)
+        XCTAssertTrue(viewModel.fileInspectorLineHighlights.isEmpty)
+        XCTAssertFalse(viewModel.isFileInspectorLoading)
+        await viewModel.setFileInspectorMode(.diff)
+        XCTAssertEqual(viewModel.fileInspectorMode, .diff)
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, before)
+        XCTAssertFalse(viewModel.fileDiffContent.isEmpty)
+        XCTAssertNotNil(viewModel.parsedDiff)
+        XCTAssertFalse(viewModel.isFileInspectorLoading)
+    }
+
+    func testWorkingTreePreviewLoadsUntrackedTextWithoutDiffArtifacts() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("seed.txt", contents: "seed\n")
+        try repo.commitAll(message: "seed")
+        let content = "# Untracked\n\n" + String(repeating: "content\n", count: 12000)
+        try repo.writeFile("draft.md", contents: content)
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        await viewModel.openWorkingTreeFilePreview(path: "draft.md")
+        XCTAssertEqual(viewModel.fileInspectorContent, content)
+        XCTAssertEqual(viewModel.fileInspectorMode, .preview)
+        XCTAssertTrue(viewModel.isFileInspectorEditable)
+        XCTAssertTrue(viewModel.fileDiffContent.isEmpty)
+        XCTAssertNil(viewModel.fileInspectorDiffDocument)
+        XCTAssertTrue(viewModel.fileInspectorHunkControls.isEmpty)
+        viewModel.closeFileInspector()
+        XCTAssertFalse(viewModel.isFileInspectorPresented)
+        XCTAssertFalse(viewModel.isFileInspectorLoading)
+    }
+
     // MARK: - Monaco language mapping
 
     func testMonacoLanguageForCommonSourceLanguages() {

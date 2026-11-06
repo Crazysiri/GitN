@@ -76,6 +76,11 @@ struct FileInspectorOverlayView: View {
     @Environment(\.colorScheme) private var colorScheme
     let viewModel: RepoViewModel
 
+    private var inspectorSourceIdentity: String {
+        let revision = viewModel.selectedCommit?.hash ?? viewModel.selectedStash?.oid ?? "working"
+        return "\(viewModel.repoPath)|\(viewModel.fileInspectorContext)|\(revision)"
+    }
+
     @State private var targetLine: Int?
     @State private var showCloseConfirmation = false
     @State private var pendingModeSwitch: RepoViewModel.FileInspectorMode?
@@ -378,7 +383,8 @@ struct FileInspectorOverlayView: View {
             },
             onSaveRequest: {
                 Task { _ = await viewModel.saveFileInspector() }
-            }
+            },
+            sourceIdentity: inspectorSourceIdentity
         )
     }
 
@@ -464,7 +470,8 @@ struct FileInspectorOverlayView: View {
                         onHunkAction: nil,
                         onSaveRequest: {
                             Task { _ = await viewModel.saveFileInspector() }
-                        }
+                        },
+                        sourceIdentity: inspectorSourceIdentity
                     )
                 }
             }

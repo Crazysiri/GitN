@@ -5,6 +5,209 @@ import XCTest
 final class RepoViewModelBehaviorTests: XCTestCase {
     private let onePixelPNGData = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN6kAAAAASUVORK5CYII=")!
 
+    func testFileEventsDuringOperationRefreshAfterOperationFinishes() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "before\n")
+        try repo.commitAll(message: "initial")
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        XCTAssertTrue(viewModel.fileStatuses.isEmpty)
+
+        viewModel.operationInProgress = true
+        try repo.writeFile("tracked.txt", contents: "after\n")
+        await viewModel.handleFileSystemChanges([.workingDirectory, .index])
+        XCTAssertTrue(viewModel.fileStatuses.isEmpty)
+
+        viewModel.operationInProgress = false
+        for _ in 0..<100 where viewModel.fileStatuses.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(viewModel.fileStatuses.map(\.path), ["tracked.txt"])
+    }
+
+    func testHeadEventDuringLoadTriggersDeferredFullRefresh() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "before\n")
+        try repo.commitAll(message: "initial")
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+
+        viewModel.isLoading = true
+        try repo.writeFile("tracked.txt", contents: "after\n")
+        await viewModel.handleFileSystemChanges([.head, .workingDirectory])
+        XCTAssertTrue(viewModel.fileStatuses.isEmpty)
+
+        viewModel.isLoading = false
+        for _ in 0..<100 where viewModel.fileStatuses.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(viewModel.fileStatuses.map(\.path), ["tracked.txt"])
+    }
+
+    func testStashInspectorUsesSnapshotForMarkdownInsteadOfCurrentWorktree() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("notes.md", contents: "stashed\n")
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "markdown")
+        try repo.writeFile("notes.md", contents: "current worktree\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.selectStash(stash)
+        let file = try XCTUnwrap(viewModel.diffFiles.first { $0.path == "notes.md" })
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "base\n")
+        XCTAssertEqual(viewModel.fileInspectorContent, "stashed\n")
+        XCTAssertFalse(viewModel.isFileInspectorEditable)
+    }
+
+    func testStashInspectorReadsUntrackedMarkdownFromThirdParent() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("new.md", contents: "# Stashed document\n")
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "new document", includeUntracked: true)
+        try repo.writeFile("new.md", contents: "# Different worktree document\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.selectStash(stash)
+        let file = try XCTUnwrap(viewModel.diffFiles.first { $0.path == "new.md" })
+        XCTAssertEqual(file.changeKind, .untracked)
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .preview)
+
+        XCTAssertEqual(viewModel.fileInspectorContent, "# Stashed document\n")
+        XCTAssertFalse(viewModel.isFileInspectorEditable)
+    }
+
+    func testStashInspectorTreatsDeletedMarkdownAsEmptyNewSide() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("removed.md", contents: "# Before deletion\n")
+        try repo.commitAll(message: "initial")
+        try repo.run(["rm", "removed.md"])
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "remove document")
+        try repo.writeFile("removed.md", contents: "# Current worktree\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.selectStash(stash)
+        let file = try XCTUnwrap(viewModel.diffFiles.first { $0.path == "removed.md" })
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertEqual(viewModel.fileInspectorDiffBaseText, "# Before deletion\n")
+        XCTAssertEqual(viewModel.fileInspectorContent, "")
+        XCTAssertTrue(viewModel.fileDiffContent.contains("-# Before deletion"))
+    }
+
+    func testStashInspectorKeepsDeletedImageOnOldSide() async throws {
+        let repo = try TemporaryGitRepository()
+        try onePixelPNGData.write(to: repo.url.appendingPathComponent("removed.png"))
+        try repo.commitAll(message: "initial")
+        try repo.run(["rm", "removed.png"])
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "remove image")
+        try Data("different worktree bytes".utf8).write(to: repo.url.appendingPathComponent("removed.png"))
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.selectStash(stash)
+        let file = try XCTUnwrap(viewModel.diffFiles.first { $0.path == "removed.png" })
+        XCTAssertEqual(file.changeKind, .deleted)
+        await viewModel.openFileInspector(file, context: .committed, preferredMode: .diff)
+
+        XCTAssertEqual(viewModel.fileInspectorContent, "")
+        XCTAssertEqual(viewModel.selectedDiffVisualContent?.oldData, onePixelPNGData)
+        XCTAssertNil(viewModel.selectedDiffVisualContent?.newData)
+        XCTAssertEqual(viewModel.fileInspectorVisualContent?.oldData, onePixelPNGData)
+    }
+
+    func testSidebarStashApplyKeepsSelectedEntryAndRefreshesFiles() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("notes.md", contents: "stashed\n")
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "notes")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.performStashApplyAt(stash: stash)
+
+        XCTAssertEqual(try repo.readFile("notes.md"), "stashed\n")
+        XCTAssertEqual(viewModel.stashes.map(\.oid), [oid])
+        XCTAssertEqual(viewModel.fileStatuses.map(\.path), ["notes.md"])
+        XCTAssertNil(viewModel.operationError)
+        XCTAssertFalse(viewModel.operationInProgress)
+    }
+
+    func testSidebarStashPopDropsSelectedEntryOnlyAfterApply() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("notes.md", contents: "stashed\n")
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "notes")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.performStashPopAt(stash: stash)
+
+        XCTAssertEqual(try repo.readFile("notes.md"), "stashed\n")
+        XCTAssertTrue(viewModel.stashes.isEmpty)
+        XCTAssertEqual(viewModel.fileStatuses.map(\.path), ["notes.md"])
+        XCTAssertNil(viewModel.operationError)
+        XCTAssertFalse(viewModel.operationInProgress)
+    }
+
+    func testSidebarStashPopFailureRetainsEntryAndReportsError() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("notes.md", contents: "stashed\n")
+        let service = GitService(repoPath: repo.path)
+        let oid = try await service.stashSave(message: "notes")
+        try repo.writeFile("notes.md", contents: "current edits\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let stash = try XCTUnwrap(viewModel.stashes.first { $0.oid == oid })
+        await viewModel.performStashPopAt(stash: stash)
+
+        XCTAssertEqual(try repo.readFile("notes.md"), "current edits\n")
+        XCTAssertEqual(viewModel.stashes.map(\.oid), [oid])
+        XCTAssertTrue(viewModel.operationError?.contains("notes.md") == true)
+        XCTAssertFalse(viewModel.operationInProgress)
+    }
+
+    func testFailedBranchPullRestoresAutoStashOnlyAfterReturningToOriginalBranch() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        try repo.run(["branch", "topic"])
+        try repo.writeFile("notes.md", contents: "dirty work\n")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.loadAll()
+        let topic = try XCTUnwrap(viewModel.localBranches.first { $0.name == "topic" })
+        await viewModel.performPullBranch(topic)
+
+        XCTAssertEqual(try repo.run(["branch", "--show-current"]), "main")
+        XCTAssertEqual(try repo.readFile("notes.md"), "dirty work\n")
+        XCTAssertEqual(try repo.run(["stash", "list"]), "")
+        XCTAssertTrue(viewModel.operationError?.contains("Pull topic failed") == true)
+    }
+
     func testReflogEntriesMergeVisibleAndRecoveredEntriesWithoutDuplicates() {
         let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
         let hash = String(repeating: "a", count: 40)
@@ -287,10 +490,38 @@ final class RepoViewModelBehaviorTests: XCTestCase {
 
         await viewModel.saveConflictResolution()
 
-        XCTAssertEqual(viewModel.toastMessage?.title, "No Hunks Selected")
+        XCTAssertEqual(viewModel.toastMessage?.title, "Unresolved Conflicts")
         XCTAssertEqual(viewModel.toastMessage?.style, .warning)
         XCTAssertTrue(viewModel.showConflictMergeView)
         XCTAssertEqual(viewModel.conflictOutputText, document.outputText)
+    }
+
+    func testSaveConflictResolutionRefusesPartiallyResolvedFile() async {
+        let viewModel = RepoViewModel(path: "/tmp/\(UUID().uuidString)", name: "repo")
+        let sides = GitService.buildConflictSides(
+            mergedText: [
+                "alpha", "<<<<<<< Current", "current-1", "||||||| Base", "base-1",
+                "=======", "incoming-1", ">>>>>>> Incoming", "middle",
+                "<<<<<<< Current", "current-2", "||||||| Base", "base-2",
+                "=======", "incoming-2", ">>>>>>> Incoming", "omega",
+            ].joined(separator: "\n"),
+            baseLines: ["alpha", "base-1", "middle", "base-2", "omega"],
+            oursLines: ["alpha", "current-1", "middle", "current-2", "omega"],
+            theirsLines: ["alpha", "incoming-1", "middle", "incoming-2", "omega"],
+            oursLabel: "Current", theirsLabel: "Incoming"
+        )
+        var document = ConflictEditorDocument(sides: sides)
+        document.toggleCurrent(blockID: 0)
+        viewModel.conflictMergeFile = ConflictFile(path: "file.txt", conflictCount: 2)
+        viewModel.conflictEditorDocument = document
+        viewModel.conflictOutputText = document.outputText
+        viewModel.showConflictMergeView = true
+
+        await viewModel.saveConflictResolution()
+
+        XCTAssertEqual(viewModel.toastMessage?.title, "Unresolved Conflicts")
+        XCTAssertEqual(viewModel.conflictEditorDocument?.unresolvedBlockIDs, [1])
+        XCTAssertTrue(viewModel.showConflictMergeView)
     }
 
     func testSaveConflictResolutionAllowsManualOutputChangesWithoutSelectedHunks() async throws {
@@ -305,30 +536,14 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         try repo.commitAll(message: "theirs")
         XCTAssertThrowsError(try repo.run(["merge", "topic"]))
 
-        let mergedText = try repo.readFile("file.txt")
-        let sides = GitService.buildConflictSides(
-            mergedText: mergedText,
-            baseLines: ["alpha", "base-1", "omega"],
-            oursLines: ["alpha", "current-1", "omega"],
-            theirsLines: ["alpha", "incoming-1", "omega"],
-            oursLabel: "Current",
-            theirsLabel: "Incoming"
-        )
-
         let viewModel = RepoViewModel(path: repo.path, name: "repo")
-        viewModel.conflictMergeFile = ConflictFile(path: "file.txt", conflictCount: 1)
-
-        var document = ConflictEditorDocument(sides: sides)
-        document.updateOutputText([
+        await viewModel.openConflictMerge(ConflictFile(path: "file.txt", conflictCount: 1))
+        XCTAssertNotNil(viewModel.conflictEditorDocument)
+        viewModel.updateConflictOutputText([
             "alpha",
             "manual-resolution",
             "omega",
         ].joined(separator: "\n"))
-
-        viewModel.conflictEditorDocument = document
-        viewModel.conflictOutputText = document.outputText
-        viewModel.conflictOutputLines = document.outputLines
-        viewModel.showConflictMergeView = true
 
         await viewModel.saveConflictResolution()
 
@@ -463,6 +678,34 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertEqual(viewModel.fileHistoryCurrentText, "one\n")
         XCTAssertTrue(viewModel.fileHistoryParsedDiff?.hunks.isEmpty ?? false)
         XCTAssertEqual(viewModel.fileHistoryDiff, "__synthetic__")
+    }
+
+    func testFileHistorySelectionReplacesPreviousRevisionAndCloseClearsState() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "# First\n")
+        let firstHash = try repo.commitAll(message: "first")
+        try repo.writeFile("notes.md", contents: "# Second\n")
+        let secondHash = try repo.commitAll(message: "second")
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.openFileHistory(path: "notes.md", context: .unstaged)
+        let first = try XCTUnwrap(viewModel.fileHistoryCommits.first { $0.hash == firstHash })
+        let second = try XCTUnwrap(viewModel.fileHistoryCommits.first { $0.hash == secondHash })
+
+        await viewModel.selectFileHistoryCommit(first)
+        XCTAssertEqual(viewModel.fileHistoryCurrentText, "# First\n")
+
+        await viewModel.selectFileHistoryCommit(second)
+        XCTAssertEqual(viewModel.fileHistoryBaseText, "# First\n")
+        XCTAssertEqual(viewModel.fileHistoryCurrentText, "# Second\n")
+        XCTAssertNotNil(viewModel.fileHistoryParsedDiff)
+
+        viewModel.closeFileHistory()
+        XCTAssertNil(viewModel.fileHistorySelectedCommit)
+        XCTAssertNil(viewModel.fileHistoryParsedDiff)
+        XCTAssertTrue(viewModel.fileHistoryCurrentText.isEmpty)
+        await viewModel.selectFileHistoryCommit(first)
+        XCTAssertNil(viewModel.fileHistorySelectedCommit)
     }
 
     func testRepositoryFileHistoryPathPreservesRepoRootPathAndPrefixesRelativePath() {

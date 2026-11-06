@@ -119,7 +119,6 @@ private struct HoverTooltipAnchorView: NSViewRepresentable {
 
 private final class HoverTooltipPanel: NSPanel {
     private let hostingView = NSHostingView(rootView: HoverTooltipBubble(text: "", style: .standard))
-    private var pendingShow: DispatchWorkItem?
 
     init() {
         super.init(
@@ -140,27 +139,13 @@ private final class HoverTooltipPanel: NSPanel {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func scheduleShow(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
-        pendingShow?.cancel()
-        let item = DispatchWorkItem { [weak self, weak anchorView] in
-            guard let self, let anchorView, anchorView.window != nil else { return }
-            self.pendingShow = nil
-            self.present(text: text, style: style, placement: placement, from: anchorView)
-        }
-        pendingShow = item
-        let delay: TimeInterval = isVisible ? 0.05 : 0.1
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
-    }
-
     func cancelAndHide() {
-        pendingShow?.cancel()
-        pendingShow = nil
         if isVisible {
             orderOut(nil)
         }
     }
 
-    private func present(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
+    func present(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
         guard let window = anchorView.window else { return }
 
         hostingView.rootView = HoverTooltipBubble(text: text, style: style)
@@ -194,16 +179,38 @@ private final class HoverTooltipPanel: NSPanel {
     }
 }
 
-private final class HoverTooltipPanelController: ObservableObject {
-    let panel: HoverTooltipPanel
+final class HoverTooltipPanelController: ObservableObject {
+    private var panel: HoverTooltipPanel?
+    private var pendingShow: DispatchWorkItem?
 
-    init() {
-        panel = HoverTooltipPanel()
+    var hasCreatedPanel: Bool { panel != nil }
+
+    func scheduleShow(text: String, style: HoverTooltipTextStyle, placement: HoverTooltipPlacement, from anchorView: NSView) {
+        pendingShow?.cancel()
+        let item = DispatchWorkItem { [weak self, weak anchorView] in
+            guard let self, let anchorView, anchorView.window != nil else { return }
+            self.pendingShow = nil
+            let panel = self.panel ?? HoverTooltipPanel()
+            self.panel = panel
+            panel.present(text: text, style: style, placement: placement, from: anchorView)
+        }
+        pendingShow = item
+        let delay: TimeInterval = panel?.isVisible == true ? 0.05 : 0.1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    func cancelAndHide() {
+        pendingShow?.cancel()
+        pendingShow = nil
+        panel?.cancelAndHide()
     }
 
     deinit {
-        DispatchQueue.main.async { [panel] in
-            panel.orderOut(nil)
+        pendingShow?.cancel()
+        if let panel {
+            DispatchQueue.main.async {
+                panel.orderOut(nil)
+            }
         }
     }
 }
@@ -239,17 +246,16 @@ private struct HoverTooltipModifier: ViewModifier {
                 syncTooltip()
             }
             .onDisappear {
-                panelController.panel.cancelAndHide()
+                panelController.cancelAndHide()
             }
     }
 
     private func syncTooltip() {
-        let panel = panelController.panel
         guard hoverTooltipHostActive, isEnabled, isHovering, let anchorView else {
-            panel.cancelAndHide()
+            panelController.cancelAndHide()
             return
         }
-        panel.scheduleShow(text: text, style: style, placement: placement, from: anchorView)
+        panelController.scheduleShow(text: text, style: style, placement: placement, from: anchorView)
     }
 }
 

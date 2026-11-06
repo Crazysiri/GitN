@@ -372,8 +372,10 @@ struct GraphView: View {
             )) {
                 Text("Reflog")
                     .foregroundStyle(viewModel.showReflogOverlay ? ChromePalette.reflogAccent : .secondary)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .toggleStyle(.checkbox)
+            .fixedSize(horizontal: true, vertical: false)
             .controlSize(.small)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)

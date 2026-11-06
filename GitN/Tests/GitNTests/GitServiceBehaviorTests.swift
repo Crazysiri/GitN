@@ -2,6 +2,151 @@ import XCTest
 @testable import GitN
 
 final class GitServiceBehaviorTests: XCTestCase {
+    private func makeTextConflictRepository() throws -> TemporaryGitRepository {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("conflict.txt", contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.writeFile("conflict.txt", contents: "topic\n")
+        try repo.commitAll(message: "topic change")
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("conflict.txt", contents: "main\n")
+        try repo.commitAll(message: "main change")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+        return repo
+    }
+
+    func testConflictSaveRejectsExternalWorktreeEdit() async throws {
+        let repo = try makeTextConflictRepository()
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        try repo.writeFile("conflict.txt", contents: "external edit\n")
+
+        do {
+            try await service.saveConflictResolution(
+                path: "conflict.txt", content: "GitN edit\n", expectedSnapshot: session.snapshot
+            )
+            XCTFail("External edit should block conflict save")
+        } catch ConflictSaveError.sourceChanged {}
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "external edit\n")
+        XCTAssertFalse(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testConflictSaveRejectsExternalIndexResolution() async throws {
+        let repo = try makeTextConflictRepository()
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        try repo.run(["add", "--", "conflict.txt"])
+        let externalContent = try repo.readFile("conflict.txt")
+
+        do {
+            try await service.saveConflictResolution(
+                path: "conflict.txt", content: "GitN edit\n", expectedSnapshot: session.snapshot
+            )
+            XCTFail("External index change should block conflict save")
+        } catch ConflictSaveError.sourceChanged {}
+        XCTAssertEqual(try repo.readFile("conflict.txt"), externalContent)
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testConflictSaveStagesUnchangedSession() async throws {
+        let repo = try makeTextConflictRepository()
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+
+        try await service.saveConflictResolution(
+            path: "conflict.txt", content: "resolved\n", expectedSnapshot: session.snapshot
+        )
+
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "resolved\n")
+        XCTAssertEqual(try repo.run(["show", ":conflict.txt"]), "resolved")
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testConflictSaveCanRetryAfterIndexLockFailure() async throws {
+        let repo = try makeTextConflictRepository()
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        let lock = repo.url.appendingPathComponent(".git/index.lock")
+        try Data().write(to: lock)
+        defer { try? FileManager.default.removeItem(at: lock) }
+        var retrySnapshot: ConflictFileSnapshot?
+
+        do {
+            try await service.saveConflictResolution(
+                path: "conflict.txt", content: "resolved\n", expectedSnapshot: session.snapshot
+            )
+            XCTFail("Index lock should block staging")
+        } catch ConflictSaveError.stageFailed(_, let snapshot) {
+            retrySnapshot = snapshot
+        }
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "resolved\n")
+        XCTAssertFalse(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+        try FileManager.default.removeItem(at: lock)
+
+        try await service.saveConflictResolution(
+            path: "conflict.txt", content: "resolved\n",
+            expectedSnapshot: try XCTUnwrap(retrySnapshot)
+        )
+        XCTAssertEqual(try repo.run(["show", ":conflict.txt"]), "resolved")
+    }
+
+    func testMarkDeletedConflictResolvedRemovesIndexStages() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("deleted.txt", contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.run(["rm", "deleted.txt"])
+        try repo.commitAll(message: "delete")
+        try repo.run(["checkout", "main"])
+        try repo.writeFile("deleted.txt", contents: "modified\n")
+        try repo.commitAll(message: "modify")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+        try FileManager.default.removeItem(at: repo.url.appendingPathComponent("deleted.txt"))
+
+        let service = GitService(repoPath: repo.path)
+        try await service.markConflictResolved(path: "deleted.txt")
+
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "deleted.txt"]).isEmpty)
+        XCTAssertTrue(try repo.run(["ls-files", "--", "deleted.txt"]).isEmpty)
+    }
+
+    func testLinkedWorktreeReadsMergeAndRebaseMetadata() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("conflict.txt", contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.writeFile("conflict.txt", contents: "topic\n")
+        try repo.commitAll(message: "topic change")
+        try repo.run(["checkout", "main"])
+
+        let worktree = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GitN-conflict-worktree-\(UUID().uuidString)")
+        try repo.run(["worktree", "add", "-b", "linked", worktree.path, "main"])
+        defer { _ = try? repo.run(["worktree", "remove", "--force", worktree.path]) }
+        try "linked\n".write(
+            to: worktree.appendingPathComponent("conflict.txt"), atomically: true, encoding: .utf8
+        )
+        try repo.run(["-C", worktree.path, "add", "conflict.txt"])
+        try repo.run(["-C", worktree.path, "commit", "-m", "linked change"])
+
+        XCTAssertThrowsError(try repo.run(["-C", worktree.path, "merge", "topic"]))
+        let service = GitService(repoPath: worktree.path)
+        let merge = try await service.mergeConflictState()
+        XCTAssertEqual(merge?.sourceBranch, "topic")
+        XCTAssertTrue(merge?.conflictedFiles.contains(where: { $0.path == "conflict.txt" }) == true)
+        let mergeMessage = await service.mergeCommitMessage()
+        XCTAssertFalse(mergeMessage.isEmpty)
+
+        try repo.run(["-C", worktree.path, "merge", "--abort"])
+        XCTAssertThrowsError(try repo.run(["-C", worktree.path, "rebase", "topic"]))
+        let rebase = try await service.rebaseState()
+        XCTAssertNotNil(rebase)
+        XCTAssertEqual(rebase?.sourceBranch, "linked")
+        let rebaseMessage = await service.rebaseCommitMessage()
+        XCTAssertFalse(rebaseMessage.isEmpty)
+    }
+
     func testGitLFSSupportDetectsRootAndNestedGitattributes() throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile(".gitattributes", contents: "*.psd filter=lfs diff=lfs merge=lfs -text\n")
@@ -507,19 +652,137 @@ final class GitServiceBehaviorTests: XCTestCase {
         try repo.writeFile("scratch.txt", contents: "temp\n")
 
         let service = GitService(repoPath: repo.path)
-        try await service.stashSave(message: "work in progress", includeUntracked: true)
+        let savedOID = try await service.stashSave(message: "work in progress", includeUntracked: true)
         let savedStashes = try await service.stashes()
 
         XCTAssertEqual(try repo.readFile("tracked.txt"), "one\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: (repo.path as NSString).appendingPathComponent("scratch.txt")))
         XCTAssertTrue(savedStashes.contains(where: { $0.message.contains("work in progress") }))
+        XCTAssertEqual(savedStashes.first?.oid, savedOID)
 
-        try await service.stashApply(index: 0)
+        try await service.stashApply(oid: savedOID)
         let stashesAfterApply = try await service.stashes()
 
         XCTAssertEqual(try repo.readFile("tracked.txt"), "one\ntwo\n")
         XCTAssertEqual(try repo.readFile("scratch.txt"), "temp\n")
         XCTAssertEqual(stashesAfterApply.count, 1)
+    }
+
+    func testStashOIDSurvivesIndexShiftForReadApplyAndDrop() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        let service = GitService(repoPath: repo.path)
+
+        try repo.writeFile("tracked.txt", contents: "first\n")
+        let firstOID = try await service.stashSave(message: "first")
+        try repo.writeFile("tracked.txt", contents: "second\n")
+        let secondOID = try await service.stashSave(message: "second")
+
+        let stashes = try await service.stashes()
+        XCTAssertEqual(stashes.map(\.oid), [secondOID, firstOID])
+        XCTAssertEqual(stashes.last?.index, "stash@{1}")
+        let firstFiles = try await service.stashDiffFiles(firstOID)
+        XCTAssertEqual(firstFiles.map(\.path), ["tracked.txt"])
+        let firstDiff = try await service.stashFileDiff(firstOID, path: "tracked.txt")
+        XCTAssertTrue(firstDiff.contains("+first"))
+        XCTAssertFalse(firstDiff.contains("+second"))
+
+        try await service.stashApply(oid: firstOID)
+        XCTAssertEqual(try repo.readFile("tracked.txt"), "first\n")
+        try await service.stashDrop(oid: firstOID)
+        let afterDrop = try await service.stashes()
+        XCTAssertEqual(afterDrop.map(\.oid), [secondOID])
+
+        do {
+            try await service.stashDrop(oid: firstOID)
+            XCTFail("A missing OID must not drop the remaining stash")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("no longer exists"))
+        }
+        let afterRejectedDrop = try await service.stashes()
+        XCTAssertEqual(afterRejectedDrop.map(\.oid), [secondOID])
+    }
+
+    func testStashPopTargetsOIDAfterIndexShift() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("tracked.txt", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        let service = GitService(repoPath: repo.path)
+
+        try repo.writeFile("tracked.txt", contents: "first\n")
+        let firstOID = try await service.stashSave(message: "first")
+        try repo.writeFile("tracked.txt", contents: "second\n")
+        let secondOID = try await service.stashSave(message: "second")
+
+        try await service.stashPop(oid: firstOID)
+        XCTAssertEqual(try repo.readFile("tracked.txt"), "first\n")
+        let remaining = try await service.stashes()
+        XCTAssertEqual(remaining.map(\.oid), [secondOID])
+    }
+
+    func testStashApplyWithUnrelatedStagedChangesPreservesBothSides() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("saved.md", contents: "base saved\n")
+        try repo.writeFile("existing.md", contents: "base existing\n")
+        try repo.commitAll(message: "initial")
+
+        let service = GitService(repoPath: repo.path)
+        try repo.writeFile("saved.md", contents: "stashed saved\n")
+        try repo.run(["add", "saved.md"])
+        try repo.writeFile("untracked.md", contents: "stashed untracked\n")
+        let oid = try await service.stashSave(message: "saved", includeUntracked: true)
+
+        try repo.writeFile("existing.md", contents: "currently staged\n")
+        try repo.run(["add", "existing.md"])
+        try await service.stashApply(oid: oid)
+
+        XCTAssertEqual(try repo.readFile("saved.md"), "stashed saved\n")
+        XCTAssertEqual(try repo.readFile("untracked.md"), "stashed untracked\n")
+        XCTAssertEqual(try repo.run(["show", ":existing.md"]), "currently staged")
+        let remaining = try await service.stashes()
+        XCTAssertEqual(remaining.map(\.oid), [oid])
+    }
+
+    func testStashPopWithUnrelatedStagedChangesDropsOnlyAppliedOID() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("saved.md", contents: "base saved\n")
+        try repo.writeFile("existing.md", contents: "base existing\n")
+        try repo.commitAll(message: "initial")
+
+        let service = GitService(repoPath: repo.path)
+        try repo.writeFile("saved.md", contents: "stashed saved\n")
+        let oid = try await service.stashSave(message: "saved")
+        try repo.writeFile("existing.md", contents: "currently staged\n")
+        try repo.run(["add", "existing.md"])
+
+        try await service.stashPop(oid: oid)
+
+        XCTAssertEqual(try repo.readFile("saved.md"), "stashed saved\n")
+        XCTAssertEqual(try repo.run(["show", ":existing.md"]), "currently staged")
+        let remaining = try await service.stashes()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testStashPopConflictRetainsEntry() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("notes.md", contents: "base\n")
+        try repo.commitAll(message: "initial")
+        let service = GitService(repoPath: repo.path)
+
+        try repo.writeFile("notes.md", contents: "stashed\n")
+        let oid = try await service.stashSave(message: "saved")
+        try repo.writeFile("notes.md", contents: "current edits\n")
+
+        do {
+            try await service.stashPop(oid: oid)
+            XCTFail("Pop must reject overlapping working-tree edits")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("notes.md"))
+        }
+        XCTAssertEqual(try repo.readFile("notes.md"), "current edits\n")
+        let remaining = try await service.stashes()
+        XCTAssertEqual(remaining.map(\.oid), [oid])
     }
 
     func testStashPathDecodedContentReadsUntrackedFromStashTree() async throws {
@@ -555,6 +818,69 @@ final class GitServiceBehaviorTests: XCTestCase {
         let diff = try await service.stashFileDiff(ref, path: longPath)
         XCTAssertTrue(diff.contains("+++ b/\(longPath)"))
         XCTAssertTrue(diff.contains("+token"))
+    }
+
+    func testStashPathsAndUTF16MarkdownUseRawGitBytes() async throws {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("中文.md", contents: "旧内容\n")
+        try repo.writeFile("old.md", contents: "rename me\n")
+        try repo.writeFile("deleted.md", contents: "gone\n")
+        try repo.commitAll(message: "initial")
+        try repo.writeFile("中文.md", contents: "新内容\n")
+        try repo.run(["mv", "old.md", "新名.md"])
+        try repo.run(["rm", "deleted.md"])
+        try repo.writeFile("tab\tname.md", contents: "tab content\n")
+        try repo.writeFile("line\nbreak.md", contents: "newline content\n")
+        let utf16 = try XCTUnwrap("编码内容\n".data(using: .utf16))
+        try utf16.write(to: repo.url.appendingPathComponent("编码.md"))
+
+        let service = GitService(repoPath: repo.path)
+        try await service.stashSave(message: "unicode files", includeUntracked: true)
+        let stashes = try await service.stashes()
+        let ref = try XCTUnwrap(stashes.first?.index)
+        let files = try await service.stashDiffFiles(ref)
+        let byPath = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+
+        XCTAssertEqual(Set(byPath.keys), Set(["中文.md", "新名.md", "deleted.md", "tab\tname.md", "line\nbreak.md", "编码.md"]))
+        XCTAssertEqual(byPath["新名.md"]?.oldPath, "old.md")
+        XCTAssertEqual(byPath["新名.md"]?.changeKind, .renamed)
+        XCTAssertEqual(byPath["deleted.md"]?.changeKind, .deleted)
+        let diff = try await service.stashFileDiff(ref, path: "中文.md")
+        XCTAssertTrue(diff.contains("+新内容"))
+        let chinese = await service.stashPathDecodedContent(stashRef: ref, path: "中文.md")
+        XCTAssertEqual(chinese?.text, "新内容\n")
+        let tab = await service.stashPathDecodedContent(stashRef: ref, path: "tab\tname.md")
+        XCTAssertEqual(tab?.text, "tab content\n")
+        let newline = await service.stashPathDecodedContent(stashRef: ref, path: "line\nbreak.md")
+        XCTAssertEqual(newline?.text, "newline content\n")
+        let encoded = await service.stashPathDecodedContent(stashRef: ref, path: "编码.md")
+        XCTAssertEqual(encoded?.text, "编码内容\n")
+        XCTAssertEqual(encoded?.encodingName, "UTF-16")
+        let encodedDiff = try await service.stashFileDiff(ref, path: "编码.md")
+        XCTAssertTrue(encodedDiff.contains("+编码内容"))
+
+        let oid = try XCTUnwrap(stashes.first?.oid)
+        let modified = try await service.stashFileVersions(stashOID: oid, path: "中文.md", changeKind: .modified)
+        XCTAssertEqual(modified.oldContent?.text, "旧内容\n")
+        XCTAssertEqual(modified.newContent?.text, "新内容\n")
+
+        let deleted = try await service.stashFileVersions(stashOID: oid, path: "deleted.md", changeKind: .deleted)
+        XCTAssertEqual(deleted.oldContent?.text, "gone\n")
+        XCTAssertNil(deleted.newData)
+        XCTAssertNil(deleted.newContent)
+
+        let renamed = try await service.stashFileVersions(
+            stashOID: oid, path: "新名.md", oldPath: "old.md", changeKind: .renamed
+        )
+        XCTAssertEqual(renamed.oldContent?.text, "rename me\n")
+        XCTAssertEqual(renamed.newContent?.text, "rename me\n")
+
+        let untracked = try await service.stashFileVersions(
+            stashOID: oid, path: "编码.md", changeKind: .untracked
+        )
+        XCTAssertNil(untracked.oldData)
+        XCTAssertEqual(untracked.newContent?.text, "编码内容\n")
+        XCTAssertEqual(untracked.newContent?.encodingName, "UTF-16")
     }
 
     func testCompareFileListAndDiffAgainstWorkingTree() async throws {
@@ -912,8 +1238,19 @@ final class GitServiceBehaviorTests: XCTestCase {
     }
 }
 
-private func requireGitLFS(file: StaticString = #filePath, line: UInt = #line) throws {
-    guard (try? gitRun(["lfs", "version"], at: FileManager.default.temporaryDirectory)) != nil else {
+private func requireGitLFS() throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = ["lfs", "version"]
+    process.currentDirectoryURL = FileManager.default.temporaryDirectory
+    process.environment = GitCLI.enrichedEnvironment()
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    guard (try? process.run()) != nil else {
+        throw XCTSkip("git-lfs is not installed in this environment")
+    }
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
         throw XCTSkip("git-lfs is not installed in this environment")
     }
 }

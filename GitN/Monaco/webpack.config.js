@@ -16,6 +16,10 @@ module.exports = (env, argv) => ({
   module: {
     rules: [
       {
+        test: /diff-worker\.js$/,
+        type: 'asset/source',
+      },
+      {
         test: /\.css$/,
         use: ['style-loader', 'css-loader'],
       },

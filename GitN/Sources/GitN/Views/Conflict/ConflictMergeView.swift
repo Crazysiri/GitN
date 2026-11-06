@@ -80,6 +80,11 @@ struct ConflictMergeView: View {
                     Text("(\(totalConflicts) conflict\(totalConflicts == 1 ? "" : "s"))")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
+                    if let remaining = document?.unresolvedBlockIDs.count, remaining > 0 {
+                        Text("\(remaining) unresolved")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
 
@@ -91,7 +96,7 @@ struct ConflictMergeView: View {
                 HStack(spacing: 3) {
                     Image(systemName: isFallbackMode ? "checkmark.circle" : "square.and.arrow.down")
                         .font(.system(size: 12))
-                    Text(isFallbackMode ? "Mark Resolved" : "Save")
+                    Text("Mark Resolved")
                         .font(.system(size: 13, weight: .medium))
                 }
             }
@@ -208,6 +213,12 @@ struct ConflictMergeView: View {
                 if totalConflicts > 0 {
                     conflictNavigator
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Keep Base") {
+                        if let id = currentBlock?.id { viewModel.keepConflictAncestor(id) }
+                    }
+                    .disabled(currentBlock?.mode != .attached)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
 
                 Spacer()
@@ -705,6 +716,54 @@ struct ConflictOutputEditorView: NSViewRepresentable {
         return result
     }
 
+    /// NSTextView has already changed the characters. Rebuild attributes only for
+    /// the logical lines touched by the edit, leaving the rest of a large file alone.
+    static func highlightEditedLines(
+        in storage: NSTextStorage,
+        editedRange: NSRange,
+        filePath: String,
+        font: NSFont
+    ) {
+        let source = storage.string as NSString
+        let start = min(max(editedRange.location, 0), source.length)
+        let end = min(max(NSMaxRange(editedRange), start), source.length)
+        let lineRange = source.lineRange(for: NSRange(location: start, length: end - start))
+        guard lineRange.length > 0 else { return }
+
+        let language = CodeSyntaxHighlighter.language(for: filePath)
+        let base = baseAttributes(font: font)
+        let paragraph = paragraphAttributes(font: font)
+        storage.beginEditing()
+        defer { storage.endEditing() }
+        var position = lineRange.location
+        while position < NSMaxRange(lineRange) {
+            let fullLine = source.lineRange(for: NSRange(location: position, length: 0))
+            let next = NSMaxRange(fullLine)
+            guard next > position else { break }
+            var contentEnd = next
+            while contentEnd > position {
+                let ending = source.character(at: contentEnd - 1)
+                guard ending == 10 || ending == 13 else { break }
+                contentEnd -= 1
+            }
+            storage.setAttributes(base, range: fullLine)
+            if contentEnd > position {
+                let contentRange = NSRange(location: position, length: contentEnd - position)
+                let highlighted = CodeSyntaxHighlighter.highlight(
+                    source.substring(with: contentRange), language: language, font: font
+                )
+                highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { attributes, range, _ in
+                    storage.addAttributes(
+                        attributes,
+                        range: NSRange(location: position + range.location, length: range.length)
+                    )
+                }
+                storage.addAttributes(paragraph, range: contentRange)
+            }
+            position = next
+        }
+    }
+
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ConflictOutputEditorView
         weak var scrollView: NSScrollView?
@@ -717,9 +776,27 @@ struct ConflictOutputEditorView: NSViewRepresentable {
         var pendingViewportRebase = false
         var suppressSharedOutputSync = false
         var lastProgrammaticOrigin: CGPoint?
+        var pendingEditedRange: NSRange?
+        var needsFullHighlight = false
 
         init(_ parent: ConflictOutputEditorView) {
             self.parent = parent
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?
+        ) -> Bool {
+            guard let replacementString, pendingEditedRange == nil else {
+                needsFullHighlight = true
+                return true
+            }
+            pendingEditedRange = NSRange(
+                location: affectedCharRange.location,
+                length: replacementString.utf16.count
+            )
+            return true
         }
 
         func textDidChange(_ notification: Notification) {
@@ -736,15 +813,23 @@ struct ConflictOutputEditorView: NSViewRepresentable {
             }
             parent.text = textView.string
             if let storage = textView.textStorage {
-                storage.setAttributedString(
-                    ConflictOutputEditorView.highlightedText(
-                        textView.string,
-                        filePath: parent.filePath,
-                        font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+                let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+                if let pendingEditedRange, !needsFullHighlight {
+                    ConflictOutputEditorView.highlightEditedLines(
+                        in: storage, editedRange: pendingEditedRange,
+                        filePath: parent.filePath, font: font
                     )
-                )
-                textView.setSelectedRange(selection)
+                } else {
+                    storage.setAttributedString(
+                        ConflictOutputEditorView.highlightedText(
+                            textView.string, filePath: parent.filePath, font: font
+                        )
+                    )
+                    textView.setSelectedRange(selection)
+                }
             }
+            pendingEditedRange = nil
+            needsFullHighlight = false
             textView.typingAttributes = ConflictOutputEditorView.baseAttributes(
                 font: textView.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
             )
@@ -1204,26 +1289,28 @@ enum CodeSyntaxHighlighter {
             }
         }
 
-        // Find inline comment start (not inside a string)
+        // NSAttributedString ranges use UTF-16 offsets. Avoid repeated
+        // String.dropFirst(characterOffset), which is quadratic on long lines.
         var commentStart: Int? = nil
-        do {
-            var inStr: Character? = nil
-            var escaped = false
-            for (idx, ch) in text.enumerated() {
-                if escaped { escaped = false; continue }
-                if ch == "\\" { escaped = true; continue }
-                if let q = inStr {
-                    if ch == q { inStr = nil }
-                    continue
-                }
-                if ch == "\"" || ch == "'" || ch == "`" { inStr = ch; continue }
-                for prefix in lineCommentPrefixes {
-                    if text.dropFirst(idx).hasPrefix(prefix) {
-                        commentStart = idx
-                        break
-                    }
-                }
-                if commentStart != nil { break }
+        let source = text as NSString
+        let prefixUnits = lineCommentPrefixes.map { Array($0.utf16) }
+        var quote: unichar?
+        var escaped = false
+        for offset in 0..<source.length {
+            let unit = source.character(at: offset)
+            if escaped { escaped = false; continue }
+            if unit == 92 { escaped = true; continue }
+            if let currentQuote = quote {
+                if unit == currentQuote { quote = nil }
+                continue
+            }
+            if unit == 34 || unit == 39 || unit == 96 { quote = unit; continue }
+            if prefixUnits.contains(where: { prefix in
+                offset + prefix.count <= source.length &&
+                    prefix.indices.allSatisfy { source.character(at: offset + $0) == prefix[$0] }
+            }) {
+                commentStart = offset
+                break
             }
         }
 

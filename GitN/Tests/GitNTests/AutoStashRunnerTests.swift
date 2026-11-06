@@ -19,6 +19,7 @@ final class AutoStashRunnerTests: XCTestCase {
         let runner: AutoStashRunner
         let pushCount: () -> Int
         let popCount: () -> Int
+        let poppedOID: () -> String?
     }
 
     private func build(
@@ -27,7 +28,7 @@ final class AutoStashRunnerTests: XCTestCase {
         popShouldFail: Bool = false,
         hasConflicts: Bool = false
     ) -> RunnerWithCounters {
-        final class Counter { var push = 0; var pop = 0 }
+        final class Counter { var push = 0; var pop = 0; var poppedOID: String? }
         let c = Counter()
 
         let runner = AutoStashRunner(
@@ -35,9 +36,11 @@ final class AutoStashRunnerTests: XCTestCase {
             stashPush: {
                 c.push += 1
                 if pushShouldFail { throw GitError.operationFailed("mock stash push failure") }
+                return "created-stash-oid"
             },
-            stashPop: {
+            stashPop: { oid in
                 c.pop += 1
+                c.poppedOID = oid
                 if popShouldFail { throw GitError.operationFailed("mock stash pop failure") }
             },
             hasUnmergedPaths: { hasConflicts }
@@ -45,7 +48,8 @@ final class AutoStashRunnerTests: XCTestCase {
         return RunnerWithCounters(
             runner: runner,
             pushCount: { c.push },
-            popCount: { c.pop }
+            popCount: { c.pop },
+            poppedOID: { c.poppedOID }
         )
     }
 
@@ -87,6 +91,7 @@ final class AutoStashRunnerTests: XCTestCase {
         XCTAssertFalse(outcome.popConflict, "clean pop: popConflict must be false")
         XCTAssertEqual(rwc.pushCount(), 1, "dirty tree: stashPush must be called exactly once")
         XCTAssertEqual(rwc.popCount(),  1, "dirty tree: stashPop must be called exactly once")
+        XCTAssertEqual(rwc.poppedOID(), "created-stash-oid")
     }
 
     // MARK: - Dirty tree, pop conflict (R5.4)
@@ -201,8 +206,9 @@ final class AutoStashRunnerTests: XCTestCase {
                                         if pushFails {
                                             throw GitError.operationFailed("push fail")
                                         }
+                                        return "created-stash-oid"
                                     },
-                                    stashPop: {
+                                    stashPop: { _ in
                                         c.pop += 1
                                         if popFails {
                                             throw GitError.operationFailed("pop fail")

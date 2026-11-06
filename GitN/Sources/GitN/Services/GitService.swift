@@ -1,10 +1,11 @@
 import Foundation
 import Clibgit2
+import CryptoKit
 
 // MARK: - Callback context types (for C function pointer callbacks)
 
 private final class StashCallbackData {
-    var items: [(index: String, message: String)] = []
+    var items: [(index: String, oid: String, message: String)] = []
 }
 
 private final class SubmoduleCallbackData {
@@ -132,6 +133,20 @@ enum GitError: LocalizedError {
         switch self {
         case .repoNotOpen: return "Repository not open"
         case .operationFailed(let msg): return msg
+        }
+    }
+}
+
+enum ConflictSaveError: LocalizedError {
+    case sourceChanged
+    case stageFailed(String, retrySnapshot: ConflictFileSnapshot?)
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceChanged:
+            return "The conflict file or index changed outside GitN. Reopen it before saving."
+        case .stageFailed(let detail, _):
+            return "The file was saved, but Git could not stage it: \(detail)"
         }
     }
 }
@@ -446,6 +461,13 @@ actor GitService {
         let isBinary: Bool
     }
 
+    struct StashFileVersions: Sendable {
+        let oldData: Data?
+        let newData: Data?
+        let oldContent: DecodedFileContent?
+        let newContent: DecodedFileContent?
+    }
+
     enum DeleteRemoteBranchResult: Equatable {
         case deleted
         case alreadyMissing
@@ -563,8 +585,8 @@ actor GitService {
         if lowercased.hasPrefix("checkout:") { return .checkout }
         if lowercased.hasPrefix("reset:") { return .reset }
         if lowercased.contains("rebase") { return .rebase }
-        if lowercased.hasPrefix("commit (amend):") { return .amend }
-        if lowercased.hasPrefix("commit:") || lowercased.hasPrefix("commit (initial):") { return .commit }
+        if lowercased.hasPrefix("commitUnqueued (amend):") { return .amend }
+        if lowercased.hasPrefix("commit:") || lowercased.hasPrefix("commitUnqueued (initial):") { return .commit }
         if lowercased.contains("merge") { return .merge }
         if lowercased.hasPrefix("branch:") { return .branchMove }
         if lowercased.hasPrefix("fetch") { return .fetch }
@@ -846,18 +868,26 @@ actor GitService {
         let ctx = Unmanaged.passRetained(data).toOpaque()
         defer { Unmanaged<StashCallbackData>.fromOpaque(ctx).release() }
 
-        git_stash_foreach(repo, { index, message, _, payload in
+        let rc = git_stash_foreach(repo, { index, message, oid, payload in
             guard let payload else { return 0 }
             let d = Unmanaged<StashCallbackData>.fromOpaque(payload).takeUnretainedValue()
+            guard let oid else { return -1 }
+            var hash = [CChar](repeating: 0, count: 41)
+            git_oid_tostr(&hash, 41, oid)
             d.items.append((
                 index: "stash@{\(index)}",
+                oid: String(cString: hash),
                 message: message.map(String.init(cString:)) ?? ""
             ))
             return 0
         }, ctx)
 
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to list stashes", code: rc))
+        }
+
         return data.items.map {
-            StashInfo(index: $0.index, message: $0.message, date: "")
+            StashInfo(index: $0.index, oid: $0.oid, message: $0.message, date: "")
         }
     }
 
@@ -1667,7 +1697,7 @@ actor GitService {
         return fields[2]
     }
 
-    func saveWorkingTreeFile(path: String, content: String) throws {
+    func saveWorkingTreeFileUnqueued(path: String, content: String) throws {
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         let directory = (fullPath as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: nil)
@@ -1752,7 +1782,7 @@ actor GitService {
         return ""
     }
 
-    /// Get the full diff for a specific commit (all files).
+    /// Get the full diff for a specific commitUnqueued (all files).
     func commitDiff(hash: String) async throws -> String {
         try await runGitOutput(["diff", "\(hash)^", hash])
     }
@@ -1819,7 +1849,7 @@ actor GitService {
 
     // MARK: - Staging
 
-    func stageFile(_ path: String) throws {
+    func stageFileUnqueued(_ path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
         var index: OpaquePointer?
         let idxRc = git_repository_index(&index, repo)
@@ -1842,7 +1872,7 @@ actor GitService {
         guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
     }
 
-    func stageFiles(_ paths: [String]) throws {
+    func stageFilesUnqueued(_ paths: [String]) throws {
         guard let repo else { throw GitError.repoNotOpen }
         guard !paths.isEmpty else { return }
 
@@ -1870,7 +1900,7 @@ actor GitService {
         guard wrc == 0 else { throw GitError.operationFailed(libgit2RawLastError(code: wrc)) }
     }
 
-    func unstageFile(_ path: String) throws {
+    func unstageFileUnqueued(_ path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var headRef: OpaquePointer?
@@ -1904,7 +1934,7 @@ actor GitService {
         }
     }
 
-    func unstageFiles(_ paths: [String]) throws {
+    func unstageFilesUnqueued(_ paths: [String]) throws {
         guard let repo else { throw GitError.repoNotOpen }
         let uniquePaths = Array(Set(paths))
         guard !uniquePaths.isEmpty else { return }
@@ -1948,7 +1978,7 @@ actor GitService {
 
     // MARK: - Fetch / Pull / Push (shell-based, following Xit's approach for reliability)
 
-    func fetch(remoteName: String? = nil) async throws {
+    func fetchUnqueued(remoteName: String? = nil) async throws {
         var args = ["fetch"]
         if let remoteName {
             args.append(remoteName)
@@ -1959,9 +1989,9 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func fetchWithPrune(remoteName: String? = nil) async throws {
-        // Fetch with prune to remove remote branches and tags that no longer exist on remote
-        var args = ["fetch", "--prune", "--prune-tags"]
+    func fetchWithPruneUnqueued(remoteName: String? = nil) async throws {
+        // Prune remote-tracking branches, fetch tags, and preserve local-only tags.
+        var args = ["fetch", "--prune", "--tags"]
         if let remoteName {
             args.append(remoteName)
         } else {
@@ -1973,12 +2003,12 @@ actor GitService {
 
     /// Fast-forward update a local branch to its remote tracking branch without checking it out.
     /// Uses `git fetch <remote> <branch>:<branch>` which only succeeds if it's a fast-forward.
-    func fetchBranchFastForward(remoteName: String, branchName: String) async throws {
+    func fetchBranchFastForwardUnqueued(remoteName: String, branchName: String) async throws {
         try await runGit(["fetch", remoteName, "\(branchName):\(branchName)"])
         invalidateRefMapCache()
     }
 
-    func pull(remoteName: String? = nil, branchName: String? = nil) async throws {
+    func pullUnqueued(remoteName: String? = nil, branchName: String? = nil) async throws {
         var args = ["pull"]
         if let remoteName {
             args.append(remoteName)
@@ -1989,7 +2019,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pullFF(remoteName: String? = nil, branchName: String? = nil) async throws {
+    func pullFFUnqueued(remoteName: String? = nil, branchName: String? = nil) async throws {
         var args = ["pull", "--ff-only"]
         if let remoteName {
             args.append(remoteName)
@@ -2000,7 +2030,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pullRebase(remoteName: String? = nil, branchName: String? = nil) async throws {
+    func pullRebaseUnqueued(remoteName: String? = nil, branchName: String? = nil) async throws {
         var args = ["pull", "--rebase"]
         if let remoteName {
             args.append(remoteName)
@@ -2014,14 +2044,14 @@ actor GitService {
     /// Force pull: reset local branch to remote tracking branch.
     /// Useful when remote has been force-pushed (e.g. after rebase).
     /// Equivalent to: git fetch && git reset --hard @{u}
-    func pullForce() async throws {
+    func pullForceUnqueued() async throws {
         try await runGit(["fetch", "--all"])
         try await runGit(["reset", "--hard", "@{u}"])
         try await lfsSupport.pull()
         invalidateRefMapCache()
     }
 
-    func push(remoteName: String? = nil, branchName: String? = nil, setUpstream: Bool = false) async throws {
+    func pushUnqueued(remoteName: String? = nil, branchName: String? = nil, setUpstream: Bool = false) async throws {
         var args = ["push"]
         if setUpstream { args.append("-u") }
         if let remoteName {
@@ -2042,7 +2072,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pushForce(remoteName: String? = nil, branchName: String? = nil) async throws {
+    func pushForceUnqueued(remoteName: String? = nil, branchName: String? = nil) async throws {
         var args = ["push", "--force-with-lease"]
         if let remoteName {
             args.append(remoteName)
@@ -2089,7 +2119,7 @@ actor GitService {
         }
     }
 
-    func fetchStreaming(
+    func fetchStreamingUnqueued(
         remoteName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
     ) async throws {
@@ -2103,11 +2133,11 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func fetchWithPruneStreaming(
+    func fetchWithPruneStreamingUnqueued(
         remoteName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
     ) async throws {
-        var args = ["fetch", "--prune", "--prune-tags"]
+        var args = ["fetch", "--prune", "--tags"]
         if let remoteName {
             args.append(remoteName)
         } else {
@@ -2117,7 +2147,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pullStreaming(
+    func pullStreamingUnqueued(
         remoteName: String? = nil,
         branchName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
@@ -2132,7 +2162,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pullFFStreaming(
+    func pullFFStreamingUnqueued(
         remoteName: String? = nil,
         branchName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
@@ -2147,7 +2177,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pullRebaseStreaming(
+    func pullRebaseStreamingUnqueued(
         remoteName: String? = nil,
         branchName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
@@ -2163,8 +2193,8 @@ actor GitService {
     }
 
     /// Force pull: `git fetch --all` (streamed) then `git reset --hard @{u}`.
-    /// Mirrors `pullForce()`; only the network fetch is streamed (reset is local).
-    func pullForceStreaming(
+    /// Mirrors `pullForceUnqueued()`; only the network fetch is streamed (reset is local).
+    func pullForceStreamingUnqueued(
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
     ) async throws {
         try await runGitStreaming(["fetch", "--all"], onOutput: onOutput)
@@ -2173,7 +2203,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pushStreaming(
+    func pushStreamingUnqueued(
         remoteName: String? = nil,
         branchName: String? = nil,
         setUpstream: Bool = false,
@@ -2199,7 +2229,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pushForceStreaming(
+    func pushForceStreamingUnqueued(
         remoteName: String? = nil,
         branchName: String? = nil,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
@@ -2221,7 +2251,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func pushTagStreaming(
+    func pushTagStreamingUnqueued(
         name: String,
         remote: String,
         onOutput: @escaping @Sendable (Data?, Data?) -> Void
@@ -2268,7 +2298,7 @@ actor GitService {
         return "\(code)"
     }
 
-    func createBranch(name: String, checkout: Bool = true) throws {
+    func createBranchUnqueued(name: String, checkout: Bool = true) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         // Get HEAD commit
@@ -2296,13 +2326,13 @@ actor GitService {
         }
 
         if checkout {
-            try checkoutBranch(name)
+            try checkoutBranchUnqueued(name)
         } else {
             invalidateRefMapCache()
         }
     }
 
-    func createBranchAt(name: String, commitHash: String) throws {
+    func createBranchAtUnqueued(name: String, commitHash: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var oid = git_oid()
@@ -2325,7 +2355,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func checkoutBranch(_ name: String) throws {
+    func checkoutBranchUnqueued(_ name: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         // Try branch first
@@ -2437,7 +2467,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func checkoutCommit(_ hash: String) throws {
+    func checkoutCommitUnqueued(_ hash: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var oid = git_oid()
@@ -2469,12 +2499,12 @@ actor GitService {
 
     // MARK: - Operations kept as CLI (following Xit: merge/rebase/cherry-pick/revert need CLI)
 
-    func merge(_ branchOrHash: String) async throws {
+    func mergeUnqueued(_ branchOrHash: String) async throws {
         try await runGit(["merge", branchOrHash])
         invalidateRefMapCache()
     }
 
-    func rebase(onto target: String) async throws {
+    func rebaseUnqueued(onto target: String) async throws {
         try await runGit(["rebase", target])
         invalidateRefMapCache()
     }
@@ -2491,7 +2521,7 @@ actor GitService {
     /// Like `merge`, but returns the captured stdout/stderr on success. On non-zero
     /// exit it throws `GitError.operationFailed` (preferring stderr), matching
     /// `merge`, so callers' conflict handling is unaffected.
-    func mergeCapturingOutput(_ branchOrHash: String) async throws -> OperationOutput {
+    func mergeCapturingOutputUnqueued(_ branchOrHash: String) async throws -> OperationOutput {
         let output = try await runGitCapturing(["merge", branchOrHash])
         invalidateRefMapCache()
         return output
@@ -2499,7 +2529,7 @@ actor GitService {
 
     /// Like `rebase`, but returns the captured stdout/stderr on success. On non-zero
     /// exit it throws `GitError.operationFailed`, matching `rebase`.
-    func rebaseCapturingOutput(onto target: String) async throws -> OperationOutput {
+    func rebaseCapturingOutputUnqueued(onto target: String) async throws -> OperationOutput {
         let output = try await runGitCapturing(["rebase", target])
         invalidateRefMapCache()
         return output
@@ -2518,12 +2548,12 @@ actor GitService {
         return OperationOutput(stdout: result.stdout, stderr: result.stderr)
     }
 
-    func cherryPick(_ hash: String) async throws {
+    func cherryPickUnqueued(_ hash: String) async throws {
         try await runGit(["cherry-pick", hash])
         invalidateRefMapCache()
     }
 
-    func resetToCommit(_ hash: String, mode: ResetMode) throws {
+    func resetToCommitUnqueued(_ hash: String, mode: ResetMode) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var oid = git_oid()
@@ -2551,12 +2581,12 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func revertCommit(_ hash: String) async throws {
+    func revertCommitUnqueued(_ hash: String) async throws {
         try await runGit(["revert", "--no-edit", hash])
         invalidateRefMapCache()
     }
 
-    func deleteBranch(_ name: String, force: Bool = false) throws {
+    func deleteBranchUnqueued(_ name: String, force: Bool = false) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var branch: OpaquePointer?
@@ -2598,7 +2628,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func renameBranch(oldName: String, newName: String) throws {
+    func renameBranchUnqueued(oldName: String, newName: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var branch: OpaquePointer?
@@ -2616,8 +2646,8 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    // deleteRemoteBranch needs push (auth), keep CLI (Xit same)
-    func deleteRemoteBranch(remote: String, branch: String) async throws -> DeleteRemoteBranchResult {
+    // deleteRemoteBranch needs pushUnqueued (auth), keep CLI (Xit same)
+    func deleteRemoteBranchUnqueued(remote: String, branch: String) async throws -> DeleteRemoteBranchResult {
         do {
             try await runGit(["push", remote, "--delete", branch])
         } catch {
@@ -2633,7 +2663,7 @@ actor GitService {
         return .deleted
     }
 
-    func createTag(name: String, at hash: String, message: String? = nil) throws {
+    func createTagUnqueued(name: String, at hash: String, message: String? = nil) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var oid = git_oid()
@@ -2669,7 +2699,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func deleteTag(name: String) throws {
+    func deleteTagUnqueued(name: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
         let rc = git_tag_delete(repo, name)
         guard rc == 0 else {
@@ -2726,22 +2756,22 @@ actor GitService {
         return String(cString: sha)
     }
 
-    func pushTag(name: String, remote: String) async throws {
+    func pushTagUnqueued(name: String, remote: String) async throws {
         try await runGit(["push", remote, "refs/tags/\(name)"])
         invalidateRefMapCache()
     }
 
-    func deleteRemoteTag(name: String, remote: String) async throws {
+    func deleteRemoteTagUnqueued(name: String, remote: String) async throws {
         try await runGit(["push", remote, "--delete", "refs/tags/\(name)"])
         invalidateRefMapCache()
     }
 
-    func annotateTag(name: String, message: String) async throws {
+    func annotateTagUnqueued(name: String, message: String) async throws {
         try await runGit(["tag", "-a", "-f", "-m", message, name])
         invalidateRefMapCache()
     }
 
-    func setUpstream(remote: String, branch: String) throws {
+    func setUpstreamUnqueued(remote: String, branch: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var head: OpaquePointer?
@@ -2758,18 +2788,18 @@ actor GitService {
     }
 
     // CLI-only operations (Xit also uses CLI for these)
-    func editCommitMessage(_ hash: String, newMessage: String) async throws {
+    func editCommitMessageUnqueued(_ hash: String, newMessage: String) async throws {
         try await runGit(["rebase", "-i", "--autosquash", "\(hash)^"])
         invalidateRefMapCache()
     }
 
-    func amendCommitMessage(_ newMessage: String) async throws {
+    func amendCommitMessageUnqueued(_ newMessage: String) async throws {
         try await runGit(["commit", "--amend", "-m", newMessage])
         invalidateRefMapCache()
     }
 
     /// Reword a non-HEAD commit message using interactive rebase with GIT_SEQUENCE_EDITOR.
-    func rewordCommitMessage(hash: String, newMessage: String) async throws {
+    func rewordCommitMessageUnqueued(hash: String, newMessage: String) async throws {
         // Write the new message to a temp file so it can handle multi-line and special characters
         let tmpFile = FileManager.default.temporaryDirectory.appendingPathComponent("gitn_reword_\(UUID().uuidString).txt")
         try newMessage.write(to: tmpFile, atomically: true, encoding: .utf8)
@@ -2831,7 +2861,7 @@ actor GitService {
     ///    full first-parent range from anchor to HEAD (oldest-first)
     /// 4. Delegates plan construction to `SquashPlanBuilder` (R4.4)
     /// 5. Writes the plan to a temp file and runs rebase with a byte-for-byte editor (R4.4)
-    func squashCommits(_ hashes: [String]) async throws {
+    func squashCommitsUnqueued(_ hashes: [String]) async throws {
         // R4.5 — deduplicate and check cardinality
         let distinct: [String] = {
             var seen = Set<String>()
@@ -3080,7 +3110,7 @@ actor GitService {
 
     // MARK: - Remote Management (libgit2, following Xit's approach)
 
-    func addRemote(name: String, url: String) throws {
+    func addRemoteUnqueued(name: String, url: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var remote: OpaquePointer?
@@ -3092,7 +3122,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func deleteRemote(name: String) throws {
+    func deleteRemoteUnqueued(name: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         let rc = git_remote_delete(repo, name)
@@ -3102,7 +3132,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func renameRemote(oldName: String, newName: String) throws {
+    func renameRemoteUnqueued(oldName: String, newName: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var problems = git_strarray()
@@ -3114,7 +3144,7 @@ actor GitService {
         invalidateRefMapCache()
     }
 
-    func setRemoteURL(name: String, url: String) throws {
+    func setRemoteURLUnqueued(name: String, url: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         let rc = git_remote_set_url(repo, name, url)
@@ -3126,7 +3156,8 @@ actor GitService {
 
     // MARK: - Stash (libgit2, following Xit's XTRepository+Commands.swift)
 
-    func stashSave(message: String?, includeUntracked: Bool = true) throws {
+    @discardableResult
+    func stashSaveUnqueued(message: String?, includeUntracked: Bool = true) throws -> String {
         guard let repo else { throw GitError.repoNotOpen }
 
         guard let sig = makeDefaultSignature(repo: repo) else {
@@ -3145,45 +3176,60 @@ actor GitService {
             throw GitError.operationFailed("Stash save failed (\(rc))")
         }
         invalidateRefMapCache()
+        return withUnsafePointer(to: &oid) { oidToHash($0) }
     }
 
-    func stashPop(index: Int = 0) throws {
-        guard let repo else { throw GitError.repoNotOpen }
-
-        var opts = git_stash_apply_options()
-        git_stash_apply_options_init(&opts, UInt32(GIT_STASH_APPLY_OPTIONS_VERSION))
-        opts.flags = GIT_STASH_APPLY_REINSTATE_INDEX.rawValue
-
-        let rc = git_stash_pop(repo, index, &opts)
-        guard rc == 0 else {
-            // GIT_EMERGECONFLICT = -13: conflicts during stash apply
-            if rc == -13 {
-                throw GitError.operationFailed("Stash pop resulted in merge conflicts")
-            }
-            throw GitError.operationFailed(libgit2ErrorMsg("Stash pop failed", code: rc))
+    private func currentStashIndex(oid: String) throws -> Int {
+        guard let stash = try stashes().first(where: { $0.oid == oid }),
+              stash.index.hasPrefix("stash@{"), stash.index.hasSuffix("}"),
+              let index = Int(stash.index.dropFirst(7).dropLast()) else {
+            throw GitError.operationFailed("Stash no longer exists: \(oid)")
         }
+        return index
+    }
+
+    func stashPopUnqueued(oid: String) async throws {
+        // Git's default apply can restore a stash when unrelated paths are staged.
+        // libgit2's apply first requires a clean index, and reinstating the saved
+        // index can reject otherwise safe changes. Apply by OID so a shifted
+        // reflog position cannot redirect the operation, then drop that same OID.
+        try await stashApplyUnqueued(oid: oid)
+        do {
+            try stashDropUnqueued(oid: oid)
+        } catch {
+            throw GitError.operationFailed(
+                "Stash was applied, but could not be removed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    func stashApplyUnqueued(oid: String) async throws {
+        _ = try currentStashIndex(oid: oid)
+        try await cli.run(["stash", "apply", oid])
         invalidateRefMapCache()
     }
 
-    func stashApply(index: Int = 0) throws {
-        guard let repo else { throw GitError.repoNotOpen }
-
-        var opts = git_stash_apply_options()
-        git_stash_apply_options_init(&opts, UInt32(GIT_STASH_APPLY_OPTIONS_VERSION))
-        opts.flags = GIT_STASH_APPLY_REINSTATE_INDEX.rawValue
-
-        let rc = git_stash_apply(repo, index, &opts)
-        guard rc == 0 else {
-            // GIT_EMERGECONFLICT = -13: conflicts during stash apply
-            if rc == -13 {
-                throw GitError.operationFailed("Stash apply resulted in merge conflicts")
-            }
-            throw GitError.operationFailed(libgit2ErrorMsg("Stash apply failed", code: rc))
-        }
-        invalidateRefMapCache()
+    func stashDropUnqueued(oid: String) throws {
+        try stashDropUnqueued(index: currentStashIndex(oid: oid))
     }
 
-    func stashDrop(index: Int = 0) throws {
+    func stashPopUnqueued(index: Int = 0) async throws {
+        let items = try stashes()
+        guard items.indices.contains(index) else {
+            throw GitError.operationFailed("Stash no longer exists at index \(index)")
+        }
+        try await stashPopUnqueued(oid: items[index].oid)
+    }
+
+    func stashApplyUnqueued(index: Int = 0) async throws {
+        let items = try stashes()
+        guard items.indices.contains(index) else {
+            throw GitError.operationFailed("Stash no longer exists at index \(index)")
+        }
+        try await stashApplyUnqueued(oid: items[index].oid)
+    }
+
+    func stashDropUnqueued(index: Int = 0) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         let rc = git_stash_drop(repo, index)
@@ -3205,101 +3251,112 @@ actor GitService {
     }
 
     func stashDiffFiles(_ stashRef: String) async throws -> [DiffFile] {
-        // Use machine-readable output. `git stash show --stat` abbreviates long paths with `...`,
-        // which breaks later `git diff -- <path>` lookups for stash entries.
-        let pathsOutput = try await runGitOutput(["stash", "show", "--name-only", "--format=", stashRef])
-        let statsOutput = try await runGitOutput(["stash", "show", "--numstat", "--format=", stashRef])
-        var statsByPath: [String: (additions: Int, deletions: Int)] = [:]
+        let base = "\(stashRef)^"
+        let statuses = try await cli.outputData(["diff", "-M", "--name-status", "-z", base, stashRef])
+        let stats = try await cli.outputData(["diff", "-M", "--numstat", "-z", base, stashRef])
+        let untracked: Data?
+        if (try? await cli.outputData(["rev-parse", "--verify", "-q", "\(stashRef)^3"])) != nil {
+            untracked = try await cli.outputData(["ls-tree", "-r", "--name-only", "-z", "\(stashRef)^3"])
+        } else {
+            untracked = nil
+        }
+        return try StashDiffFileParser.parse(status: statuses, numstat: stats, untracked: untracked)
+    }
 
-        for line in statsOutput.split(separator: "\n", omittingEmptySubsequences: true) {
-            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
-            guard fields.count >= 3 else { continue }
-
-            let path = String(fields[2])
-            let additions = Int(fields[0]) ?? 0
-            let deletions = Int(fields[1]) ?? 0
-            statsByPath[path] = (additions, deletions)
+    /// Read both sides from one immutable stash commit, never from the worktree.
+    /// Missing and empty blobs remain distinct (nil versus empty Data).
+    func stashFileVersions(
+        stashOID: String,
+        path: String,
+        oldPath: String? = nil,
+        changeKind: DiffChangeKind
+    ) throws -> StashFileVersions {
+        guard let repo else { throw GitError.repoNotOpen }
+        var oid = git_oid()
+        guard git_oid_fromstr(&oid, stashOID) == 0 else {
+            throw GitError.operationFailed("Invalid stash OID")
+        }
+        var commit: OpaquePointer?
+        guard git_commit_lookup(&commit, repo, &oid) == 0, let commit else {
+            throw GitError.operationFailed("Stash commit no longer exists")
+        }
+        defer { git_commit_free(commit) }
+        guard git_commit_parentcount(commit) >= 2,
+              let baseID = git_commit_parent_id(commit, 0) else {
+            throw GitError.operationFailed("Invalid stash commit")
         }
 
-        var result: [DiffFile] = []
-        let orderedPaths = pathsOutput
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
-        for path in orderedPaths {
-            let stats = statsByPath[path] ?? (0, 0)
-            result.append(DiffFile(additions: stats.additions, deletions: stats.deletions, path: path))
+        let oldRaw: Data?
+        if changeKind == .added || changeKind == .untracked {
+            oldRaw = nil
+        } else {
+            oldRaw = try rawFileData(atCommit: oidToHash(baseID), path: oldPath ?? path)
         }
 
-        // Also include untracked files stored in the third parent (^3).
-        // These are created when stash is saved with --include-untracked (GIT_STASH_INCLUDE_UNTRACKED)
-        // and are NOT shown by `git stash show --stat`, which only covers tracked changes.
-        if let untrackedOutput = try? await runGitOutput(["ls-tree", "-r", "--name-only", "\(stashRef)^3"]) {
-            let existingPaths = Set(result.map(\.path))
-            for path in untrackedOutput.split(separator: "\n").map(String.init) where !path.isEmpty && !existingPaths.contains(path) {
-                result.append(DiffFile(additions: 1, deletions: 0, path: path))
+        let newRaw: Data?
+        switch changeKind {
+        case .deleted:
+            newRaw = nil
+        case .untracked:
+            guard git_commit_parentcount(commit) >= 3,
+                  let untrackedID = git_commit_parent_id(commit, 2) else {
+                throw GitError.operationFailed("Untracked stash tree is missing")
+            }
+            newRaw = try rawFileData(atCommit: oidToHash(untrackedID), path: path)
+        default:
+            let wip = try rawFileData(atCommit: stashOID, path: path)
+            if wip == nil, changeKind == .unknown,
+               git_commit_parentcount(commit) >= 3,
+               let untrackedID = git_commit_parent_id(commit, 2) {
+                newRaw = try rawFileData(atCommit: oidToHash(untrackedID), path: path)
+            } else {
+                newRaw = wip
             }
         }
 
-        return result
+        if changeKind != .added && changeKind != .untracked && oldRaw == nil {
+            throw GitError.operationFailed("Stash base blob is missing: \(oldPath ?? path)")
+        }
+        if changeKind != .deleted && newRaw == nil {
+            throw GitError.operationFailed("Stash new blob is missing: \(path)")
+        }
+
+        return StashFileVersions(
+            oldData: oldRaw.flatMap { resolvedFileData($0, path: oldPath ?? path) },
+            newData: newRaw.flatMap { resolvedFileData($0, path: path) },
+            oldContent: oldRaw.map { decodeResolvedFileData($0, path: oldPath ?? path) },
+            newContent: newRaw.map { decodeResolvedFileData($0, path: path) }
+        )
     }
     
-    func stashFileDiff(_ stashRef: String, path: String) async throws -> String {
-        // Use git diff to get the diff for a specific file in stash
-        // git diff stash@{0}^..stash@{0} -- <path> shows the diff for that file
-        // This is more reliable than git show for stash diffs
-        do {
-            let output = try await runGitOutput(["diff", "\(stashRef)^..\(stashRef)", "--", path])
-            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            // If diff is empty, try alternative method
-            if trimmed.isEmpty {
-                // Fallback: use git show -p to get patch format
-                let showOutput = try await runGitOutput(["show", "-p", stashRef, "--", path])
-                // Extract only the diff part (skip commit message and metadata)
-                let lines = showOutput.components(separatedBy: "\n")
-                var diffStartIndex = 0
-                for (index, line) in lines.enumerated() {
-                    if line.hasPrefix("diff --git") {
-                        diffStartIndex = index
-                        break
-                    }
-                }
-                if diffStartIndex > 0 {
-                    return lines.suffix(from: diffStartIndex).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                // Last resort: check if this file lives in the untracked parent (^3).
-                // Files stashed with --include-untracked are not reachable via the main stash diff.
-                if let content = try? await runGitOutput(["show", "\(stashRef)^3:\(path)"]), !content.isEmpty {
-                    return formatNewFileAsDiff(path: path, content: content)
-                }
-                return showOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            return trimmed
-        } catch {
-            // If file doesn't exist in stash or stash ref is invalid, return empty string
-            let errorMsg = error.localizedDescription.lowercased()
-            if errorMsg.contains("stash") || errorMsg.contains("not found") || errorMsg.contains("invalid") ||
-               errorMsg.contains("no such") || errorMsg.contains("unknown revision") {
-                // Still try ^3 for untracked files before giving up
-                if let content = try? await runGitOutput(["show", "\(stashRef)^3:\(path)"]), !content.isEmpty {
-                    return formatNewFileAsDiff(path: path, content: content)
-                }
-                return ""
-            }
-            throw error
-        }
+    func stashFileDiff(_ stashRef: String, path: String, oldPath: String? = nil) async throws -> String {
+        var paths = [path]
+        if let oldPath, oldPath != path { paths.insert(oldPath, at: 0) }
+        let output = try await runGitOutput(["diff", "-M", "\(stashRef)^", stashRef, "--"] + paths)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        // Files stashed with --include-untracked live only in the third parent.
+        return await stashUntrackedFileDiff(stashRef: stashRef, path: path) ?? ""
     }
 
     /// File content for a path stored in a stash (WIP commit tree or untracked `^3` tree). Used when the path is not on disk.
     func stashPathDecodedContent(stashRef: String, path: String) async -> DecodedFileContent? {
         for revision in ["\(stashRef):\(path)", "\(stashRef)^3:\(path)"] {
             do {
-                let output = try await runGitOutput(["show", revision])
-                return Self.decodeFileData(Data(output.utf8))
+                let data = try await cli.outputData(["show", revision])
+                return Self.decodeFileData(data)
             } catch {
                 continue
             }
         }
         return nil
+    }
+
+    private func stashUntrackedFileDiff(stashRef: String, path: String) async -> String? {
+        guard let data = try? await cli.outputData(["show", "\(stashRef)^3:\(path)"]) else { return nil }
+        let decoded = Self.decodeFileData(data)
+        guard let text = decoded.text else { return nil }
+        return formatNewFileAsDiff(path: path, content: text)
     }
 
     private func formatNewFileAsDiff(path: String, content: String) -> String {
@@ -3357,7 +3414,7 @@ actor GitService {
     /// Apply a patch string via `git apply`.
     /// - cached: stage the patch (apply to index)
     /// - reverse: apply in reverse (for discarding changes)
-    func applyPatch(_ patch: String, cached: Bool = false, reverse: Bool = false) async throws {
+    func applyPatchUnqueued(_ patch: String, cached: Bool = false, reverse: Bool = false) async throws {
         var args = ["apply", "--unidiff-zero", "--whitespace=nowarn"]
         if cached { args.append("--cached") }
         if reverse { args.append("--reverse") }
@@ -3369,7 +3426,7 @@ actor GitService {
     // MARK: - File Actions
 
     /// Discard only working directory changes for a file, preserving any staged content.
-    func discardFileChanges(path: String) throws {
+    func discardFileChangesUnqueued(path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         // Check if file is untracked - just delete it
@@ -3406,7 +3463,7 @@ actor GitService {
         }
     }
 
-    func addToGitignore(pattern: String) async throws {
+    func addToGitignoreUnqueued(pattern: String) async throws {
         let gitignorePath = (repoPath as NSString).appendingPathComponent(".gitignore")
         let fm = FileManager.default
 
@@ -3461,7 +3518,7 @@ actor GitService {
 
     /// Get the branch being merged (from MERGE_HEAD).
     private func mergeSourceBranch() -> String {
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
         let mergeHeadPath = (gitDir as NSString).appendingPathComponent("MERGE_HEAD")
         let mergeHead = (try? String(contentsOfFile: mergeHeadPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -3480,19 +3537,19 @@ actor GitService {
 
     /// Get the default merge commit message from MERGE_MSG.
     func mergeCommitMessage() -> String {
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
         let msgPath = (gitDir as NSString).appendingPathComponent("MERGE_MSG")
         return (try? String(contentsOfFile: msgPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    func mergeAbort() async throws {
+    func mergeAbortUnqueued() async throws {
         try await runGit(["merge", "--abort"])
         invalidateRefMapCache()
     }
 
     /// Reset to abort stash apply conflicts (git reset --merge).
-    func stashConflictAbort() async throws {
+    func stashConflictAbortUnqueued() async throws {
         try await runGit(["reset", "--merge"])
         invalidateRefMapCache()
     }
@@ -3500,7 +3557,7 @@ actor GitService {
     func rebaseState() throws -> RebaseState? {
         guard isRebaseInProgress() else { return nil }
         let fm = FileManager.default
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
 
         var rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         if !fm.fileExists(atPath: rebaseDir) {
@@ -3638,6 +3695,53 @@ actor GitService {
             theirsLines: theirsLines,
             oursLabel: oursLabel,
             theirsLabel: theirsLabel
+        )
+    }
+
+    func loadConflictSession(path: String) throws -> (sides: ConflictSides, snapshot: ConflictFileSnapshot) {
+        let before = try conflictFileSnapshot(path: path)
+        let sides = try readConflictSides(path: path)
+        guard before == (try conflictFileSnapshot(path: path)) else {
+            throw ConflictSaveError.sourceChanged
+        }
+        return (sides, before)
+    }
+
+    func conflictFileSnapshot(path: String) throws -> ConflictFileSnapshot {
+        guard let repo else { throw GitError.repoNotOpen }
+        var index: OpaquePointer?
+        guard git_repository_index(&index, repo) == 0, let index else {
+            throw GitError.operationFailed("Cannot open conflict index")
+        }
+        defer { git_index_free(index) }
+        let readResult = git_index_read(index, 1)
+        guard readResult == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Cannot refresh conflict index", code: readResult))
+        }
+
+        var ancestor: UnsafePointer<git_index_entry>?
+        var current: UnsafePointer<git_index_entry>?
+        var incoming: UnsafePointer<git_index_entry>?
+        guard git_index_conflict_get(&ancestor, &current, &incoming, index, path) == 0 else {
+            throw ConflictSaveError.sourceChanged
+        }
+        func oid(_ entry: UnsafePointer<git_index_entry>?) -> String? {
+            guard let entry else { return nil }
+            var value = entry.pointee.id
+            return oidToHash(&value)
+        }
+
+        let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        let digest: String?
+        if FileManager.default.fileExists(atPath: fullPath) {
+            let data = try Data(contentsOf: URL(fileURLWithPath: fullPath), options: [.mappedIfSafe])
+            digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        } else {
+            digest = nil
+        }
+        return ConflictFileSnapshot(
+            ancestorOID: oid(ancestor), currentOID: oid(current),
+            incomingOID: oid(incoming), workingTreeSHA256: digest
         )
     }
 
@@ -3825,7 +3929,7 @@ actor GitService {
     }
 
     private func rebaseOursLabel() -> String {
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         let ontoHash = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("onto"), encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -3835,7 +3939,7 @@ actor GitService {
     }
 
     private func rebaseTheirsLabel() -> String {
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         let headName = (try? String(contentsOfFile: (rebaseDir as NSString).appendingPathComponent("head-name"), encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3856,11 +3960,11 @@ actor GitService {
         return "HEAD"
     }
 
-    func markConflictResolved(path: String) async throws {
+    func markConflictResolvedUnqueued(path: String) async throws {
         try stageConflictResolved(path: path)
     }
 
-    func markAllConflictsResolved() async throws {
+    func markAllConflictsResolvedUnqueued() async throws {
         let files = try conflictedFiles()
         for file in files {
             try stageConflictResolved(path: file.path)
@@ -3880,24 +3984,34 @@ actor GitService {
             throw GitError.operationFailed("Cannot get index")
         }
         defer { git_index_free(index) }
+        let readResult = git_index_read(index, 1)
+        guard readResult == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Cannot refresh resolved index", code: readResult))
+        }
 
         // Add working directory version as stage 0.
         // This also moves any existing conflict entries to REUC automatically.
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
+        let result: Int32
         if FileManager.default.fileExists(atPath: fullPath) {
-            git_index_add_bypath(index, path)
+            result = git_index_add_bypath(index, path)
         } else {
-            git_index_remove_bypath(index, path)
+            result = git_index_remove_bypath(index, path)
         }
-
-        git_index_write(index)
+        guard result == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Cannot stage resolved conflict", code: result))
+        }
+        let writeResult = git_index_write(index)
+        guard writeResult == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Cannot write resolved index", code: writeResult))
+        }
     }
 
     /// Mark a resolved file as conflicted again by restoring the original
     /// conflict entries from the REUC (Resolved Unmerged Conflicts) section
     /// of the index, and regenerating the conflicted file with merge markers
     /// using `git_merge_file_from_index`.
-    func markFileConflicted(path: String) throws {
+    func markFileConflictedUnqueued(path: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
         var index: OpaquePointer?
         guard git_repository_index(&index, repo) == 0, let index else {
@@ -3988,16 +4102,16 @@ actor GitService {
     }
 
     func rebaseCommitMessage() -> String {
-        let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+        let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
         let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
         let msgPath = (rebaseDir as NSString).appendingPathComponent("message")
         return (try? String(contentsOfFile: msgPath, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    func rebaseContinue(message: String? = nil) async throws {
+    func rebaseContinueUnqueued(message: String? = nil) async throws {
         if let message, !message.isEmpty {
-            let gitDir = (repoPath as NSString).appendingPathComponent(".git")
+            let gitDir = GitRepositoryMetadataPaths(repoPath: repoPath).gitDirPath
             let rebaseDir = (gitDir as NSString).appendingPathComponent("rebase-merge")
             let msgPath = (rebaseDir as NSString).appendingPathComponent("message")
             try? message.write(toFile: msgPath, atomically: true, encoding: .utf8)
@@ -4007,17 +4121,33 @@ actor GitService {
         try await runGitWithEnv(["rebase", "--continue"], env: ["GIT_EDITOR": "true"])
     }
 
-    func rebaseSkip() async throws {
+    func rebaseSkipUnqueued() async throws {
         try await runGit(["rebase", "--skip"])
     }
 
-    func rebaseAbort() async throws {
+    func rebaseAbortUnqueued() async throws {
         try await runGit(["rebase", "--abort"])
     }
 
-    func saveConflictResolution(path: String, content: String) throws {
+    func saveConflictResolutionUnqueued(
+        path: String, content: String, expectedSnapshot: ConflictFileSnapshot
+    ) throws {
+        guard expectedSnapshot == (try conflictFileSnapshot(path: path)) else {
+            throw ConflictSaveError.sourceChanged
+        }
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
+        do {
+            try stageConflictResolved(path: path)
+        } catch {
+            let retrySnapshot = try? conflictFileSnapshot(path: path)
+            let savedDigest = SHA256.hash(data: Data(content.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            throw ConflictSaveError.stageFailed(
+                error.localizedDescription,
+                retrySnapshot: retrySnapshot?.workingTreeSHA256 == savedDigest ? retrySnapshot : nil
+            )
+        }
     }
 
     // MARK: - SSH Host Key
@@ -4101,20 +4231,20 @@ actor GitService {
 
     // MARK: - Commit
 
-    func commitAmend(message: String) async throws {
+    func commitAmendUnqueued(message: String) async throws {
         try await runGit(["commit", "--amend", "-m", message])
         invalidateRefMapCache()
     }
 
     /// Like `commitAmend`, but returns the captured stdout/stderr on success (Req 1.5).
     /// On non-zero exit it throws `GitError.operationFailed`, matching `commitAmend`.
-    func commitAmendCapturingOutput(message: String) async throws -> OperationOutput {
+    func commitAmendCapturingOutputUnqueued(message: String) async throws -> OperationOutput {
         let output = try await runGitCapturing(["commit", "--amend", "-m", message])
         invalidateRefMapCache()
         return output
     }
 
-    func commit(message: String) throws {
+    func commitUnqueued(message: String) throws {
         guard let repo else { throw GitError.repoNotOpen }
 
         var index: OpaquePointer?
@@ -4293,6 +4423,12 @@ actor GitService {
     private nonisolated static func decodeFileData(_ data: Data) -> DecodedFileContent {
         if data.isEmpty {
             return DecodedFileContent(text: "", encodingName: "UTF-8", isBinary: false)
+        }
+
+        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {
+            if let text = String(data: data, encoding: .utf16) {
+                return DecodedFileContent(text: text, encodingName: "UTF-16", isBinary: false)
+            }
         }
 
         if data.contains(0) {

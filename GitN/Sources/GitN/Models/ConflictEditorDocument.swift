@@ -21,6 +21,13 @@ struct ConflictEditorBlock: Identifiable, Equatable, Sendable {
         case manual
     }
 
+    enum ResolutionIntent: String, Equatable, Hashable, Sendable {
+        case unresolved
+        case selected
+        case manual
+        case ancestor
+    }
+
     enum BothOrder: String, Equatable, Hashable, Sendable {
         case currentFirst
         case incomingFirst
@@ -57,6 +64,7 @@ struct ConflictEditorBlock: Identifiable, Equatable, Sendable {
     var selectionOrder: [SelectionSide]
     var mode: Mode
     var contentState: ContentState
+    var resolutionIntent: ResolutionIntent
     var controlledBlock: ControlledRange?
     var insertionSegment: ControlledRange?
     var currentDisplayRange: Range<Int>?
@@ -77,6 +85,8 @@ struct ConflictEditorBlock: Identifiable, Equatable, Sendable {
         case .detached: return insertionSegment?.lineRange
         }
     }
+
+    var isResolved: Bool { resolutionIntent != .unresolved }
 
     var modeBadgeText: String {
         switch (mode, contentState) {
@@ -160,6 +170,7 @@ struct ConflictEditorDocument: Equatable, Sendable {
                 selectionOrder: [],
                 mode: .attached,
                 contentState: .manual,
+                resolutionIntent: .unresolved,
                 controlledBlock: ConflictEditorBlock.ControlledRange(
                     lineRange: marker.outputRange,
                     lastGeneratedText: generatedText
@@ -185,6 +196,18 @@ struct ConflictEditorDocument: Equatable, Sendable {
 
     var hasOutputChanges: Bool {
         outputText != initialOutputText
+    }
+
+    var unresolvedBlockIDs: [Int] {
+        blocks.filter { !$0.isResolved }.map(\.id)
+    }
+
+    mutating func keepAncestor(blockID: Int) {
+        guard let index = indexOfBlock(id: blockID), blocks[index].mode == .attached else { return }
+        blocks[index].selectedSources = .init(current: false, incoming: false)
+        blocks[index].selectionOrder = []
+        applySelection(to: index)
+        blocks[index].resolutionIntent = .ancestor
     }
 
     mutating func resetAll() {
@@ -236,17 +259,17 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func updateOutputText(_ newText: String) {
+        guard newText != outputText else { return }
         let oldLines = outputLines
-        let oldOrigins = outputLineOrigins
         let newLines = newText.components(separatedBy: "\n")
+        let change = LineChange.make(oldLines: oldLines, newLines: newLines)
 
         outputText = newText
-        outputLineOrigins = remapLineOriginsAfterManualEdit(
-            oldOrigins: oldOrigins,
-            oldLines: oldLines,
-            newLines: newLines
+        outputLineOrigins.replaceSubrange(
+            change.oldRange,
+            with: repeatElement(.manual, count: change.newRange.count)
         )
-        remapBlocksAfterManualEdit(oldLines: oldLines, newLines: newLines)
+        remapBlocksAfterManualEdit(change: change, newLines: newLines)
     }
 
     private func indexOfBlock(id: Int) -> Int? {
@@ -299,6 +322,8 @@ struct ConflictEditorDocument: Equatable, Sendable {
 
     private mutating func applySelection(to index: Int) {
         var block = blocks[index]
+        block.resolutionIntent = block.selectedSources.hasSelection ? .selected : .unresolved
+        blocks[index] = block
         let replacementLines = resolvedLines(for: block)
 
         switch block.mode {
@@ -695,9 +720,7 @@ struct ConflictEditorDocument: Equatable, Sendable {
         return matches.min(by: { abs($0 - preferred) < abs($1 - preferred) })
     }
 
-    private mutating func remapBlocksAfterManualEdit(oldLines: [String], newLines: [String]) {
-        let change = LineChange.make(oldLines: oldLines, newLines: newLines)
-
+    private mutating func remapBlocksAfterManualEdit(change: LineChange, newLines: [String]) {
         for index in blocks.indices {
             remapBlockAfterManualEdit(&blocks[index], change: change, newLines: newLines)
         }
@@ -708,6 +731,19 @@ struct ConflictEditorDocument: Equatable, Sendable {
         change: LineChange,
         newLines: [String]
     ) {
+        if let activeRange = block.activeRange {
+            if activeRange.isEmpty,
+               change.oldRange.lowerBound <= activeRange.lowerBound,
+               activeRange.lowerBound <= change.oldRange.upperBound,
+               (change.oldRange.count > 0 || change.newRange.count > 0) {
+                block.resolutionIntent = .manual
+            } else {
+                switch remappedRangeOutcome(oldRange: activeRange, change: change) {
+                case .unchanged: break
+                case .edited, .deleted, .degraded: block.resolutionIntent = .manual
+                }
+            }
+        }
         let currentInvalidated = invalidateEditedSelectionRange(
             side: .current,
             block: &block,
@@ -1105,13 +1141,18 @@ struct ConflictEditorDocument: Equatable, Sendable {
         }
 
         static func make(oldLines: [String], newLines: [String]) -> LineChange {
-            let sharedPrefix = zip(oldLines, newLines).prefix { $0 == $1 }.count
+            var sharedPrefix = 0
+            while sharedPrefix < min(oldLines.count, newLines.count),
+                  oldLines[sharedPrefix] == newLines[sharedPrefix] {
+                sharedPrefix += 1
+            }
 
-            let trimmedOld = Array(oldLines.dropFirst(sharedPrefix))
-            let trimmedNew = Array(newLines.dropFirst(sharedPrefix))
-            let sharedSuffix = zip(trimmedOld.reversed(), trimmedNew.reversed())
-                .prefix { $0 == $1 }
-                .count
+            var sharedSuffix = 0
+            while sharedSuffix < oldLines.count - sharedPrefix,
+                  sharedSuffix < newLines.count - sharedPrefix,
+                  oldLines[oldLines.count - sharedSuffix - 1] == newLines[newLines.count - sharedSuffix - 1] {
+                sharedSuffix += 1
+            }
 
             return LineChange(
                 oldRange: sharedPrefix..<(oldLines.count - sharedSuffix),
@@ -1130,20 +1171,4 @@ struct ConflictEditorDocument: Equatable, Sendable {
         return origins
     }
 
-    private func remapLineOriginsAfterManualEdit(
-        oldOrigins: [OutputLineOrigin],
-        oldLines: [String],
-        newLines: [String]
-    ) -> [OutputLineOrigin] {
-        let change = LineChange.make(oldLines: oldLines, newLines: newLines)
-        let prefixCount = change.oldRange.lowerBound
-        let suffixCount = max(oldLines.count - change.oldRange.upperBound, 0)
-
-        var remapped = Array(oldOrigins.prefix(prefixCount))
-        remapped.append(contentsOf: Array(repeating: .manual, count: change.newRange.count))
-        if suffixCount > 0 {
-            remapped.append(contentsOf: oldOrigins.suffix(suffixCount))
-        }
-        return remapped
-    }
 }

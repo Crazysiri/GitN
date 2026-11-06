@@ -79,6 +79,29 @@ body {
   z-index: 2;
 }
 
+.gitn-diff-status {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 7;
+  max-width: 55%;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: rgba(34, 38, 44, 0.9);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.gitn-diff-status[hidden] {
+  display: none;
+}
+
+body.theme-light .gitn-diff-status {
+  background: rgba(246, 247, 249, 0.94);
+  color: rgba(24, 29, 35, 0.9);
+}
+
 .gitn-deletion-gutter-block {
   position: absolute;
   left: 0;
@@ -218,8 +241,8 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  background: rgba(10, 10, 11, 0.94);
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(248, 81, 73, 0.28);
+  border-top: 1px solid rgba(248, 81, 73, 0.42);
   color: inherit;
   font-size: var(--gitn-font-size);
   line-height: var(--gitn-line-height);
@@ -281,8 +304,8 @@ body.theme-light .gitn-inline-deletion {
 }
 
 body.theme-light .gitn-deletion-content-block {
-  background: rgba(255, 205, 205, 0.5);
-  border-top: 1px solid rgba(204, 70, 70, 0.16);
+  background: rgba(255, 129, 130, 0.42);
+  border-top: 1px solid rgba(204, 70, 70, 0.38);
 }
 
 body.theme-light .gitn-deletion-line-content {
@@ -294,8 +317,8 @@ body.theme-dark .gitn-inline-deletion {
 }
 
 body.theme-dark .gitn-deletion-content-block {
-  background: rgba(88, 34, 31, 0.52);
-  border-top: 1px solid rgba(255, 120, 120, 0.12);
+  background: rgba(248, 81, 73, 0.28);
+  border-top: 1px solid rgba(248, 81, 73, 0.42);
 }
 
 body.theme-dark .gitn-deletion-line-content {

@@ -46,9 +46,9 @@ struct AutoStashRunner {
     /// Returns `true` when the working tree is dirty (`git status --porcelain` non-empty).
     let isDirty: () async -> Bool
     /// Saves the working tree to a new stash entry. Throws on failure.
-    let stashPush: () async throws -> Void
-    /// Pops `stash@{0}`. Throws on failure (including merge conflicts).
-    let stashPop: () async throws -> Void
+    let stashPush: () async throws -> String
+    /// Pops the OID returned by stashPush. Throws on failure (including merge conflicts).
+    let stashPop: (String) async throws -> Void
     /// Returns `true` when unmerged paths exist in the index after a pop.
     let hasUnmergedPaths: () async -> Bool
 
@@ -81,8 +81,9 @@ struct AutoStashRunner {
         }
 
         // R5.3: dirty tree — push first.
+        let createdOID: String
         do {
-            try await stashPush()
+            createdOID = try await stashPush()
         } catch {
             // Push failed: do NOT proceed to operation (R5.3).
             throw AutoStashError.stashPushFailed(error.localizedDescription)
@@ -96,7 +97,7 @@ struct AutoStashRunner {
             let opError = error.localizedDescription
             var popFailureMessage: String?
             do {
-                try await stashPop()
+                try await stashPop(createdOID)
             } catch let popError {
                 popFailureMessage = popError.localizedDescription
             }
@@ -109,7 +110,7 @@ struct AutoStashRunner {
         // R5.4: operation succeeded — pop and check for unmerged paths.
         var hadPopError = false
         do {
-            try await stashPop()
+            try await stashPop(createdOID)
         } catch {
             hadPopError = true
         }

@@ -140,7 +140,8 @@ struct FileHistoryPanelContent: View {
                     commandBridge: commandBridge,
                     onContentChange: { _, _ in },
                     onHunkAction: nil,
-                    onSaveRequest: nil
+                    onSaveRequest: nil,
+                    sourceIdentity: "\(viewModel.repoPath)|history|\(selectedCommit?.hash ?? "")"
                 )
             } else if selectedCommit != nil && !viewModel.fileHistoryDiff.isEmpty {
                 Text("This history entry has no textual hunks to display")

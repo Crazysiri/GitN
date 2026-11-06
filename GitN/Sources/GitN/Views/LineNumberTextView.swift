@@ -78,11 +78,12 @@ class LineNumberTextView: NSTextView {
     // MARK: Drawing
 
     override func drawBackground(in rect: NSRect) {
-        // Force synchronous layout before glyph drawing.
-        // The text view may start with a zero-width frame (SwiftUI assigns the
-        // real frame asynchronously); ensureLayout here makes certain glyphs are
-        // positioned for the current container width before NSTextView draws them.
-        if let lm = layoutManager, let tc = textContainer { lm.ensureLayout(for: tc) }
+        // Only lay out the viewport. ensureLayout(for: tc) eagerly positions every
+        // line, making a 50,000-line Markdown file stall on each redraw.
+        if let lm = layoutManager, let tc = textContainer, bounds.width > 0 {
+            let visibleRect = dirtyRectForTextContainer(rect)
+            lm.ensureLayout(forBoundingRect: visibleRect, in: tc)
+        }
         super.drawBackground(in: rect)          // fills rect with backgroundColor
 
         guard drawsInlineGutter else { return }
@@ -103,6 +104,10 @@ class LineNumberTextView: NSTextView {
 
     func pinnedViewportMinX(for dirtyRect: NSRect) -> CGFloat {
         enclosingScrollView?.contentView.bounds.minX ?? dirtyRect.minX
+    }
+
+    private func dirtyRectForTextContainer(_ dirtyRect: NSRect) -> NSRect {
+        dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
     }
 
     private func drawLineNumbers(in dirtyRect: NSRect, gutterMinX: CGFloat) {
@@ -129,13 +134,13 @@ class LineNumberTextView: NSTextView {
     ) {
         guard let lm = layoutManager,
               let tc = textContainer,
-              lm.numberOfGlyphs > 0
+              !string.isEmpty
         else { return }
 
         let nsStr = string as NSString
         refreshLineStartCacheIfNeeded(length: nsStr.length, string: nsStr)
 
-        let containerDirtyRect = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let containerDirtyRect = dirtyRectForTextContainer(dirtyRect)
         let visibleGlyphRange = lm.glyphRange(forBoundingRect: containerDirtyRect, in: tc)
         let visibleCharRange = lm.characterRange(forGlyphRange: visibleGlyphRange, actualGlyphRange: nil)
         let startChar = max(0, visibleCharRange.location)
