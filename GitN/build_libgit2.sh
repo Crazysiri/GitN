@@ -14,8 +14,8 @@ STATIC_LIB="${DIST_DIR}/lib/libgit2.a"
 # ──────────────────────────────────────────────
 # Check: skip if already up to date
 # ──────────────────────────────────────────────
-if [ -f "${XCFRAMEWORK}/macos-arm64_x86_64/libgit2.a" ] && \
-   [ "${XCFRAMEWORK}/macos-arm64_x86_64/libgit2.a" -nt "${LIBGIT2_SRC}/CMakeLists.txt" ]; then
+if [ -f "${XCFRAMEWORK}/macos-arm64/libgit2.a" ] && \
+   [ "${XCFRAMEWORK}/macos-arm64/libgit2.a" -nt "${LIBGIT2_SRC}/CMakeLists.txt" ]; then
     echo "Clibgit2.xcframework is up to date, skipping build."
     exit 0
 fi
@@ -72,22 +72,15 @@ build_arch() {
 }
 
 build_arch "arm64"
-build_arch "x86_64"
 
 # ──────────────────────────────────────────────
-# Install headers & create universal static library
+# Install headers & static library (arm64-only; GitN does not support x86_64)
 # ──────────────────────────────────────────────
-echo "  Installing headers and creating universal library..."
+echo "  Installing headers and arm64 library..."
 rm -rf "$DIST_DIR"
 
 # Full install from arm64 build to get headers + lib structure
 cmake --install "${LIBGIT2_SRC}/_build_arm64" --prefix "$INSTALL_PREFIX"
-
-# Replace single-arch lib with universal (fat) binary
-lipo -create \
-    "${LIBGIT2_SRC}/_build_arm64/libgit2.a" \
-    "${LIBGIT2_SRC}/_build_x86_64/libgit2.a" \
-    -output "${DIST_DIR}/lib/libgit2.a"
 
 # ──────────────────────────────────────────────
 # Create XCFramework
@@ -126,7 +119,7 @@ rm -rf "$HEADERS_DIR"
 # ──────────────────────────────────────────────
 # Clean up
 # ──────────────────────────────────────────────
-rm -rf "${LIBGIT2_SRC}/_build_arm64" "${LIBGIT2_SRC}/_build_x86_64" "$DIST_DIR"
+rm -rf "${LIBGIT2_SRC}/_build_arm64" "$DIST_DIR"
 
 # ──────────────────────────────────────────────
 # Verify

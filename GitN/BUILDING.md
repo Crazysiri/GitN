@@ -209,8 +209,8 @@ if you want to update the libgit2 version or rebuild the xcframework from scratc
 ./build_libgit2.sh
 ```
 
-This clones `libgit2 v1.9.1`, compiles it for `arm64` + `x86_64`, lipo-merges them,
-and packages the result as `Clibgit2.xcframework`. Requires `cmake`.
+This clones `libgit2 v1.9.1`, compiles it for `arm64` (GitN is arm64-only and does
+not support x86_64), and packages the result as `Clibgit2.xcframework`. Requires `cmake`.
 
 To change the libgit2 version, set the env var before running:
 
