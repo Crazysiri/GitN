@@ -88,7 +88,10 @@ enum StashDiffFileParser {
     private static func fields(_ data: Data) throws -> [Data] {
         guard !data.isEmpty else { return [] }
         guard data.last == 0 else { throw GitError.operationFailed("Unterminated stash path output") }
-        return data.dropLast().split(separator: 0, omittingEmptySubsequences: false).map(Data.init)
+        let trimmed = data[data.startIndex..<data.index(before: data.endIndex)]
+        let separator: UInt8 = 0
+        let chunks: [Data.SubSequence] = trimmed.split(separator: separator, omittingEmptySubsequences: false)
+        return chunks.map { Data($0) }
     }
 
     private static func string(_ data: Data) throws -> String {

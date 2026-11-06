@@ -5134,6 +5134,10 @@ final class RepoViewModel {
         await performRemoteOperation { try await $0.git.setUpstream(remote: remote, branch: branch) }
     }
 
+    func performUnsetUpstream(branch: String) async {
+        await performRemoteOperation { try await $0.git.unsetUpstream(branch: branch) }
+    }
+
     func performEditCommitMessage(hash: String, newMessage: String) async {
         let selectedCommitIndex = commits.firstIndex(where: { $0.hash == hash })
         let previouslySelectedFilePath = selectedDiffFile?.path

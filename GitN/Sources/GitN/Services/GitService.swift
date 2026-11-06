@@ -2787,6 +2787,25 @@ actor GitService {
         invalidateRefMapCache()
     }
 
+    /// Remove the upstream (tracking) configuration for a branch.
+    /// Passing NULL to git_branch_set_upstream clears it (git branch --unset-upstream).
+    func unsetUpstreamUnqueued(branch: String) throws {
+        guard let repo else { throw GitError.repoNotOpen }
+
+        var ref: OpaquePointer?
+        let lookup = git_branch_lookup(&ref, repo, branch, GIT_BRANCH_LOCAL)
+        guard lookup == 0, let ref else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Branch not found: \(branch)", code: lookup))
+        }
+        defer { git_reference_free(ref) }
+
+        let rc = git_branch_set_upstream(ref, nil)
+        guard rc == 0 else {
+            throw GitError.operationFailed(libgit2ErrorMsg("Failed to unset upstream", code: rc))
+        }
+        invalidateRefMapCache()
+    }
+
     // CLI-only operations (Xit also uses CLI for these)
     func editCommitMessageUnqueued(_ hash: String, newMessage: String) async throws {
         try await runGit(["rebase", "-i", "--autosquash", "\(hash)^"])

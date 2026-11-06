@@ -830,6 +830,11 @@ struct SidebarView: View {
                 upstreamBranch = branch.name
                 showSetUpstream = true
             }
+            if branch.upstream != nil {
+                Button("Unset Upstream") {
+                    Task { await viewModel.performUnsetUpstream(branch: branch.name) }
+                }
+            }
             if let createReviewTitle = viewModel.currentBranchReviewCreationActionTitle,
                viewModel.currentBranchReviewCreationURL() != nil {
                 Button(createReviewTitle) {

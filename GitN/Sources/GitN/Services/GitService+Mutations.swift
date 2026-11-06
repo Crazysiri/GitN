@@ -311,6 +311,12 @@ extension GitService {
         }
     }
 
+    func unsetUpstream(branch: String) async throws {
+        try await withRepositoryMutation {
+            try self.unsetUpstreamUnqueued(branch: branch)
+        }
+    }
+
     func editCommitMessage(_ hash: String, newMessage: String) async throws {
         try await withRepositoryMutation {
             try await self.editCommitMessageUnqueued(hash, newMessage: newMessage)
