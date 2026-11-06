@@ -1,0 +1,29 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+#terminal {
+  width: 100%;
+  height: 100%;
+  padding: 4px 6px 0 6px;
+  box-sizing: border-box;
+}
+
+/* xterm injects its own stylesheet via style-loader; this only sizes the host.
+   Fill the full height so no sub-row strip of host background shows below the
+   last rendered row. */
+.xterm {
+  height: 100%;
+}
+
+.xterm .xterm-viewport {
+  /* Let the themed terminal background paint the whole viewport, including any
+     partial row at the bottom, instead of leaving a gap. */
+  overflow-y: auto;
+}

@@ -117,6 +117,7 @@ let package = Package(
                 .copy("FEATURES.md"),
                 .copy("Resources/MarkdownPreview"),
                 .copy("Resources/Monaco"),
+                .copy("Resources/Xterm"),
             ],
             linkerSettings: [
                 .linkedLibrary("z"),

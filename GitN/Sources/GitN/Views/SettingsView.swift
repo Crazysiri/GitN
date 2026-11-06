@@ -5,15 +5,17 @@ private enum SettingsTab: String, CaseIterable {
     case git = "Git"
     case updates = "Updates"
     case editor = "Editor"
+    case terminal = "Terminal"
     case about = "About"
 
     var icon: String {
         switch self {
-        case .ai:     "sparkles"
-        case .git:    "network"
-        case .updates:"arrow.triangle.2.circlepath"
-        case .editor: "doc.text"
-        case .about:  "info.circle"
+        case .ai:       "sparkles"
+        case .git:      "network"
+        case .updates:  "arrow.triangle.2.circlepath"
+        case .editor:   "doc.text"
+        case .terminal: "terminal"
+        case .about:    "info.circle"
         }
     }
 }
@@ -44,6 +46,8 @@ struct SettingsView: View {
     @State private var updateFeedURL: String = UpdateSettingsStore.shared.customFeedURLString
     @State private var updateFeedURLHasChanges = false
 
+    @State private var terminalSettings: TerminalSettings = TerminalSettings.load()
+
     var body: some View {
         VStack(spacing: 0) {
             tabBar
@@ -56,6 +60,7 @@ struct SettingsView: View {
                 case .git:    gitSettingsTab
                 case .updates: updatesSettingsTab
                 case .editor: editorSettingsTab
+                case .terminal: terminalSettingsTab
                 case .about:  aboutTab
                 }
             }
@@ -619,6 +624,75 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 diffSizeLimitSection
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: - Terminal Settings
+
+    private var terminalSettingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Terminal")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Applies to new terminal sessions. Changing font or cursor does not restart a running shell.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Text("Font size").font(.system(size: 12)).frame(width: 110, alignment: .leading)
+                    Stepper(value: $terminalSettings.fontSize, in: TerminalSettings.fontSizeRange) {
+                        Text("\(terminalSettings.fontSize) pt").font(.system(size: 12, design: .monospaced))
+                    }
+                    .labelsHidden()
+                    Text("\(terminalSettings.fontSize) pt").font(.system(size: 12, design: .monospaced))
+                }
+
+                HStack(spacing: 8) {
+                    Text("Cursor style").font(.system(size: 12)).frame(width: 110, alignment: .leading)
+                    Picker("", selection: $terminalSettings.cursorStyle) {
+                        ForEach(TerminalSettings.cursorStyles, id: \.self) { Text($0.capitalized).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Scrollback").font(.system(size: 12)).frame(width: 110, alignment: .leading)
+                    Stepper(value: $terminalSettings.scrollback, in: 100...100_000, step: 500) {
+                        Text("\(terminalSettings.scrollback) lines").font(.system(size: 12, design: .monospaced))
+                    }
+                    .labelsHidden()
+                    Text("\(terminalSettings.scrollback) lines").font(.system(size: 12, design: .monospaced))
+                }
+
+                Toggle("Show command suggestions", isOn: $terminalSettings.suggestionsEnabled)
+                    .font(.system(size: 12))
+
+                HStack(spacing: 8) {
+                    Text("Tab behavior").font(.system(size: 12)).frame(width: 110, alignment: .leading)
+                    Picker("", selection: $terminalSettings.tabMode) {
+                        ForEach(TerminalSettings.tabModes, id: \.self) { Text($0.capitalized).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+
+                HStack {
+                    Button("Save") { terminalSettings.save() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    Button("Reset") {
+                        terminalSettings = TerminalSettings.default
+                        terminalSettings.save()
+                    }
+                    .controlSize(.small)
+                }
+
+                Text("New terminal sessions pick up saved settings.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             .padding(20)
         }

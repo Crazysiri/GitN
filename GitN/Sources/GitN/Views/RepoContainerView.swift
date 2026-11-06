@@ -43,7 +43,10 @@ struct RepoContainerView: View {
         self.tab = tab
         self.isActive = isActive
         self._viewModel = State(initialValue: RepoViewModel(path: tab.path, name: tab.name))
-        self._terminalStore = State(initialValue: TerminalSessionStore(repoPath: tab.path))
+        self._terminalStore = State(initialValue: TerminalSessionStore(
+            repoPath: tab.path,
+            useXterm: ProcessInfo.processInfo.environment["GITN_XTERM"] == "1"
+        ))
     }
 
     var body: some View {
@@ -439,6 +442,9 @@ struct RepoContainerView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .hoverTooltip("Toggle Terminal")
+            // Ctrl-` toggles the terminal (SPEC §8.1). Low-risk, does not
+            // collide with app tab shortcuts.
+            .keyboardShortcut("`", modifiers: .control)
 
             Button {
                 Task { await viewModel.refreshWithSync() }

@@ -5,19 +5,95 @@ import SwiftTerm
 struct TerminalPanelView: View {
     let store: TerminalSessionStore
     @Binding var isVisible: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
             terminalHeader
             Divider()
-            if let activeView = store.activeView {
-                TerminalSessionHost(terminalView: activeView)
-            } else {
-                ContentUnavailableView("No Terminal Session", systemImage: "terminal")
+            terminalBody
+            if store.useXterm, store.activeID != nil {
+                Divider()
+                contextStatusBar
             }
         }
         .background(ChromePalette.toolbarBackground)
-        .onAppear { store.ensureSession() }
+        .onAppear {
+            store.preferredIsDark = colorScheme == .dark
+            store.ensureSession()
+        }
+        .onChange(of: colorScheme) { _, newValue in
+            store.preferredIsDark = newValue == .dark
+        }
+    }
+
+    @ViewBuilder
+    private var contextStatusBar: some View {
+        let context = store.activeID.map { store.contextObserver.context(for: $0) } ?? .empty
+        HStack(spacing: 6) {
+            Image(systemName: "folder")
+                .font(.system(size: 9))
+                .foregroundStyle(ChromePalette.terminalSecondaryText)
+            Text(cwdDisplay(context))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(
+                    context.cwdConfidence == .stale
+                        ? ChromePalette.terminalSecondaryText
+                        : ChromePalette.terminalPrimaryText
+                )
+                .lineLimit(1)
+                .truncationMode(.head)
+
+            if let process = context.foregroundProcess {
+                Text("•")
+                    .font(.system(size: 9))
+                    .foregroundStyle(ChromePalette.terminalSecondaryText)
+                Image(systemName: "gearshape")
+                    .font(.system(size: 9))
+                    .foregroundStyle(ChromePalette.terminalSecondaryText)
+                Text(process)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(ChromePalette.terminalPrimaryText)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .background(ChromePalette.toolbarBackground)
+    }
+
+    private func cwdDisplay(_ context: TerminalContext) -> String {
+        switch context.cwdConfidence {
+        case .unknown:
+            return "unknown"
+        case .known, .stale:
+            guard let cwd = context.cwd else { return "unknown" }
+            let home = ProcessInfo.processInfo.environment["HOME"]
+            var shown = cwd
+            if let home, cwd == home {
+                shown = "~"
+            } else if let home, cwd.hasPrefix(home + "/") {
+                shown = "~" + cwd.dropFirst(home.count)
+            }
+            return context.cwdConfidence == .stale ? shown + " (stale)" : shown
+        }
+    }
+
+    @ViewBuilder
+    private var terminalBody: some View {
+        if store.useXterm {
+            if let session = store.activeXtermSession {
+                XtermHostView(session: session, isDark: colorScheme == .dark)
+                    .id(session.id)
+            } else {
+                ContentUnavailableView("No Terminal Session", systemImage: "terminal")
+            }
+        } else if let activeView = store.activeView {
+            TerminalSessionHost(terminalView: activeView)
+        } else {
+            ContentUnavailableView("No Terminal Session", systemImage: "terminal")
+        }
     }
 
     // MARK: - Header

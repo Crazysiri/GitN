@@ -13,6 +13,9 @@ enum GitNResources {
     private static let monacoSourceDirectoryURL = sourceRootURL
         .appendingPathComponent("Resources", isDirectory: true)
         .appendingPathComponent("Monaco", isDirectory: true)
+    private static let xtermSourceDirectoryURL = sourceRootURL
+        .appendingPathComponent("Resources", isDirectory: true)
+        .appendingPathComponent("Xterm", isDirectory: true)
 
     private static var appResourceBundles: [Bundle] {
         guard let resourceURL = Bundle.main.resourceURL,
@@ -61,6 +64,44 @@ enum GitNResources {
         }
 
         return firstExistingDirectoryURL([monacoSourceDirectoryURL])
+    }
+
+    static var xtermDirectoryURL: URL? {
+        if let directURL = firstExistingDirectoryURL([
+            Bundle.main.resourceURL?.appendingPathComponent("Xterm", isDirectory: true),
+        ]) {
+            return directURL
+        }
+
+        for bundle in appResourceBundles {
+            if let url = firstExistingDirectoryURL([
+                bundle.resourceURL?.appendingPathComponent("Xterm", isDirectory: true),
+            ]) {
+                return url
+            }
+        }
+
+        return firstExistingDirectoryURL([xtermSourceDirectoryURL])
+    }
+
+    static var xtermIndexURL: URL? {
+        if let directURL = firstExistingFileURL([
+            Bundle.main.resourceURL?
+                .appendingPathComponent("Xterm", isDirectory: true)
+                .appendingPathComponent("index.html"),
+        ]) {
+            return directURL
+        }
+
+        for bundle in appResourceBundles {
+            if let url = bundle.url(forResource: "index", withExtension: "html", subdirectory: "Xterm") {
+                return url
+            }
+        }
+
+        return firstExistingFileURL([
+            xtermSourceDirectoryURL.appendingPathComponent("index.html"),
+        ])
     }
 
     static var markdownPreviewDirectoryURL: URL? {

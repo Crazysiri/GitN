@@ -11,19 +11,34 @@ struct TerminalSessionInfo: Identifiable {
 }
 
 /// Owns PTYs for one repository tab, independently of panel visibility.
+///
+/// Two renderer backends share one session model (selection + metadata): the
+/// SwiftTerm `LocalProcessTerminalView` path and the xterm.js + forkpty path
+/// (route B), selected by `useXterm`. Only the retained render object differs.
 @Observable @MainActor
 final class TerminalSessionStore {
     let repoPath: String
     private let shellPath: String
+    let useXterm: Bool
     private(set) var selection = TerminalSessionSelection()
     private(set) var sessionInfo: [UUID: TerminalSessionInfo] = [:]
     @ObservationIgnored private var terminalViews: [UUID: DropReceivingTerminalView] = [:]
     @ObservationIgnored private var delegates: [UUID: TerminalSessionProcessDelegate] = [:]
+    @ObservationIgnored private var xtermSessions: [UUID: XtermSession] = [:]
     @ObservationIgnored private var nextOrdinal = 1
 
-    init(repoPath: String, shellPath: String? = nil) {
+    /// Shell context (cwd / foreground process) per xterm session. Only used on
+    /// the xterm path; the SwiftTerm path leaves this empty.
+    let contextObserver = TerminalContextObserver()
+
+    /// Set by the panel from the SwiftUI color scheme so new xterm sessions
+    /// start themed correctly.
+    @ObservationIgnored var preferredIsDark = false
+
+    init(repoPath: String, shellPath: String? = nil, useXterm: Bool = false) {
         self.repoPath = repoPath
         self.shellPath = shellPath ?? ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        self.useXterm = useXterm
     }
 
     var sessions: [TerminalSessionInfo] {
@@ -31,9 +46,17 @@ final class TerminalSessionStore {
     }
 
     var activeID: UUID? { selection.activeID }
+
+    /// SwiftTerm active render view (nil on the xterm path).
     var activeView: LocalProcessTerminalView? {
-        guard let id = activeID else { return nil }
+        guard !useXterm, let id = activeID else { return nil }
         return terminalViews[id]
+    }
+
+    /// xterm active session (nil on the SwiftTerm path).
+    var activeXtermSession: XtermSession? {
+        guard useXterm, let id = activeID else { return nil }
+        return xtermSessions[id]
     }
 
     func ensureSession() {
@@ -44,6 +67,35 @@ final class TerminalSessionStore {
         let id = UUID()
         let ordinal = nextOrdinal
         nextOrdinal += 1
+        let title = "Terminal " + String(ordinal)
+
+        if useXterm {
+            let session = XtermSession(
+                id: id,
+                repoPath: repoPath,
+                shellPath: shellPath,
+                isDark: preferredIsDark
+            )
+            session.onTitle = { [weak self] newTitle in
+                self?.sessionTitleChanged(id, title: newTitle)
+            }
+            session.onExit = { [weak self] in
+                self?.sessionExited(id)
+            }
+            session.currentCwd = { [weak self] in
+                let context = self?.contextObserver.context(for: id)
+                return context?.isTrustworthyForSuggestions == true ? context?.cwd : nil
+            }
+            session.onRequestClose = { [weak self] in
+                self?.closeSession(id)
+            }
+            xtermSessions[id] = session
+            sessionInfo[id] = TerminalSessionInfo(id: id, title: title)
+            selection.append(id)
+            contextObserver.track(id: id, transport: session.transport)
+            return
+        }
+
         let terminalView = DropReceivingTerminalView(frame: .zero)
         terminalView.wantsLayer = true
         terminalView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -61,7 +113,7 @@ final class TerminalSessionStore {
 
         terminalViews[id] = terminalView
         delegates[id] = delegate
-        sessionInfo[id] = TerminalSessionInfo(id: id, title: "Terminal " + String(ordinal))
+        sessionInfo[id] = TerminalSessionInfo(id: id, title: title)
         selection.append(id)
         terminalView.startProcess(
             executable: shellPath,
@@ -96,6 +148,15 @@ final class TerminalSessionStore {
 
     private func terminateSession(_ id: UUID) {
         sessionInfo.removeValue(forKey: id)
+
+        if useXterm {
+            contextObserver.untrack(id: id)
+            if let session = xtermSessions.removeValue(forKey: id) {
+                session.terminate()
+            }
+            return
+        }
+
         delegates.removeValue(forKey: id)
         if let view = terminalViews.removeValue(forKey: id) {
             view.removeFromSuperview()
