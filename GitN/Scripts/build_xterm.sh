@@ -18,7 +18,7 @@ fi
 if [ "$needs_build" -eq 1 ]; then
     echo "       Installing xterm dependencies..."
     cd "$XTERM_DIR"
-    npm install --prefer-offline --ignore-scripts
+    npm ci --prefer-offline --ignore-scripts
 
     echo "       Building xterm bundle..."
     npm run build

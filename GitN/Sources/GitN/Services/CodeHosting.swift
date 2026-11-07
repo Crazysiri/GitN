@@ -120,13 +120,16 @@ struct CodeReviewItem: Identifiable, Equatable {
 }
 
 actor GitHubService {
-    private static let tokenKey = "GitN.githubToken"
     private static let baseURL = "https://api.github.com"
 
     @MainActor
     static var githubToken: String {
-        get { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: tokenKey) }
+        HostedCredentialStore.shared.token(for: .github)
+    }
+
+    @MainActor
+    static func saveToken(_ value: String) throws {
+        try HostedCredentialStore.shared.save(value, for: .github)
     }
 
     @MainActor

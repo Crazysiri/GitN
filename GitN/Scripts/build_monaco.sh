@@ -19,7 +19,7 @@ fi
 if [ "$needs_build" -eq 1 ]; then
     echo "       Installing Monaco dependencies..."
     cd "$MONACO_DIR"
-    npm install --prefer-offline
+    npm ci --prefer-offline --ignore-scripts
 
     echo "       Building Monaco (this may take a minute)..."
     npm run build

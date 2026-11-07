@@ -463,7 +463,7 @@ private struct MermaidPanelAnchorView: NSViewRepresentable {
     }
 }
 
-private struct MermaidDiagramWebView: NSViewRepresentable {
+struct MermaidDiagramWebView: NSViewRepresentable {
     enum DisplayMode {
         case inline
         case detail
@@ -486,6 +486,7 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> MermaidContainerView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: "mermaid")
+        MarkdownWebSecurity.installBundledRuntime(on: controller)
         mermaidDebugLog("makeNSView mode=\(displayMode == .detail ? "detail" : "inline")")
 
         let configuration = WKWebViewConfiguration()
@@ -496,6 +497,7 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         webView.setValue(false, forKey: "drawsTransparentBackground")
         webView.isInspectable = false
+        webView.navigationDelegate = context.coordinator
         let containerView = MermaidContainerView(webView: webView)
         let scrollView = internalScrollView(for: webView)
         scrollView?.drawsBackground = false
@@ -545,7 +547,8 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
             source: source,
             isDark: isDark,
             displayMode: displayMode,
-            reportsContentHeight: reportsContentHeight
+            reportsContentHeight: reportsContentHeight,
+            scriptNonce: context.coordinator.scriptNonce
         )
 
         if context.coordinator.lastHTML != html {
@@ -618,7 +621,8 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        let scriptNonce = UUID().uuidString
         weak var containerView: MermaidContainerView?
         weak var webView: WKWebView?
         weak var scrollView: NSScrollView?
@@ -633,6 +637,14 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
             if let magnifyMonitor {
                 NSEvent.removeMonitor(magnifyMonitor)
             }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let allowed = MarkdownWebSecurity.allowsNavigation(to: navigationAction.request.url,
+                isInitialLoad: navigationAction.navigationType == .other,
+                resourceDirectory: GitNResources.markdownPreviewDirectoryURL)
+            decisionHandler(allowed ? .allow : .cancel)
         }
 
         func userContentController(
@@ -762,19 +774,20 @@ private struct MermaidDiagramWebView: NSViewRepresentable {
     }
 }
 
-private enum MermaidHTMLRenderer {
+enum MermaidHTMLRenderer {
     static func document(
         source: String,
         isDark: Bool,
         displayMode: MermaidDiagramWebView.DisplayMode,
-        reportsContentHeight: Bool
+        reportsContentHeight: Bool,
+        scriptNonce: String = UUID().uuidString
     ) -> String {
         let background = isDark ? "#1E2025" : "#F7F7F9"
         let cardBackground = isDark ? "#191B20" : "#F0F1F4"
         let foreground = isDark ? "rgba(255,255,255,0.86)" : "#111418"
         let secondary = isDark ? "rgba(255,255,255,0.58)" : "rgba(17,20,24,0.62)"
         let border = isDark ? "rgba(255,255,255,0.10)" : "rgba(17,20,24,0.12)"
-        let encodedSource = javaScriptStringLiteral(MermaidSourcePreprocessor.preparedSource(source))
+        let encodedSource = MarkdownWebSecurity.javaScriptLiteral(MermaidSourcePreprocessor.preparedSource(source))
         let theme = isDark ? "dark" : "neutral"
         let colorScheme = isDark ? "dark" : "light"
         let isInlineMode = displayMode == .inline
@@ -817,6 +830,7 @@ private enum MermaidHTMLRenderer {
         <html>
         <head>
           <meta charset="utf-8">
+          <meta http-equiv="Content-Security-Policy" content="\(MarkdownWebSecurity.contentSecurityPolicy(nonce: scriptNonce))">
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <style>
             :root {
@@ -949,7 +963,6 @@ private enum MermaidHTMLRenderer {
               font-size: 12px;
             }
           </style>
-          <script src="mermaid.min.js"></script>
         </head>
         <body>
           <p id="error"></p>
@@ -959,7 +972,7 @@ private enum MermaidHTMLRenderer {
             </div>
           </div>
           <pre id="fallback"></pre>
-          <script>
+          <script nonce="\(scriptNonce)">
             const source = \(encodedSource);
             \(reportHeightScript)
             const diagram = document.getElementById("diagram");
@@ -1069,7 +1082,7 @@ private enum MermaidHTMLRenderer {
               try {
                 mermaid.initialize({
                   startOnLoad: false,
-                  securityLevel: "loose",
+                  securityLevel: "strict",
                   theme: "\(theme)",
                   look: "classic",
                   flowchart: {
@@ -1141,15 +1154,6 @@ private enum MermaidHTMLRenderer {
         </body>
         </html>
         """
-    }
-
-    private static func javaScriptStringLiteral(_ string: String) -> String {
-        let data = try? JSONSerialization.data(withJSONObject: [string])
-        guard let data, let json = String(data: data, encoding: .utf8),
-              json.count >= 2 else {
-            return "\"\""
-        }
-        return String(json.dropFirst().dropLast())
     }
 }
 

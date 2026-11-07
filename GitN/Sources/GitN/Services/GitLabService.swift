@@ -7,7 +7,6 @@ actor GitLabService {
     // MARK: - Settings Keys
     
     private static let urlKey = "GitN.gitlabURL"
-    private static let tokenKey = "GitN.gitlabToken"
     private static let projectIDCacheKey = "GitN.gitlabProjectIDCache" // [cacheKey: projectID]
     
     // MARK: - Settings (thread-safe via MainActor for UI reads)
@@ -20,10 +19,14 @@ actor GitLabService {
     
     @MainActor
     static var gitlabToken: String {
-        get { UserDefaults.standard.string(forKey: tokenKey) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: tokenKey) }
+        HostedCredentialStore.shared.token(for: .gitlab)
     }
     
+    @MainActor
+    static func saveToken(_ value: String) throws {
+        try HostedCredentialStore.shared.save(value, for: .gitlab)
+    }
+
     @MainActor
     static var isConfigured: Bool {
         !gitlabURL.isEmpty && !gitlabToken.isEmpty

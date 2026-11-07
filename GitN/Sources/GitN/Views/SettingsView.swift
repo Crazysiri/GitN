@@ -298,6 +298,10 @@ struct SettingsView: View {
                 gitlabTokenSection
                 Divider()
                 githubTokenSection
+
+                if let error = HostedCredentialStore.shared.errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
             }
             .padding(20)
         }
@@ -372,8 +376,10 @@ struct SettingsView: View {
                     }
 
                 Button("Save") {
-                    GitLabService.gitlabToken = gitlabToken
-                    gitlabTokenHasChanges = false
+                    do {
+                        try GitLabService.saveToken(gitlabToken)
+                        gitlabTokenHasChanges = false
+                    } catch { /* Shared store displays the error below. */ }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -381,9 +387,11 @@ struct SettingsView: View {
 
                 if !GitLabService.gitlabToken.isEmpty {
                     Button(role: .destructive) {
-                        gitlabToken = ""
-                        GitLabService.gitlabToken = ""
-                        gitlabTokenHasChanges = false
+                        do {
+                            try GitLabService.saveToken("")
+                            gitlabToken = ""
+                            gitlabTokenHasChanges = false
+                        } catch { /* Preserve the current value on failure. */ }
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 10))
@@ -436,8 +444,10 @@ struct SettingsView: View {
                     }
 
                 Button("Save") {
-                    GitHubService.githubToken = githubToken
-                    githubTokenHasChanges = false
+                    do {
+                        try GitHubService.saveToken(githubToken)
+                        githubTokenHasChanges = false
+                    } catch { /* Shared store displays the error below. */ }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -445,9 +455,11 @@ struct SettingsView: View {
 
                 if !GitHubService.githubToken.isEmpty {
                     Button(role: .destructive) {
-                        githubToken = ""
-                        GitHubService.githubToken = ""
-                        githubTokenHasChanges = false
+                        do {
+                            try GitHubService.saveToken("")
+                            githubToken = ""
+                            githubTokenHasChanges = false
+                        } catch { /* Preserve the current value on failure. */ }
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 10))

@@ -2940,7 +2940,12 @@ final class RepoViewModel {
 
     // MARK: - SSH Host Key Prompt
     var showHostKeyPrompt = false
-    var hostKeyHost = ""
+    var hostKeyHost = "" {
+        didSet { hostKeyCandidate = nil; hostKeyRequestID = UUID(); isScanningHostKeys = false }
+    }
+    private(set) var hostKeyCandidate: SSHHostKeyService.Candidate?
+    private(set) var isScanningHostKeys = false
+    private var hostKeyRequestID = UUID()
     private var pendingOperationAfterHostKey: (() async -> Void)?
 
     // MARK: - Toast
@@ -4580,7 +4585,7 @@ final class RepoViewModel {
             showToast(title: "Pull Complete", detail: "\(currentBranch) updated", style: .success)
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -4612,7 +4617,7 @@ final class RepoViewModel {
             showToast(title: "Pull Complete", detail: "\(currentBranch) updated (force)", style: .success)
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -4652,7 +4657,7 @@ final class RepoViewModel {
             showToast(title: "Push Complete", detail: "\(currentBranch) pushed", style: .success)
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -4684,7 +4689,7 @@ final class RepoViewModel {
             showToast(title: "Push Complete", detail: "\(currentBranch) pushed (force)", style: .success)
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -4717,7 +4722,7 @@ final class RepoViewModel {
             showToast(title: "Push Complete", detail: "\(branch) pushed to \(remote)", style: .success)
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -5499,7 +5504,7 @@ final class RepoViewModel {
             await loadAll()
         } catch {
             let msg = error.localizedDescription
-            if msg.contains("Host key verification failed") || msg.contains("host key") {
+            if SSHHostKeyService.mayOfferTrust(error: msg) {
                 let host = extractHostFromError(msg)
                 hostKeyHost = host
                 pendingOperationAfterHostKey = { [weak self] in
@@ -5525,17 +5530,26 @@ final class RepoViewModel {
     }
 
     func acceptHostKey() async {
-        showHostKeyPrompt = false
+        guard showHostKeyPrompt, !isScanningHostKeys else { return }
         let host = hostKeyHost
-        guard !host.isEmpty, host != "unknown host" else { return }
+        let requestID = hostKeyRequestID
         do {
-            try await git.addHostToKnownHosts(host: host)
-            if let op = pendingOperationAfterHostKey {
-                pendingOperationAfterHostKey = nil
-                await op()
+            guard let candidate = hostKeyCandidate else {
+                isScanningHostKeys = true
+                defer { if hostKeyRequestID == requestID { isScanningHostKeys = false } }
+                let scanned = try await SSHHostKeyService.scan(host: host)
+                guard showHostKeyPrompt, hostKeyRequestID == requestID else { return }
+                hostKeyCandidate = scanned
+                return
             }
+            guard candidate.endpoint == (try SSHHostKeyService.Endpoint(host)) else { return }
+            try SSHHostKeyService.trust(candidate)
+            let operation = pendingOperationAfterHostKey
+            rejectHostKey()
+            await operation?()
         } catch {
-            showToast(title: "Failed to add host key", detail: error.localizedDescription, style: .error)
+            guard showHostKeyPrompt, hostKeyRequestID == requestID else { return }
+            showToast(title: "SSH Host Key", detail: error.localizedDescription, style: .error)
         }
     }
 

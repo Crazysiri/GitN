@@ -4169,54 +4169,6 @@ actor GitService {
         }
     }
 
-    // MARK: - SSH Host Key
-
-    func addHostToKnownHosts(host: String) async throws {
-        let sshDir = (NSHomeDirectory() as NSString).appendingPathComponent(".ssh")
-        let knownHostsPath = (sshDir as NSString).appendingPathComponent("known_hosts")
-
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: sshDir) {
-            try fm.createDirectory(atPath: sshDir, withIntermediateDirectories: true)
-        }
-
-        let data: Data = try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keyscan")
-                proc.arguments = ["-H", host]
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = outPipe
-                proc.standardError = errPipe
-
-                do {
-                    try proc.run()
-                    // Read pipes before waitUntilExit to prevent buffer deadlock
-                    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let _ = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-
-                    guard !outData.isEmpty else {
-                        continuation.resume(throwing: GitError.operationFailed("ssh-keyscan returned no keys for \(host)"))
-                        return
-                    }
-                    continuation.resume(returning: outData)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
-
-        if let fh = FileHandle(forWritingAtPath: knownHostsPath) {
-            fh.seekToEndOfFile()
-            fh.write(data)
-            fh.closeFile()
-        } else {
-            fm.createFile(atPath: knownHostsPath, contents: data)
-        }
-    }
-
     // MARK: - HEAD Commit Message (for amend)
 
     func headCommitMessage() throws -> String {

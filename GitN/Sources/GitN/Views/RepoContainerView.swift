@@ -744,28 +744,32 @@ struct RepoContainerView: View {
     // MARK: - Host Key Banner
 
     private var hostKeyBanner: some View {
-        HStack(spacing: 8) {
-            Text(verbatim: "The authenticity of host '\(viewModel.hostKeyHost)' can't be established. Answering yes will permanently add '\(viewModel.hostKeyHost)' to the list of known hosts. Are you sure you want to continue?")
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Verify SSH host: \(viewModel.hostKeyHost)")
                 .font(AppTypography.Chrome.toolbarBody)
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-
-            Spacer()
-
-            Button("Yes") {
-                Task { await viewModel.acceptHostKey() }
+            if let candidate = viewModel.hostKeyCandidate {
+                Text("Compare these fingerprints with the server administrator or a trusted source before trusting these keys.")
+                    .font(.caption)
+                ForEach(candidate.keys, id: \.fingerprint) { key in
+                    Text("\(key.algorithm)  \(key.fingerprint)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-
-            Button("No") {
-                viewModel.rejectHostKey()
+            HStack {
+                Button(viewModel.hostKeyCandidate == nil ? "Review Keys" : "Trust These Keys") {
+                    Task { await viewModel.acceptHostKey() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isScanningHostKeys)
+                if viewModel.isScanningHostKeys { ProgressView().controlSize(.small) }
+                Button("Cancel") { viewModel.rejectHostKey() }
+                    .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
             .controlSize(.small)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.controlBackgroundColor).opacity(0.7))
     }
 

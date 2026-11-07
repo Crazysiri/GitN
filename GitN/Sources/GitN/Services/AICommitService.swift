@@ -26,7 +26,7 @@ enum AICommitTool: String, CaseIterable, Identifiable {
             return [
                 "1. Ensure `codex` is available in your terminal PATH",
                 "2. Run `codex login` or complete the terminal authorization flow",
-                "3. GitN will call: codex exec \"<prompt>\"",
+                "3. GitN calls Codex with a read-only sandbox and sends the diff through stdin.",
             ]
         }
     }
@@ -140,70 +140,32 @@ enum AICommitService {
     }
 
     private static func isCodexLoggedIn() -> Bool {
-        let proc = Process()
-        if let found = findExecutablePath(for: .codex) {
-            proc.executableURL = URL(fileURLWithPath: found)
-            proc.arguments = ["login", "status"]
-        } else {
-            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            proc.arguments = ["-lc", "codex login status"]
+        // Kept for the existing synchronous status API; bound the helper off the UI thread.
+        let semaphore = DispatchSemaphore(value: 0)
+        let result = LoginStatusResult()
+        Task.detached {
+            result.set(await isCodexLoggedInAsync())
+            semaphore.signal()
         }
+        guard semaphore.wait(timeout: .now() + 12) == .success else { return false }
+        return result.get()
+    }
 
-        proc.environment = makeBaseEnvironment()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
-        proc.standardInput = FileHandle.nullDevice
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else { return false }
-            let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return codexStatusLooksAuthenticated(output: output, errorOutput: errOutput)
-        } catch {
-            return false
-        }
+    private final class LoginStatusResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set(_ value: Bool) { lock.lock(); self.value = value; lock.unlock() }
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     private static func isCodexLoggedInAsync() async -> Bool {
-        await withCheckedContinuation { continuation in
-            let proc = Process()
-            if let found = findExecutablePath(for: .codex) {
-                proc.executableURL = URL(fileURLWithPath: found)
-                proc.arguments = ["login", "status"]
-            } else {
-                proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                proc.arguments = ["-lc", "codex login status"]
-            }
-
-            proc.environment = makeBaseEnvironment()
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-            proc.standardInput = FileHandle.nullDevice
-
-            proc.terminationHandler = { process in
-                let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let isAuthenticated = process.terminationStatus == 0 &&
-                    codexStatusLooksAuthenticated(output: output, errorOutput: errOutput)
-                continuation.resume(returning: isAuthenticated)
-            }
-
-            do {
-                try proc.run()
-            } catch {
-                continuation.resume(returning: false)
-            }
-        }
+        guard let executable = findExecutablePath(for: .codex),
+              let output = try? await BoundedProcessRunner.run(executable: executable,
+                arguments: ["login", "status"], environment: makeBaseEnvironment(), timeout: 10),
+              output.status == 0 else { return false }
+        return codexStatusLooksAuthenticated(
+            output: String(decoding: output.stdout, as: UTF8.self),
+            errorOutput: String(decoding: output.stderr, as: UTF8.self))
     }
 
     private static func codexStatusLooksAuthenticated(output: String, errorOutput: String) -> Bool {
@@ -217,56 +179,40 @@ enum AICommitService {
             combined.contains("using chatgpt")
     }
 
+    static func generationArguments(directory: URL, output: URL) -> [String] {
+        ["--ask-for-approval", "never", "exec", "--ignore-user-config", "--ignore-rules",
+         "--disable", "shell_tool", "--disable", "multi_agent",
+         "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+         "--config", "web_search=\"disabled\"", "--cd", directory.path,
+         "--output-last-message", output.path, "-"]
+    }
+
     private static func runCodex(prompt: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let proc = Process()
-
-            if let found = findExecutablePath(for: .codex) {
-                proc.executableURL = URL(fileURLWithPath: found)
-                proc.arguments = ["exec", "--skip-git-repo-check", prompt]
-            } else {
-                proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-                proc.arguments = ["-lc", "codex exec --skip-git-repo-check \"$1\"", "--", prompt]
+        guard let executable = findExecutablePath(for: .codex) else { throw AICommitError.notFound(.codex) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("gitn-ai-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outputURL = directory.appendingPathComponent("message.txt")
+        let result = try await BoundedProcessRunner.run(executable: executable,
+            arguments: generationArguments(directory: directory, output: outputURL), directory: directory,
+            environment: makeBaseEnvironment(), input: Data(prompt.utf8), timeout: 120, outputLimit: 1_048_576)
+        if result.status != 0 {
+            // Do not echo CLI stderr: it can contain prompts, diffs or credentials.
+            let error = String(decoding: result.stderr, as: UTF8.self).lowercased()
+            if error.contains("login") || error.contains("not authenticated") || error.contains("unauthorized") {
+                throw AICommitError.authorizationRequired(.codex)
             }
-
-            proc.environment = makeBaseEnvironment()
-
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-            proc.standardInput = FileHandle.nullDevice
-
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: outData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-                if proc.terminationStatus != 0 {
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errMsg = String(data: errData, encoding: .utf8)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "codex failed"
-
-                    if errMsg.localizedCaseInsensitiveContains("login") ||
-                       errMsg.localizedCaseInsensitiveContains("authenticate") ||
-                       errMsg.localizedCaseInsensitiveContains("not logged in") ||
-                       errMsg.localizedCaseInsensitiveContains("authorization") {
-                        continuation.resume(throwing: AICommitError.authorizationRequired(.codex))
-                    } else {
-                        continuation.resume(throwing: AICommitError.agentFailed(.codex, errMsg))
-                    }
-                } else if output.isEmpty {
-                    continuation.resume(throwing: AICommitError.emptyResponse(.codex))
-                } else {
-                    continuation.resume(returning: output)
-                }
-            } catch {
-                continuation.resume(throwing: AICommitError.notFound(.codex))
-            }
+            throw AICommitError.agentFailed(.codex, "Generation failed (exit \(result.status)). Ensure your Codex CLI supports --ignore-user-config and --ignore-rules.")
         }
+        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 65_536 else {
+            throw AICommitError.agentFailed(.codex, "Invalid or oversized commit message.")
+        }
+        let output = try String(contentsOf: outputURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { throw AICommitError.emptyResponse(.codex) }
+        return output
     }
 
     private static func parseCommitMessage(_ raw: String) -> (title: String, description: String) {

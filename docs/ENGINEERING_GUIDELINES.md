@@ -54,6 +54,13 @@ Before coding, the author should be able to answer all of these using `docs/ENGI
 - What failure modes or edge cases must be covered?
 - Does the change require feature intake only, an RFC, an ADR, or both?
 
+## Security Boundaries
+
+- Store hosted-review tokens through `HostedCredentialStore` in macOS Keychain; never use preferences or log credentials. Surface persistence errors.
+- SSH scans discover keys only. Confirm fingerprints through an independent source and persist exactly the reviewed batch through `SSHHostKeyService`; do not silently replace existing trust.
+- Render untrusted Mermaid with strict sanitization and `MarkdownWebSecurity` resource/navigation policy. Keep bundled runtime injection separate from document content.
+- AI commit generation must explicitly restrict execution permissions and deliver document content through stdin. See [the security boundary ADR](adr/2026-11-07-security-boundaries.md).
+
 ## Testability Standard
 
 New code should maximize unit-testable surface area, not raw coverage numbers.
