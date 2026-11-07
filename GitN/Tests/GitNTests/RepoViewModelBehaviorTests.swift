@@ -578,6 +578,37 @@ final class RepoViewModelBehaviorTests: XCTestCase {
         XCTAssertNil(viewModel.conflictMergeFile)
     }
 
+    func testBinaryModifyDeleteConflictRequiresExplicitChoiceInViewModel() async throws {
+        let repo = try TemporaryGitRepository()
+        let path = "file.bin"
+        let url = repo.url.appendingPathComponent(path)
+        let modified = Data([0x00, 0xff, 0x01, 0x80])
+        try Data([0x00, 0x01]).write(to: url)
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.run(["rm", path])
+        try repo.commitAll(message: "delete")
+        try repo.run(["checkout", "main"])
+        try modified.write(to: url)
+        try repo.commitAll(message: "binary modify")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let viewModel = RepoViewModel(path: repo.path, name: "repo")
+        await viewModel.openConflictMerge(ConflictFile(path: path, conflictCount: 1))
+        XCTAssertTrue(viewModel.showConflictMergeView)
+        XCTAssertEqual(viewModel.conflictMissingSide, .incoming)
+        XCTAssertNotNil(viewModel.conflictFallbackMessage)
+
+        await viewModel.saveConflictResolution()
+        XCTAssertEqual(viewModel.toastMessage?.title, "Choose a Resolution")
+        XCTAssertFalse(try repo.run(["ls-files", "-u", "--", path]).isEmpty)
+
+        await viewModel.resolveDeleteModifyConflict(.modified)
+        XCTAssertFalse(viewModel.showConflictMergeView)
+        XCTAssertEqual(try Data(contentsOf: url), modified)
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", path]).isEmpty)
+    }
+
     func testOpenWorkingTreeFilePreviewUsesWorkingTreeContentEvenWhenCommitIsSelected() async throws {
         let repo = try TemporaryGitRepository()
         try repo.writeFile("Sources/App.swift", contents: "print(\"base\")\n")

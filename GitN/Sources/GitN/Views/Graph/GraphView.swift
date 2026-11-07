@@ -1519,9 +1519,63 @@ final class GraphHScrollStateNS {
 // 3. No SwiftUI view diffing or body recomputation
 
 final class CommitRowCellView: NSView {
-    var commit: CommitInfo?
+    var commit: CommitInfo? {
+        didSet {
+            if oldValue?.hash != commit?.hash {
+                selectionLayer.removeAllAnimations()
+                selectionLayer.opacity = 0
+                selectionIdentity = nil
+            }
+        }
+    }
+    private let selectionLayer = CALayer()
+    private var selectionIdentity: String?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        selectionLayer.opacity = 0
+        layer?.addSublayer(selectionLayer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        selectionLayer.frame = bounds
+        CATransaction.commit()
+    }
+
+    private func updateSelectionFeedback() {
+        let animate = selectionIdentity == commit?.hash && window != nil &&
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let opacity: Float = isSelectedRow ? 1 : 0
+        let previous = selectionLayer.presentation()?.opacity ?? selectionLayer.opacity
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        selectionLayer.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.2).cgColor
+        selectionLayer.opacity = opacity
+        CATransaction.commit()
+        if animate {
+            let transition = CABasicAnimation(keyPath: "opacity")
+            transition.fromValue = previous
+            transition.toValue = opacity
+            transition.duration = 0.14
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            selectionLayer.add(transition, forKey: "selection")
+        }
+        selectionIdentity = commit?.hash
+        needsDisplay = true
+    }
+
     var graphEntry: CommitGraphEntry?
-    var isSelectedRow = false
+    var isSelectedRow = false {
+        didSet {
+            if oldValue != isSelectedRow || selectionIdentity != commit?.hash { updateSelectionFeedback() }
+        }
+    }
     var currentBranch = ""
     var isInConflict = false
     var isRecoveredRow = false
@@ -1548,10 +1602,15 @@ final class CommitRowCellView: NSView {
             return
         }
 
+        // Resolve the dynamic selection color in AppKit's current drawing appearance.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        selectionLayer.backgroundColor = NSColor.selectedContentBackgroundColor.withAlphaComponent(0.2).cgColor
+        CATransaction.commit()
+
         // Background
         if isSelectedRow {
-            NSColor.selectedContentBackgroundColor.withAlphaComponent(0.2).setFill()
-            bounds.fill()
+            // Selection fill is a separate backing layer so geometry/text never animate.
         } else if isRecoveredRow {
             NSColor.systemOrange.withAlphaComponent(0.035).setFill()
             bounds.fill()

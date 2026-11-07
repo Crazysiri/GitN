@@ -378,7 +378,7 @@ struct ConflictFile: Identifiable, Equatable {
     var conflictCount: Int
 }
 
-struct ConflictSides: Equatable {
+struct ConflictSides: Equatable, Sendable {
     let oursLabel: String
     let theirsLabel: String
     let baseLines: [String]
@@ -387,6 +387,9 @@ struct ConflictSides: Equatable {
     let theirsLines: [String]
     let mergedText: String
     let markers: [ConflictRegion]
+    var usesStructuralModel: Bool = false
+    var missingCurrentStage: Bool = false
+    var missingIncomingStage: Bool = false
 }
 
 /// Identity of the conflict inputs and working-tree file presented to the user.
@@ -396,9 +399,16 @@ struct ConflictFileSnapshot: Equatable, Sendable {
     let currentOID: String?
     let incomingOID: String?
     let workingTreeSHA256: String?
+    let workingTreeIsSymlink: Bool
 }
 
-struct ConflictRegion: Identifiable, Equatable {
+enum DeleteModifyResolution: Equatable, Sendable {
+    case modified
+    case deleted
+    case ancestor
+}
+
+struct ConflictRegion: Identifiable, Equatable, Sendable {
     let id: Int
     let oursRange: Range<Int>
     let theirsRange: Range<Int>

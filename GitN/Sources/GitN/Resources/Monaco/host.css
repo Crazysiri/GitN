@@ -324,3 +324,73 @@ body.theme-dark .gitn-deletion-content-block {
 body.theme-dark .gitn-deletion-line-content {
   color: rgba(255, 244, 244, 0.92);
 }
+
+.gitn-merge-shell { --merge-left: 50%; --merge-top: 52%; display: grid; grid-template-columns: minmax(0, var(--merge-left)) 5px minmax(0, 1fr); grid-template-rows: minmax(0, var(--merge-top)) 5px minmax(0, 1fr); width: 100%; height: 100%; color: var(--vscode-editor-foreground, #bbb); background: var(--vscode-editor-background, #1e1e1e); font: 12px -apple-system, sans-serif; }
+body.theme-dark .gitn-merge-shell { color: #d4d4d4; background: #1e1e1e; }
+body.theme-light .gitn-merge-shell { color: #222; background: #fff; }
+.gitn-merge-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.gitn-merge-ours { grid-area: 1 / 1; } .gitn-merge-theirs { grid-area: 1 / 3; } .gitn-merge-output { grid-area: 3 / 1 / 4 / 4; }
+.gitn-merge-panel > header { height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 9px; padding: 0 10px; background: color-mix(in srgb, currentColor 7%, transparent); }
+.gitn-merge-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitn-merge-editor { flex: 1; min-height: 0; }
+/* Monaco paints view-lines after view-zones; raise only the merge zone controls. */
+.gitn-merge-editor .view-zones { z-index: 1; pointer-events: none; }
+.gitn-merge-editor .gitn-merge-block-toggle { pointer-events: auto; }
+.gitn-merge-button { color: inherit; font: inherit; padding: 2px 7px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 4px; background: transparent; cursor: pointer; }
+.gitn-merge-button:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+.gitn-merge-button[aria-pressed="true"] { background: #2680c144; }
+.gitn-merge-block-toggle { display: inline-flex; align-items: center; gap: 5px; }
+.gitn-merge-block-header { box-sizing: border-box; height: 25px; padding: 2px 8px; background: color-mix(in srgb, currentColor 8%, transparent); font: 11px -apple-system, sans-serif; }
+.gitn-merge-line.ours { background: #2680c11f; } .gitn-merge-line.theirs { background: #e3962524; }
+.gitn-merge-line.selected { background: #33a66b30; }
+.gitn-merge-glyph { cursor: pointer; }
+.gitn-merge-glyph::after, .gitn-merge-block-toggle::before {
+  box-sizing: border-box; width: 14px; height: 14px; border: 1.5px solid #68727d;
+  border-radius: 3px; background: rgba(255, 255, 255, 0.82);
+  content: ''; color: white; font: 700 11px/11px -apple-system, sans-serif; text-align: center;
+}
+body.theme-dark .gitn-merge-glyph::after, body.theme-dark .gitn-merge-block-toggle::before {
+  border-color: #a2aab4; background: #242830;
+}
+.gitn-merge-glyph::after { display: block; margin: 2px auto 0; }
+.gitn-merge-block-toggle::before { display: inline-flex; align-items: center; justify-content: center; }
+.gitn-merge-glyph:hover::after, .gitn-merge-block-toggle:hover::before { border-color: #38a66b; }
+.gitn-merge-glyph.selected::after, .gitn-merge-block-toggle[aria-pressed="true"]::before,
+body.theme-dark .gitn-merge-glyph.selected::after, body.theme-dark .gitn-merge-block-toggle[aria-pressed="true"]::before {
+  content: '✓'; background: #288b58; border-color: #288b58;
+}
+.gitn-merge-origin.ours { border-left: 3px solid #2680c1; } .gitn-merge-origin.theirs { border-left: 3px solid #e39625; }
+.gitn-merge-origin.ancestor { border-left: 3px solid #d65a55; } .gitn-merge-origin.manual { border-left: 3px solid #38a66b; }
+.gitn-merge-splitter { background: color-mix(in srgb, currentColor 15%, transparent); touch-action: none; }
+.gitn-merge-splitter:hover { background: #2680c1; }
+.gitn-merge-splitter.vertical { grid-area: 1 / 2; cursor: col-resize; } .gitn-merge-splitter.horizontal { grid-area: 2 / 1 / 3 / 4; cursor: row-resize; }
+
+/* Native Hunk/Split editors keep Git patch actions distinct from display hunks. */
+.gitn-native-diff { color: var(--vscode-editor-foreground, #222); background: var(--vscode-editor-background, #fff); height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.gitn-native-editor { flex: 1; min-height: 0; }
+.gitn-diff-side-labels { padding: 6px 12px; font-size: 11px; opacity: 0.7; border-bottom: 1px solid var(--vscode-widget-border, #8884); }
+.gitn-native-actions { display: flex; gap: 8px; overflow-x: auto; padding: 4px 8px; flex-shrink: 0; }
+.gitn-native-actions[hidden] { display: none; }
+.gitn-native-hunk { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.gitn-native-hunk > button { background: transparent; color: inherit; border: 0; cursor: pointer; font: inherit; font-size: 11px; padding: 4px; border-radius: 4px; }
+.gitn-native-hunk > button:hover { background: #8883; }
+.gitn-native-hunk .gitn-hunk-actions { position: static; opacity: 1; visibility: visible; pointer-events: auto; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .gitn-hunk-actions { transition: none; }
+}
+
+body.theme-dark .gitn-native-diff { color: #d4d4d4; background: #1e1e1e; }
+
+/* Hunk view is a sequence of cropped patch sections, not fold widgets. */
+.gitn-hunk-header {
+  display: flex; align-items: center; gap: 8px; box-sizing: border-box;
+  height: 38px; padding: 7px 12px; overflow: hidden;
+  border-top: 8px solid color-mix(in srgb, currentColor 4%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 6%, transparent);
+  color: inherit; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.gitn-hunk-range { flex: 1; white-space: nowrap; }
+.gitn-hunk-header-control { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.gitn-hunk-header .gitn-hunk-actions { position: static; opacity: 1; visibility: visible; pointer-events: auto; transform: none; }
+.gitn-hunk-header .gitn-hunk-action { height: 20px; width: 24px; }

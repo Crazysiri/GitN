@@ -58,3 +58,7 @@ None; the user explicitly declined legacy token migration.
 - git diff --check and build-script shell syntax passed.
 - The security intake passed the repository harness validator with its changed-file input scoped to this task. The full-worktree harness remains blocked by the pre-existing docs/intake/2026-11-07-compact-monaco-three-way.md, which lacks five required fields. That unrelated in-progress document was preserved.
 - No real tokens, remote SSH trust or AI generation were exercised. macOS Keychain authorization and the SSH banner require native manual acceptance in a rebuilt app. The installed CLI help and official docs establish the selected flags; unsupported versions fail closed.
+
+## Follow-up Submission Validation
+
+The remaining editor/document work was subsequently authorized for submission. Required fields in its existing intake records were completed; the full-worktree harness now passes. The conflict-editor native WebKit smoke also passed with zero script errors. The earlier harness blocker above records the state during the security-only change.

@@ -183,6 +183,37 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Markdown Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>net.daringfireball.markdown</string></array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>net.daringfireball.markdown</string>
+            <key>UTTypeDescription</key>
+            <string>Markdown Document</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.plain-text</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>md</string><string>markdown</string><string>mdown</string></array>
+                <key>public.mime-type</key>
+                <string>text/markdown</string>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

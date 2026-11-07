@@ -43,12 +43,20 @@ struct MonacoDiffPayload: Encodable, Equatable, Identifiable {
     var id: String { path }
 }
 
+enum DiffDisplayMode: String, CaseIterable {
+    case inline, hunk, split
+
+    var title: String { rawValue.capitalized }
+}
+
 struct MonacoHostPayload: Encodable, Equatable {
     let mode: String
     let isDark: Bool
     let preview: MonacoPreviewPayload?
     let items: [MonacoDiffPayload]
     var sourceID: String = ""
+    var conflict: MonacoConflictPayload? = nil
+    var diffDisplay: String = "inline"
 }
 
 struct MonacoLocalEdit: Equatable {
@@ -72,7 +80,8 @@ enum MonacoLocalEditEchoPolicy {
             )
             return next == MonacoHostPayload(
                 mode: previous.mode, isDark: previous.isDark,
-                preview: editedPreview, items: previous.items, sourceID: previous.sourceID
+                preview: editedPreview, items: previous.items, sourceID: previous.sourceID,
+                diffDisplay: previous.diffDisplay
             )
         case "diff":
             guard previous.items.filter({ $0.path == edit.path }).count == 1 else { return false }
@@ -88,7 +97,8 @@ enum MonacoLocalEditEchoPolicy {
             }
             return next == MonacoHostPayload(
                 mode: previous.mode, isDark: previous.isDark,
-                preview: previous.preview, items: editedItems, sourceID: previous.sourceID
+                preview: previous.preview, items: editedItems, sourceID: previous.sourceID,
+                diffDisplay: previous.diffDisplay
             )
         default:
             return false
@@ -116,6 +126,8 @@ struct MonacoInspectorView: NSViewRepresentable {
     let onHunkAction: ((String, Int, [Int], String) -> Void)?
     let onSaveRequest: (() -> Void)?
     var sourceIdentity: String = ""
+    var conflict: MonacoConflictPayload? = nil
+    var diffDisplay: String = "inline"
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -158,13 +170,22 @@ struct MonacoInspectorView: NSViewRepresentable {
         context.coordinator.flushPayloadIfReady()
     }
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "monaco")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "monacoWorker", contentWorld: .page)
+        webView.navigationDelegate = nil
+        webView.loadHTMLString("", baseURL: nil)
+    }
+
     private var hostPayload: MonacoHostPayload {
         MonacoHostPayload(
-            mode: mode.rawValue,
+            mode: conflict == nil ? mode.rawValue : "conflict",
             isDark: isDark,
             preview: preview,
             items: items,
-            sourceID: sourceIdentity
+            sourceID: sourceIdentity,
+            conflict: conflict,
+            diffDisplay: diffDisplay
         )
     }
 }
@@ -190,6 +211,8 @@ extension MonacoInspectorView {
 
         private var isNavigationFinished = false
         private var isHostReady = false
+        private var acknowledgedConflictEdit = 0
+        private var conflictSourceID = ""
         private var pendingLocalEdit: MonacoLocalEdit?
         private var lastHostPayload: MonacoHostPayload?
         private var lastPayloadData: Data?
@@ -234,11 +257,19 @@ extension MonacoInspectorView {
                   let event = body["event"] as? String
             else { return }
 
+            if pendingPayload?.mode == "conflict", event != "ready", event != "error", event != "debug" {
+                guard let source = body["sourceID"] as? String, source == pendingPayload?.sourceID else { return }
+                if conflictSourceID != source { conflictSourceID = source; acknowledgedConflictEdit = 0 }
+            }
+
             if event == "contentChanged",
                let path = body["path"] as? String,
                let encodedContent = body["content"] as? String,
                let data = Data(base64Encoded: encodedContent),
                let content = String(data: data, encoding: .utf8) {
+                if pendingPayload?.mode == "conflict", let revision = body["editRevision"] as? Int {
+                    acknowledgedConflictEdit = max(acknowledgedConflictEdit, revision)
+                }
                 pendingLocalEdit = MonacoLocalEdit(path: path, content: content)
                 onContentChange(path, content)
                 return
@@ -311,9 +342,13 @@ extension MonacoInspectorView {
             guard isNavigationFinished,
                   isHostReady,
                   let webView,
-                  let payload = pendingPayload,
-                  let data = try? JSONEncoder().encode(payload)
+                  var payload = pendingPayload
             else { return }
+            if payload.conflict != nil {
+                if conflictSourceID != payload.sourceID { conflictSourceID = payload.sourceID; acknowledgedConflictEdit = 0 }
+                payload.conflict?.acknowledgedEdit = acknowledgedConflictEdit
+            }
+            guard let data = try? JSONEncoder().encode(payload) else { return }
 
             let mode = payload.mode
             let previewPath = payload.preview?.path ?? ""

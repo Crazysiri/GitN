@@ -128,6 +128,8 @@ struct ConflictEditorDocument: Equatable, Sendable {
     var outputText: String
     var outputLineOrigins: [OutputLineOrigin]
     var blocks: [ConflictEditorBlock]
+    private var structural: StructuralMergeDocument?
+    private let initialStructural: StructuralMergeDocument?
 
     init(sides: ConflictSides) {
         oursLabel = sides.oursLabel
@@ -188,10 +190,13 @@ struct ConflictEditorDocument: Equatable, Sendable {
         self.initialOutputLineOrigins = initialOutputLineOrigins
         self.initialBlocks = initialBlocks
         blocks = initialBlocks
+        initialStructural = sides.usesStructuralModel ? StructuralMergeDocument(sides: sides) : nil
+        structural = initialStructural
     }
 
     var outputLines: [String] {
-        outputText.components(separatedBy: "\n")
+        if structural != nil && outputText.isEmpty { return [] }
+        return outputText.components(separatedBy: "\n")
     }
 
     var hasOutputChanges: Bool {
@@ -202,7 +207,39 @@ struct ConflictEditorDocument: Equatable, Sendable {
         blocks.filter { !$0.isResolved }.map(\.id)
     }
 
+    func selectedLineIndices(blockID: Int, side: ConflictEditorBlock.SelectionSide) -> [Int] {
+        structural?.selectedLines(blockID: blockID, side: side) ?? []
+    }
+
+    mutating func toggleLine(blockID: Int, side: ConflictEditorBlock.SelectionSide, line: Int) {
+        guard structural != nil else { return }
+        structural?.toggle(blockID: blockID, side: side, line: line)
+        synchronizeStructuralState()
+    }
+
+    private mutating func synchronizeStructuralState() {
+        guard let structural else { return }
+        outputText = structural.text
+        outputLineOrigins = structural.lines.map(\.origin)
+        var cursor = 0
+        for chunk in structural.chunks {
+            let range = cursor..<(cursor + chunk.displayed.count)
+            cursor = range.upperBound
+            guard let id = chunk.blockID, let index = indexOfBlock(id: id) else { continue }
+            blocks[index].controlledBlock = .init(lineRange: range, lastGeneratedText: chunk.displayed.map(\.text).joined(separator: "\n"))
+            blocks[index].mode = .attached
+            blocks[index].contentState = chunk.intent == .manual ? .manual : .auto
+            blocks[index].resolutionIntent = chunk.intent
+            blocks[index].selectedSources = .init(current: structural.allSelected(blockID: id, side: .current),
+                                                   incoming: structural.allSelected(blockID: id, side: .incoming))
+            blocks[index].anchor.preferredLine = range.lowerBound
+        }
+    }
+
     mutating func keepAncestor(blockID: Int) {
+        if structural != nil {
+            structural?.keepAncestor(blockID: blockID); synchronizeStructuralState(); return
+        }
         guard let index = indexOfBlock(id: blockID), blocks[index].mode == .attached else { return }
         blocks[index].selectedSources = .init(current: false, incoming: false)
         blocks[index].selectionOrder = []
@@ -211,12 +248,14 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func resetAll() {
+        structural = initialStructural
         outputText = initialOutputText
         outputLineOrigins = initialOutputLineOrigins
         blocks = initialBlocks
     }
 
     mutating func toggleCurrent(blockID: Int) {
+        if structural != nil { structural?.toggle(blockID: blockID, side: .current); synchronizeStructuralState(); return }
         guard let index = indexOfBlock(id: blockID) else { return }
         blocks[index].selectedSources.current.toggle()
         updateSelectionOrder(for: index, toggled: .current, isSelected: blocks[index].selectedSources.current)
@@ -224,6 +263,7 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func toggleIncoming(blockID: Int) {
+        if structural != nil { structural?.toggle(blockID: blockID, side: .incoming); synchronizeStructuralState(); return }
         guard let index = indexOfBlock(id: blockID) else { return }
         blocks[index].selectedSources.incoming.toggle()
         updateSelectionOrder(for: index, toggled: .incoming, isSelected: blocks[index].selectedSources.incoming)
@@ -231,12 +271,26 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func setBothOrder(_ order: ConflictEditorBlock.BothOrder, for blockID: Int) {
+        if structural != nil {
+            let sides: [ConflictEditorBlock.SelectionSide] = order == .currentFirst ? [.current, .incoming] : [.incoming, .current]
+            for side in sides {
+                if structural?.allSelected(blockID: blockID, side: side) == true { structural?.toggle(blockID: blockID, side: side) }
+                structural?.toggle(blockID: blockID, side: side)
+            }
+            synchronizeStructuralState(); return
+        }
         guard let index = indexOfBlock(id: blockID) else { return }
         blocks[index].selectionOrder = order == .currentFirst ? [.current, .incoming] : [.incoming, .current]
         applySelection(to: index)
     }
 
     mutating func setAllCurrentSelected(_ isSelected: Bool) {
+        if structural != nil {
+            for id in blocks.map(\.id) where structural?.allSelected(blockID: id, side: .current) != isSelected {
+                structural?.toggle(blockID: id, side: .current)
+            }
+            synchronizeStructuralState(); return
+        }
         let ids = blocks.map(\.id)
         for id in ids {
             guard let index = indexOfBlock(id: id),
@@ -248,6 +302,12 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func setAllIncomingSelected(_ isSelected: Bool) {
+        if structural != nil {
+            for id in blocks.map(\.id) where structural?.allSelected(blockID: id, side: .incoming) != isSelected {
+                structural?.toggle(blockID: id, side: .incoming)
+            }
+            synchronizeStructuralState(); return
+        }
         let ids = blocks.map(\.id)
         for id in ids {
             guard let index = indexOfBlock(id: id),
@@ -259,6 +319,7 @@ struct ConflictEditorDocument: Equatable, Sendable {
     }
 
     mutating func updateOutputText(_ newText: String) {
+        if structural != nil { structural?.updateText(newText); synchronizeStructuralState(); return }
         guard newText != outputText else { return }
         let oldLines = outputLines
         let newLines = newText.components(separatedBy: "\n")

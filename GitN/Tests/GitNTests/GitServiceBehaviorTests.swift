@@ -16,10 +16,38 @@ final class GitServiceBehaviorTests: XCTestCase {
         return repo
     }
 
+    private func makeDeleteModifyConflictRepository(deleteOnTopic: Bool) throws -> TemporaryGitRepository {
+        let repo = try TemporaryGitRepository()
+        try repo.writeFile("conflict.txt", contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        if deleteOnTopic {
+            try repo.run(["rm", "conflict.txt"])
+        } else {
+            try repo.writeFile("conflict.txt", contents: "modified\n")
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                ofItemAtPath: repo.url.appendingPathComponent("conflict.txt").path)
+        }
+        try repo.commitAll(message: "topic change")
+        try repo.run(["checkout", "main"])
+        if deleteOnTopic {
+            try repo.writeFile("conflict.txt", contents: "modified\n")
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                ofItemAtPath: repo.url.appendingPathComponent("conflict.txt").path)
+        } else {
+            try repo.run(["rm", "conflict.txt"])
+        }
+        try repo.commitAll(message: "main change")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+        return repo
+    }
+
     func testConflictSaveRejectsExternalWorktreeEdit() async throws {
         let repo = try makeTextConflictRepository()
         let service = GitService(repoPath: repo.path)
         let session = try await service.loadConflictSession(path: "conflict.txt")
+        XCTAssertTrue(session.sides.usesStructuralModel)
+        XCTAssertEqual(session.sides.markers.first?.baseRange, 0..<1)
         try repo.writeFile("conflict.txt", contents: "external edit\n")
 
         do {
@@ -109,6 +137,116 @@ final class GitServiceBehaviorTests: XCTestCase {
 
         XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "deleted.txt"]).isEmpty)
         XCTAssertTrue(try repo.run(["ls-files", "--", "deleted.txt"]).isEmpty)
+    }
+
+    func testDeleteModifyChoiceStagesDeletionRatherThanEmptyFile() async throws {
+        let repo = try makeDeleteModifyConflictRepository(deleteOnTopic: false)
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        XCTAssertNil(session.snapshot.currentOID)
+        XCTAssertNotNil(session.snapshot.incomingOID)
+        XCTAssertTrue(session.sides.missingCurrentStage)
+        XCTAssertFalse(session.sides.missingIncomingStage)
+
+        try await service.resolveDeleteModifyConflict(path: "conflict.txt", choice: .deleted,
+            expectedSnapshot: session.snapshot)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.url.appendingPathComponent("conflict.txt").path))
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+        XCTAssertTrue(try repo.run(["ls-files", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testDeleteModifyChoiceKeepsModifiedStageAndExecutableMode() async throws {
+        let repo = try makeDeleteModifyConflictRepository(deleteOnTopic: true)
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        XCTAssertNotNil(session.snapshot.currentOID)
+        XCTAssertNil(session.snapshot.incomingOID)
+        XCTAssertFalse(session.sides.missingCurrentStage)
+        XCTAssertTrue(session.sides.missingIncomingStage)
+
+        try await service.resolveDeleteModifyConflict(path: "conflict.txt", choice: .modified,
+            expectedSnapshot: session.snapshot)
+
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "modified\n")
+        XCTAssertTrue(try repo.run(["ls-files", "-s", "--", "conflict.txt"]).hasPrefix("100755 "))
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testDeleteModifyChoiceCanKeepAncestorAndRejectsStaleSnapshot() async throws {
+        let repo = try makeDeleteModifyConflictRepository(deleteOnTopic: true)
+        let service = GitService(repoPath: repo.path)
+        let session = try await service.loadConflictSession(path: "conflict.txt")
+        try repo.writeFile("conflict.txt", contents: "external\n")
+        do {
+            try await service.resolveDeleteModifyConflict(path: "conflict.txt", choice: .ancestor,
+                expectedSnapshot: session.snapshot)
+            XCTFail("A changed worktree must block the choice")
+        } catch ConflictSaveError.sourceChanged {}
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "external\n")
+
+        let fresh = try await service.loadConflictSession(path: "conflict.txt")
+        try await service.resolveDeleteModifyConflict(path: "conflict.txt", choice: .ancestor,
+            expectedSnapshot: fresh.snapshot)
+        XCTAssertEqual(try repo.readFile("conflict.txt"), "base\n")
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", "conflict.txt"]).isEmpty)
+    }
+
+    func testBinaryDeleteModifyConflictCanKeepModifiedBlobWithoutTextDecoding() async throws {
+        let repo = try TemporaryGitRepository()
+        let path = "conflict.bin"
+        let fileURL = repo.url.appendingPathComponent(path)
+        let modified = Data([0x00, 0xff, 0x01, 0x80])
+        try Data([0x00, 0x01]).write(to: fileURL)
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.run(["rm", path])
+        try repo.commitAll(message: "delete")
+        try repo.run(["checkout", "main"])
+        try modified.write(to: fileURL)
+        try repo.commitAll(message: "binary modify")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let service = GitService(repoPath: repo.path)
+        do {
+            _ = try await service.loadConflictSession(path: path)
+            XCTFail("Binary conflict should require the non-text resolution path")
+        } catch {}
+        let snapshot = try await service.conflictFileSnapshot(path: path)
+        XCTAssertNotNil(snapshot.ancestorOID)
+        XCTAssertNotNil(snapshot.currentOID)
+        XCTAssertNil(snapshot.incomingOID)
+
+        try await service.resolveDeleteModifyConflict(path: path, choice: .modified,
+            expectedSnapshot: snapshot)
+        XCTAssertEqual(try Data(contentsOf: fileURL), modified)
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", path]).isEmpty)
+    }
+
+    func testDeleteModifyChoicePreservesBrokenSymbolicLink() async throws {
+        let repo = try TemporaryGitRepository()
+        let path = "link"
+        let url = repo.url.appendingPathComponent(path)
+        try repo.writeFile(path, contents: "base\n")
+        try repo.commitAll(message: "base")
+        try repo.run(["checkout", "-b", "topic"])
+        try repo.run(["rm", path])
+        try repo.commitAll(message: "delete")
+        try repo.run(["checkout", "main"])
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createSymbolicLink(atPath: url.path, withDestinationPath: "missing-target")
+        try repo.commitAll(message: "symlink modify")
+        XCTAssertThrowsError(try repo.run(["merge", "topic"]))
+
+        let service = GitService(repoPath: repo.path)
+        let snapshot = try await service.conflictFileSnapshot(path: path)
+        XCTAssertTrue(snapshot.workingTreeIsSymlink)
+        try await service.resolveDeleteModifyConflict(path: path, choice: .modified,
+            expectedSnapshot: snapshot)
+
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: url.path), "missing-target")
+        XCTAssertTrue(try repo.run(["ls-files", "-s", "--", path]).hasPrefix("120000 "))
+        XCTAssertTrue(try repo.run(["ls-files", "-u", "--", path]).isEmpty)
     }
 
     func testLinkedWorktreeReadsMergeAndRebaseMetadata() async throws {

@@ -1312,30 +1312,13 @@ struct SidebarView: View {
                     let name = URL(fileURLWithPath: worktree.path).lastPathComponent
                     appModel.openRepository(path: worktree.path, name: name)
                 } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: worktree.isMain ? "house" : "square.stack.3d.up")
-                            .foregroundStyle(.secondary)
-                            .frame(width: 16)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 4) {
-                                Text(worktree.branchName ?? (worktree.isDetached ? "Detached HEAD" : "Worktree"))
-                                    .font(AppTypography.Sidebar.row)
-                                    .lineLimit(1)
-                                if isCurrent { Text("Current").foregroundStyle(.secondary) }
-                                if worktree.isLocked { Image(systemName: "lock.fill") }
-                                if worktree.isPrunable { Image(systemName: "exclamationmark.triangle") }
-                            }
-                            Text(worktree.path)
-                                .font(AppTypography.Sidebar.rowMeta)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
+                    SidebarBranchRow(
+                        name: worktree.branchName ?? (worktree.isDetached ? "Detached HEAD" : "Worktree"),
+                        isCurrent: isCurrent,
+                        icon: worktree.isMain ? "house" : "square.stack.3d.up",
+                        badge: worktree.isPrunable ? "!" : (worktree.isLocked ? "Locked" : nil),
+                        badgeColor: worktree.isPrunable ? .orange : .secondary
+                    )
                 }
                 .buttonStyle(.plain)
                 .disabled(worktree.isPrunable || worktree.isBare)
@@ -2009,6 +1992,7 @@ struct SidebarBranchRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isHovering)
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
@@ -2150,6 +2134,7 @@ struct SidebarMRRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isHovering)
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
@@ -2197,6 +2182,7 @@ struct SidebarTagRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isHovering)
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }
@@ -2504,6 +2490,8 @@ private struct SidebarFileRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(backgroundColor)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isHovering)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isSelected)
                 .padding(.horizontal, 4)
         )
         .contentShape(Rectangle())
@@ -2543,6 +2531,7 @@ struct SidebarStashRow: View {
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(isHovering ? Color(.selectedContentBackgroundColor).opacity(0.15) : Color.clear)
+                .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: isHovering)
                 .padding(.horizontal, 4)
         )
         .onHover { isHovering = $0 }

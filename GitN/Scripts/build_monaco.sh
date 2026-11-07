@@ -33,6 +33,7 @@ echo "       (Preserving host.js, host.css, index.html)"
 # Sync all generated files; explicitly exclude hand-crafted files
 rsync -a --delete \
     --exclude='host.js' \
+    --exclude='conflict-host.js' \
     --exclude='host.css' \
     --exclude='index.html' \
     "${DIST_DIR}/" "${OUT_DIR}/"

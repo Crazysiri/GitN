@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const { buildUnifiedDiffModel } = require('../src/diff-model.cjs');
 
 function host(debug = false) {
-  const editors = [], models = [], requests = [], messages = [], nodes = [];
+  const editors = [], models = [], requests = [], messages = [], nodes = [], diffs = [];
   class Node {
     constructor() {
       this.style = { setProperty() {} };
@@ -16,7 +16,8 @@ function host(debug = false) {
       nodes.push(this);
     }
     appendChild(node) { this.children.push(node); }
-    addEventListener() {}
+    setAttribute(name, value) { this[name] = value; }
+    addEventListener(name, callback) { (this.listeners ||= {})[name] = callback; }
     set innerHTML(value) { this.children = []; }
   }
   const root = new Node();
@@ -41,6 +42,7 @@ function host(debug = false) {
   function create(node, options) {
     const editor = {
       model: options.model, options, change: () => {}, disposed: false, applied: 0,
+      revealLineInCenter(line) { this.revealedLine = line; },
       getModel() { return this.model; }, getValue() { return this.model.value; },
       setModel(model) { this.model = model; this.change(); },
       onDidChangeModelContent(callback) { this.change = callback; },
@@ -61,13 +63,19 @@ function host(debug = false) {
       getTopForLineNumber: (line) => (line - 1) * 20,
       getScrollHeight: () => 600,
       deltaDecorations(old, next) { this.applied += next.length; return next.map((_, i) => '' + i); },
-      changeViewZones(callback) { callback({ addZone: () => 'zone', removeZone() {} }); },
+      zones: new Map(), hiddenAreas: [],
+      changeViewZones(callback) {
+        callback({ addZone: zone => { const id = 'zone-' + this.zones.size; this.zones.set(id, zone); return id; },
+                   removeZone: id => this.zones.delete(id) });
+      },
+      setHiddenAreas(ranges) { this.hiddenAreas = ranges; },
       dispose() { this.disposed = true; },
     };
     editors.push(editor);
     return editor;
   }
   const window = {
+    gitnHunkLayout: require('../src/hunk-layout.cjs'),
     gitnMonacoDebug: debug,
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     btoa: (value) => Buffer.from(value, 'binary').toString('base64'),
@@ -75,8 +83,23 @@ function host(debug = false) {
     webkit: { messageHandlers: { monaco: { postMessage: (value) => messages.push(value) } } },
     monaco: {
       Uri: { parse: (value) => ({ scheme: 'gitn', path: value, toString: () => value }) },
-      KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1 }, Range: class {},
+      KeyMod: { CtrlCmd: 1 }, KeyCode: { KeyS: 1 }, Range: class { constructor(startLineNumber, startColumn, endLineNumber, endColumn) { Object.assign(this, {startLineNumber, startColumn, endLineNumber, endColumn}); } },
       editor: {
+        createDiffEditor(node, options) {
+          const original = create(node, {}), modified = create(node, {});
+          const diff = {
+            options, disposed: false, changes: null,
+            onDidUpdateDiff(callback) { this.onUpdate = callback; },
+            getLineChanges() { return this.changes; },
+            updateDiff(changes) { this.changes = changes; this.onUpdate?.(); },
+            setModel(pair) { original.model = pair.original; modified.model = pair.modified; },
+            getOriginalEditor: () => original, getModifiedEditor: () => modified,
+            goToDiff(direction) { this.direction = direction; },
+            dispose() { this.disposed = true; original.dispose(); modified.dispose(); },
+          };
+          diffs.push(diff);
+          return diff;
+        },
         create, createModel, getModels: () => models.filter((m) => !m.disposed),
         getModel: (uri) => models.find((m) => !m.disposed && m.uri.toString() === uri.toString()),
         setTheme() {}, OverviewRulerLane: { Left: 1, Right: 2 },
@@ -93,7 +116,7 @@ function host(debug = false) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../Sources/GitN/Resources/Monaco/host.js'), 'utf8'),
     { window, document, console, setTimeout, clearTimeout, Map, Set });
   const load = (payload) => window.gitnMonaco.loadPayload(Buffer.from(JSON.stringify(payload)).toString('base64'));
-  return { load, editors, models, requests, messages, nodes };
+  return { load, editors, models, requests, messages, nodes, diffs, navigate: window.gitnMonaco.navigateDiff };
 }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 const preview = (name, content) => ({ mode: 'preview', preview: { path: name, content, language: 'plaintext', isEditable: true } });
@@ -268,4 +291,120 @@ test('diff renders a red deletion zone and the removed text', async () => {
   assert.ok(h.nodes.some((node) => node.className === 'gitn-deletion-line-content' &&
     node.textContent === 'removed red line'));
   assert.ok(h.nodes.some((node) => node.className === 'gitn-diff-status' && node.hidden));
+});
+
+
+test('Hunk disables native folding, Split stays side by side and navigation uses native diff', () => {
+  const h = host();
+  h.load({ ...diff('a.txt', 'new'), diffDisplay: 'hunk' });
+  assert.equal(h.diffs.length, 1);
+  assert.equal(h.diffs[0].options.renderSideBySide, false);
+  assert.equal(h.diffs[0].options.hideUnchangedRegions.enabled, false);
+  assert.equal(h.diffs[0].options.hideUnchangedRegions.contextLineCount, 3);
+  h.load({ ...diff('a.txt', 'new'), diffDisplay: 'split' });
+  assert.equal(h.diffs[0].disposed, true);
+  assert.equal(h.diffs[1].options.renderSideBySide, true);
+  assert.equal(h.diffs[1].options.useInlineViewWhenSpaceIsLimited, false);
+  assert.equal(h.diffs[1].options.originalEditable, false);
+  assert.equal(h.diffs[1].options.hideUnchangedRegions.enabled, false);
+  assert.equal(h.requests.length, 0, 'no duplicate custom diff calculation');
+  h.navigate('next');
+  assert.equal(h.diffs[1].direction, 'next');
+  h.navigate('prev');
+  assert.equal(h.diffs[1].direction, 'previous');
+  assert.deepEqual(h.messages.filter(m => m.event === 'error'), []);
+});
+
+test('native edit reports modified content, metadata preserves editor and layouts retain text', () => {
+  const h = host();
+  const payload = { ...diff('edit.txt', 'new'), diffDisplay: 'split' };
+  h.load(payload);
+  const native = h.diffs[0];
+  native.getModifiedEditor().getModel().setValue('unsaved');
+  native.getModifiedEditor().change();
+  const message = h.messages.find(m => m.event === 'contentChanged');
+  assert.equal(message.path, 'edit.txt');
+  assert.equal(Buffer.from(message.content, 'base64').toString(), 'unsaved');
+  payload.items[0].modifiedText = 'unsaved';
+  h.load(payload);
+  assert.equal(h.diffs.length, 1);
+  h.load({ ...payload, diffDisplay: 'hunk' });
+  assert.equal(h.diffs[1].getModifiedEditor().getValue(), 'unsaved');
+  h.load({ ...payload, diffDisplay: 'inline' });
+  assert.equal(h.diffs[1].disposed, true);
+  assert.equal(h.editors.at(-1).getValue(), 'unsaved');
+  assert.deepEqual(h.messages.filter(m => m.event === 'error'), []);
+});
+
+test('native Git actions use patch hunk identities and disappear immediately on edit', () => {
+  const h = host();
+  const payload = { ...diff('delete.txt', ''), diffDisplay: 'split' };
+  payload.items[0].primaryHunkAction = 'stage';
+  payload.items[0].showsDiscardAction = true;
+  payload.items[0].hunkControls = [{
+    hunkIndex: 7, lineIDs: [11], anchorKind: 'deletion', oldStartLine: 2,
+  }];
+  h.load(payload);
+  const button = h.nodes.find(n => n.className === 'gitn-hunk-action gitn-hunk-action-stage');
+  assert.ok(button);
+  button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+  const action = h.messages.find(m => m.event === 'hunkAction');
+  assert.equal(action.hunkIndex, 7);
+  assert.equal(action.path, 'delete.txt');
+  assert.deepEqual(Array.from(action.lineIDs), []);
+  const bar = h.nodes.find(n => n.className === 'gitn-native-actions');
+  h.diffs[0].getModifiedEditor().getModel().setValue('edited');
+  h.diffs[0].getModifiedEditor().change();
+  assert.equal(bar.hidden, true);
+  assert.deepEqual(h.messages.filter(m => m.event === 'error'), []);
+});
+
+test('native deleted-only and added-only models survive preview transitions and invalid preference', () => {
+  const h = host();
+  for (const [oldText, newText] of [['deleted', ''], ['', 'added'], ['', '']]) {
+    const payload = diff('file.txt', newText);
+    payload.items[0].originalText = oldText;
+    h.load({ ...payload, diffDisplay: 'hunk' });
+    const native = h.diffs.at(-1);
+    assert.equal(native.getOriginalEditor().getValue(), oldText);
+    assert.equal(native.getModifiedEditor().getValue(), newText);
+    h.load(preview('file.txt', 'preview'));
+    assert.equal(native.disposed, true);
+  }
+  h.load({ ...diff('file.txt', 'inline'), diffDisplay: 'invalid' });
+  assert.equal(h.editors.at(-1).getValue(), 'inline');
+  assert.deepEqual(h.messages.filter(m => m.event === 'error'), []);
+});
+
+
+test('Hunk renders separate range headers with cropped gaps and per-block Git actions', () => {
+  const h = host();
+  const lines = Array.from({length: 60}, (_, i) => 'line ' + (i + 1)).join('\n');
+  const payload = { ...diff('sections.txt', lines.replace('line 10', 'new 10').replace('line 40', 'new 40')), diffDisplay: 'hunk' };
+  payload.items[0].originalText = lines;
+  payload.items[0].primaryHunkAction = 'stage';
+  payload.items[0].hunkControls = [
+    {hunkIndex: 3, newStartLine: 10, newEndLine: 10, anchorKind: 'addition'},
+    {hunkIndex: 8, newStartLine: 40, newEndLine: 40, anchorKind: 'addition'},
+  ];
+  h.load(payload);
+  const native = h.diffs[0];
+  native.updateDiff([10, 40].map(line => ({ originalStartLineNumber: line,
+    originalEndLineNumber: line, modifiedStartLineNumber: line, modifiedEndLineNumber: line })));
+  const editor = native.getModifiedEditor();
+  const headers = [...editor.zones.values()].map(zone => zone.domNode);
+  assert.equal(headers.length, 2);
+  assert.equal(headers[0].children[0].textContent, '@@ -7,7 +7,7 @@');
+  assert.equal(headers[1].children[0].textContent, '@@ -37,7 +37,7 @@');
+  assert.deepEqual(editor.hiddenAreas.map(r => [r.startLineNumber, r.endLineNumber]), [[1,6],[14,36],[44,60]]);
+  const stages = headers.map(header => header.children[1].children[0].children[0]);
+  stages[1].listeners.click({preventDefault() {}, stopPropagation() {}});
+  assert.equal(h.messages.find(m => m.event === 'hunkAction').hunkIndex, 8);
+  assert.equal(h.nodes.find(n => n.className === 'gitn-native-actions').hidden, true);
+  payload.items[0].hunkControls = [];
+  h.load(payload);
+  assert.equal(h.diffs.length, 1, 'metadata preserves the editor');
+  assert.equal(editor.zones.size, 2, 'metadata replaces headers without accumulating zones');
+  assert.ok([...editor.zones.values()].every(zone => zone.domNode.children.length === 1));
+  assert.deepEqual(h.messages.filter(m => m.event === 'error'), []);
 });

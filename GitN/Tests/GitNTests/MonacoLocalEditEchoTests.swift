@@ -64,4 +64,19 @@ final class MonacoLocalEditEchoTests: XCTestCase {
             diff("b.md", "after"), after: edit, comparedTo: diff("a.md", "before")
         ))
     }
+    func testLayoutSwitchIsNotSwallowedAsLocalEditEcho() {
+        let edit = MonacoLocalEdit(path: "a.md", content: "after")
+        for mode in DiffDisplayMode.allCases {
+            var previous = diff("a.md", "before")
+            previous.diffDisplay = mode.rawValue
+            var next = diff("a.md", "after")
+            next.diffDisplay = mode.rawValue
+            XCTAssertTrue(MonacoLocalEditEchoPolicy.isEcho(next, after: edit, comparedTo: previous))
+            for other in DiffDisplayMode.allCases where other != mode {
+                next.diffDisplay = other.rawValue
+                XCTAssertFalse(MonacoLocalEditEchoPolicy.isEcho(next, after: edit, comparedTo: previous))
+            }
+        }
+    }
+
 }

@@ -482,6 +482,16 @@ extension GitService {
         }
     }
 
+    func resolveDeleteModifyConflict(
+        path: String, choice: DeleteModifyResolution, expectedSnapshot: ConflictFileSnapshot
+    ) async throws {
+        try await withRepositoryMutation {
+            try await self.resolveDeleteModifyConflictUnqueued(
+                path: path, choice: choice, expectedSnapshot: expectedSnapshot
+            )
+        }
+    }
+
     func commitAmend(message: String) async throws {
         try await withRepositoryMutation {
             try await self.commitAmendUnqueued(message: message)

@@ -2896,6 +2896,11 @@ final class RepoViewModel {
     var conflictMergeLoadingPath: String?
     var conflictSides: ConflictSides?
     private var conflictFileSnapshot: ConflictFileSnapshot?
+    var conflictMissingSide: ConflictEditorBlock.SelectionSide? {
+        guard let snapshot = conflictFileSnapshot, snapshot.ancestorOID != nil,
+              (snapshot.currentOID == nil) != (snapshot.incomingOID == nil) else { return nil }
+        return snapshot.currentOID == nil ? .current : .incoming
+    }
     private var conflictMergeGeneration = 0
     var conflictEditorDocument: ConflictEditorDocument?
     var conflictFallbackMessage: String?
@@ -5844,7 +5849,10 @@ final class RepoViewModel {
             showConflictMergeView = true
         } catch {
             guard generation == conflictMergeGeneration else { return }
-            conflictFileSnapshot = nil
+            // Text decoding can fail for binary conflicts. Keep the index snapshot so
+            // modify/delete choices remain available without treating deletion as an empty file.
+            conflictFileSnapshot = try? await git.conflictFileSnapshot(path: file.path)
+            guard generation == conflictMergeGeneration else { return }
             conflictSides = nil
             conflictEditorDocument = nil
             conflictOutputText = ""
@@ -5963,6 +5971,13 @@ final class RepoViewModel {
         }
     }
 
+    func toggleConflictLine(_ blockID: Int, side: ConflictEditorBlock.SelectionSide, line: Int) {
+        guard var document = conflictEditorDocument else { return }
+        registerConflictUndo(actionName: "Select Conflict Line")
+        document.toggleLine(blockID: blockID, side: side, line: line)
+        updateConflictDocument(document)
+    }
+
     func toggleOurs(_ regionIndex: Int) {
         guard var document = conflictEditorDocument else { return }
         registerConflictUndo(actionName: "Select Current")
@@ -6054,6 +6069,12 @@ final class RepoViewModel {
 
     func saveConflictResolution() async {
         guard let file = conflictMergeFile else { return }
+        guard conflictMissingSide == nil else {
+            showToast(title: "Choose a Resolution",
+                detail: "Keep the modified file, delete it, or keep the ancestor before resolving.",
+                style: .warning)
+            return
+        }
         if conflictEditorDocument == nil {
             do {
                 try await git.markConflictResolved(path: file.path)
@@ -6097,20 +6118,7 @@ final class RepoViewModel {
             try await git.saveConflictResolution(
                 path: file.path, content: content, expectedSnapshot: snapshot
             )
-            showToast(title: "Saved", detail: "\(file.path) marked as resolved", style: .success)
-            showConflictMergeView = false
-            conflictMergeLoadingPath = nil
-            conflictMergeFile = nil
-            conflictFileSnapshot = nil
-            conflictSides = nil
-            conflictEditorDocument = nil
-            conflictFallbackMessage = nil
-            conflictOutputText = ""
-            conflictOutputLines = []
-            conflictOutputExternalRevision += 1
-            conflictUndoManager.removeAllActions()
-            await refreshRebaseState()
-            await refreshStatusAndGraph()
+            await finishSavedConflictResolution(path: file.path)
         } catch ConflictSaveError.stageFailed(let detail, let retrySnapshot) {
             conflictFileSnapshot = retrySnapshot
             showToast(
@@ -6123,6 +6131,51 @@ final class RepoViewModel {
         } catch {
             showToast(title: "Save Failed", detail: error.localizedDescription, style: .error)
         }
+    }
+
+    func resolveDeleteModifyConflict(_ choice: DeleteModifyResolution) async {
+        guard let file = conflictMergeFile, conflictMissingSide != nil else { return }
+        guard let snapshot = conflictFileSnapshot else {
+            showToast(title: "Conflict Changed", detail: "Reopen the conflict before resolving it.", style: .warning)
+            return
+        }
+        let generation = conflictMergeGeneration
+        do {
+            try await git.resolveDeleteModifyConflict(path: file.path, choice: choice,
+                expectedSnapshot: snapshot)
+            if generation == conflictMergeGeneration && conflictMergeFile?.path == file.path {
+                await finishSavedConflictResolution(path: file.path)
+            } else {
+                await refreshRebaseState()
+                await refreshStatusAndGraph()
+            }
+        } catch ConflictSaveError.stageFailed(let detail, let retrySnapshot) {
+            conflictFileSnapshot = retrySnapshot
+            showToast(title: "Choice Applied, Stage Failed",
+                detail: retrySnapshot == nil ? "\(detail) Reopen the conflict before retrying." : "\(detail) Remove the Git index lock and retry.",
+                style: .error)
+        } catch ConflictSaveError.sourceChanged {
+            showToast(title: "Conflict Changed", detail: "The file or index changed. Reopen it before resolving.", style: .warning)
+        } catch {
+            showToast(title: "Resolve Failed", detail: error.localizedDescription, style: .error)
+        }
+    }
+
+    private func finishSavedConflictResolution(path: String) async {
+        showToast(title: "Saved", detail: "\(path) marked as resolved", style: .success)
+        showConflictMergeView = false
+        conflictMergeLoadingPath = nil
+        conflictMergeFile = nil
+        conflictFileSnapshot = nil
+        conflictSides = nil
+        conflictEditorDocument = nil
+        conflictFallbackMessage = nil
+        conflictOutputText = ""
+        conflictOutputLines = []
+        conflictOutputExternalRevision += 1
+        conflictUndoManager.removeAllActions()
+        await refreshRebaseState()
+        await refreshStatusAndGraph()
     }
 
     // MARK: - Toast

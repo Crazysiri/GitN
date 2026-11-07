@@ -15,6 +15,7 @@ final class Smoke: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScr
         controller.addScriptMessageHandler(self, contentWorld: .page, name: "monacoWorker")
         controller.addUserScript(WKUserScript(
             source: """
+              window.addEventListener('unhandledrejection', e => window.webkit.messageHandlers.smokeDebug.postMessage({rejection: String(e.reason), stack: e.reason?.stack || ''}));
               window.addEventListener('error', e => window.webkit.messageHandlers.smokeDebug.postMessage({message: e.message || '', filename: e.filename || '', line: e.lineno || 0, column: e.colno || 0, target: e.target?.tagName || '', source: e.target?.src || ''}), true);
               const NativeWorker = window.Worker;
               window.Worker = function(url, options) {
@@ -126,6 +127,49 @@ final class Smoke: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScr
           load(diff('latest.txt', lines + 'two\n'));
           check(diffEditor.getModel() === model, 'metadata preserves model');
           check(window.monaco.editor.getModels().length <= 8, 'bounded model cache');
+
+          // Native Hunk/Split use the production DiffEditor and native editor worker.
+          const waitForNative = editor => Promise.race([
+            editor.waitForDiff(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('native diff timeout')), 10000))
+          ]);
+          const nativePayload = {...smallDiff(numberBefore, numberAfter), diffDisplay: 'split'};
+          nativePayload.items[0].isEditable = true;
+          load(nativePayload);
+          let native = window.monaco.editor.getDiffEditors().at(-1);
+          await waitForNative(native);
+          check(native.getLineChanges()?.length === 1, 'native split diff computed');
+          check(native.getOriginalEditor().getOption(window.monaco.editor.EditorOption.readOnly), 'original is read-only');
+          native.getModifiedEditor().getModel().setValue(numberAfter + 'unsaved\n');
+          nativePayload.items[0].modifiedText = numberAfter + 'unsaved\n';
+          const previousModified = native.getModifiedEditor();
+          load({...nativePayload, diffDisplay: 'hunk'});
+          // Monaco 0.52's diff registry also lists historical disposed wrappers.
+          check(!window.monaco.editor.getEditors().includes(previousModified), 'previous native editor disposed');
+          native = window.monaco.editor.getDiffEditors().at(-1);
+          await waitForNative(native);
+          check(native.getModifiedEditor().getValue().endsWith('unsaved\n'), 'native unsaved text preserved');
+          check(document.querySelector('.gitn-diff-side-labels').textContent === '2 hunks', 'independent hunk sections');
+          check(document.querySelectorAll('.gitn-hunk-header').length === 2, 'one range header per hunk');
+          check([...document.querySelectorAll('.gitn-hunk-range')].every(n => n.textContent.startsWith('@@ -')), 'patch range headers');
+          check(!document.querySelector('.diff-unchanged-lines'), 'no built-in fold widgets');
+          window.gitnMonaco.navigateDiff('next');
+          load({...smallDiff('all removed\n', ''), diffDisplay: 'split'});
+          await waitForNative(window.monaco.editor.getDiffEditors().at(-1));
+          check(window.monaco.editor.getDiffEditors().at(-1).getLineChanges()?.length === 1, 'native deleted-only diff');
+          load({...smallDiff('all removed\n', ''), diffDisplay: 'hunk'});
+          await waitForNative(window.monaco.editor.getDiffEditors().at(-1));
+          check(document.querySelectorAll('.gitn-hunk-header').length === 1, 'deleted-only hunk header');
+          check(window.monaco.editor.getDiffEditors().at(-1).getOriginalEditor().getValue() === 'all removed\n', 'deleted-only text retained');
+          load({...smallDiff('same\n', 'same\n'), diffDisplay: 'hunk'});
+          await waitForNative(window.monaco.editor.getDiffEditors().at(-1));
+          check(document.querySelector('.gitn-diff-side-labels').textContent === 'No changes', 'empty diff has no sections');
+          check(document.querySelector('.gitn-native-editor').hidden, 'unchanged document stays out of hunk view');
+          const deletedModified = window.monaco.editor.getDiffEditors().at(-1).getModifiedEditor();
+          load(smallDiff('one\ntwo\n', 'one\nnew\n'));
+          await waitForDiff();
+          check(!window.monaco.editor.getEditors().includes(deletedModified), 'inline disposes native editor');
+
           const measurements = [];
           for (const count of [1000, 10000, 50000]) {
             const text = Array.from({length: count}, (_, i) => 'const line' + i + ' = ' + i + ';').join('\n') + '\n';
@@ -191,6 +235,7 @@ final class Smoke: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKScr
         }
     }
 }
+setbuf(stdout, nil)
 _ = NSApplication.shared
 let smoke = Smoke()
 smoke.start()

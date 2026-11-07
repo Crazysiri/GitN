@@ -301,10 +301,11 @@ private enum MDHighlighter {
 
 private struct MarkdownDocumentView: View {
     let text: String
+    var baseURL: URL? = nil
 
     var body: some View {
         ScrollView {
-            Markdown(text)
+            Markdown(text, baseURL: baseURL)
                 .markdownTheme(.gitNPreview)
                 .textSelection(.enabled)
                 .padding(24)
@@ -1519,6 +1520,7 @@ struct MarkdownInspectorContentView: View {
     @Environment(ThemeManager.self) private var theme
     @Binding var text: String
     let isEditable: Bool
+    let baseURL: URL?
 
     @State private var isEditing = false
     /// User opted in to rich rendering for the current file via "Render Anyway" (R2.3/R2.4).
@@ -1533,10 +1535,11 @@ struct MarkdownInspectorContentView: View {
     /// Seconds the watchdog waits for the first frame before falling back to plain (R2.6).
     private static let richRenderTimeout: Duration = .seconds(5)
 
-    init(filePath: String, text: Binding<String>, isEditable: Bool) {
+    init(filePath: String, text: Binding<String>, isEditable: Bool, baseURL: URL? = nil) {
         self.filePath = filePath
         self._text = text
         self.isEditable = isEditable
+        self.baseURL = baseURL
     }
 
     var body: some View {
@@ -1550,7 +1553,7 @@ struct MarkdownInspectorContentView: View {
                 // R2.5: rich rendering still flows through MarkdownDocumentView, preserving
                 // zoom/link/anchor behavior. The watchdog (R2.6) only reverts to plain when
                 // the first frame never arrives.
-                MarkdownDocumentView(text: text)
+                MarkdownDocumentView(text: text, baseURL: baseURL)
                     // Fresh identity per file so onAppear fires on every switch (rich→rich included).
                     .id(filePath)
                     .onAppear { renderedPath = filePath }

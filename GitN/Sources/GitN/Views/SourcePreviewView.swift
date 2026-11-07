@@ -81,6 +81,7 @@ struct FileInspectorOverlayView: View {
         return "\(viewModel.repoPath)|\(viewModel.fileInspectorContext)|\(revision)"
     }
 
+    @AppStorage("diffDisplayMode") private var diffDisplayMode: DiffDisplayMode = .inline
     @State private var targetLine: Int?
     @State private var showCloseConfirmation = false
     @State private var pendingModeSwitch: RepoViewModel.FileInspectorMode?
@@ -257,7 +258,17 @@ struct FileInspectorOverlayView: View {
                     .foregroundStyle(.orange)
             }
 
-            if viewModel.fileInspectorMode == .diff && showsModePicker {
+            if viewModel.fileInspectorMode == .diff && showsModePicker &&
+                viewModel.fileInspectorVisualContent == nil && !viewModel.isFileTooLarge {
+                Picker("Diff layout", selection: $diffDisplayMode) {
+                    ForEach(DiffDisplayMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(width: 180)
                 HStack(spacing: 0) {
                     Button {
                         commandBridge.navigateDiff(next: false)
@@ -384,7 +395,8 @@ struct FileInspectorOverlayView: View {
             onSaveRequest: {
                 Task { _ = await viewModel.saveFileInspector() }
             },
-            sourceIdentity: inspectorSourceIdentity
+            sourceIdentity: inspectorSourceIdentity,
+            diffDisplay: diffDisplayMode.rawValue
         )
     }
 

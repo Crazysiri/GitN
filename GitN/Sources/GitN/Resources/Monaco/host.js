@@ -4,6 +4,13 @@
     currentMode: null,
     isReady: false,
     diffEditor: null,
+    nativeDiff: null,
+    diffDisplay: "inline",
+    nativeActions: null,
+    nativeItem: null,
+    nativeHunkZones: { original: [], modified: [] },
+    nativeLabels: null,
+    nativeNode: null,
     diffModel: null,
     diffDecorations: [],
     diffZoneIds: [],
@@ -126,6 +133,16 @@
       } catch (_) {}
       state.zoneResizeObserver = null;
     }
+    if (state.nativeDiff) {
+      state.nativeDiff.dispose();
+      state.nativeDiff = null;
+      state.editors = [];
+    }
+    state.nativeActions = null;
+    state.nativeItem = null;
+    state.nativeLabels = null;
+    state.nativeNode = null;
+    state.nativeHunkZones = { original: [], modified: [] };
     for (const editor of state.editors) {
       try {
         editor.dispose();
@@ -462,6 +479,155 @@
       event.preventDefault();
       event.stopPropagation();
     }, { passive: false });
+  }
+
+  function renderNativeActions(item) {
+    state.nativeItem = item;
+    const bar = state.nativeActions;
+    if (!bar) return;
+    bar.innerHTML = "";
+    state.diffModel = buildHunkControlMaps(item);
+    if (state.diffDisplay === "hunk") {
+      bar.hidden = true;
+      renderHunkSections();
+      return;
+    }
+    const seen = new Set();
+    for (const control of state.diffModel.hunkControls) {
+      if (seen.has(control.hunkIndex)) continue;
+      seen.add(control.hunkIndex);
+      const group = document.createElement("div");
+      group.className = "gitn-native-hunk";
+      const jump = document.createElement("button");
+      jump.textContent = `Hunk ${control.hunkIndex + 1}`;
+      jump.addEventListener("click", () => {
+        const editor = control.anchorKind === "deletion"
+          ? state.nativeDiff.getOriginalEditor() : state.diffEditor;
+        editor.revealLineInCenter(Math.max(1, control.anchorKind === "deletion"
+          ? (control.oldStartLine || control.oldLineNumber || 1)
+          : (control.newStartLine || control.newLineNumber || 1)));
+      });
+      group.appendChild(jump);
+      // These are whole Git patch hunk actions, independent of Monaco's diff indices.
+      group.appendChild(createHunkActions(Object.assign({}, control, { lineIDs: [] })));
+      bar.appendChild(group);
+    }
+    bar.hidden = seen.size === 0;
+  }
+
+  function renderHunkSections() {
+    const diff = state.nativeDiff;
+    if (!diff || state.diffDisplay !== "hunk") return;
+    const changes = diff.getLineChanges();
+    if (!changes) return;
+    const original = diff.getOriginalEditor();
+    const modified = diff.getModifiedEditor();
+    const { buildHunkLayout, controlsForHunk, hunkHeader } = window.gitnHunkLayout;
+    const layout = buildHunkLayout(changes, original.getModel().getLineCount(), modified.getModel().getLineCount());
+    state.nativeLabels.textContent = layout.hunks.length === 0 ? "No changes" : `${layout.hunks.length} hunk${layout.hunks.length === 1 ? "" : "s"}`;
+    state.nativeNode.hidden = layout.hunks.length === 0;
+    state.nativeNode.style.visibility = "visible";
+    for (const [side, editor] of [["original", original], ["modified", modified]]) {
+      editor.changeViewZones(accessor => {
+        for (const id of state.nativeHunkZones[side]) accessor.removeZone(id);
+        state.nativeHunkZones[side] = [];
+        for (const hunk of layout.hunks) {
+          const header = document.createElement("div");
+          header.className = side === "modified" ? "gitn-hunk-header" : "gitn-hunk-header-spacer";
+          if (side === "modified") {
+            const range = document.createElement("span");
+            range.className = "gitn-hunk-range";
+            range.textContent = hunkHeader(hunk);
+            header.appendChild(range);
+            const controls = controlsForHunk(hunk, state.diffModel.hunkControls);
+            for (const control of controls) {
+              const group = document.createElement("div");
+              group.className = "gitn-hunk-header-control";
+              if (controls.length > 1) {
+                const label = document.createElement("span");
+                label.textContent = `Git hunk ${control.hunkIndex + 1}`;
+                group.appendChild(label);
+              }
+              group.appendChild(createHunkActions(Object.assign({}, control, { lineIDs: [] })));
+              header.appendChild(group);
+            }
+          }
+          state.nativeHunkZones[side].push(accessor.addZone({
+            afterLineNumber: hunk[side].start - 1,
+            heightInPx: 38,
+            showInHiddenAreas: true,
+            suppressMouseDown: true,
+            domNode: header,
+          }));
+        }
+      });
+      if (layout.hunks.length > 0) {
+        editor.setHiddenAreas(layout.hidden[side].map(range => new window.monaco.Range(range.start, 1, range.end, 1)));
+      }
+    }
+  }
+
+  function renderNativeDiff(item) {
+    reportDebug("renderNativeDiffStart", { path: item.path, display: state.diffDisplay });
+    const root = resetRoot("diff");
+    const shell = document.createElement("div");
+    shell.className = "gitn-native-diff";
+    root.appendChild(shell);
+    const labels = document.createElement("div");
+    labels.className = "gitn-diff-side-labels";
+    labels.textContent = state.diffDisplay === "split" ? "Original (left) · Modified (right)" : "Calculating hunks…";
+    state.nativeLabels = labels;
+    shell.appendChild(labels);
+    const actions = document.createElement("div");
+    actions.className = "gitn-native-actions";
+    shell.appendChild(actions);
+    state.nativeActions = actions;
+    const node = document.createElement("div");
+    node.className = "gitn-native-editor";
+    if (state.diffDisplay === "hunk") node.style.visibility = "hidden";
+    state.nativeNode = node;
+    shell.appendChild(node);
+    const original = createModel(item.originalText || "", item.language, item.path, "original");
+    const modified = createModel(item.modifiedText || "", item.language, item.path, "modified");
+    reportDebug("renderNativeDiffModelsReady");
+    const diff = window.monaco.editor.createDiffEditor(node, Object.assign(editorOptions(item.isEditable), {
+      renderSideBySide: state.diffDisplay === "split",
+      useInlineViewWhenSpaceIsLimited: false,
+      originalEditable: false,
+      renderOverviewRuler: true,
+      renderIndicators: true,
+      diffCodeLens: false,
+      maxComputationTime: 2000,
+      hideUnchangedRegions: {
+        enabled: false, contextLineCount: 3,
+        minimumLineCount: 1, revealLineCount: 10,
+      },
+    }));
+    state.nativeDiff = diff;
+    reportDebug("renderNativeDiffEditorReady");
+    diff.setModel({ original, modified });
+    reportDebug("renderNativeDiffModelAssigned");
+    const editor = diff.getModifiedEditor();
+    state.diffEditor = editor;
+    state.editors = [diff.getOriginalEditor(), editor];
+    state.currentEditorPath = item.path;
+    state.currentEditorSourceID = state.currentSourceID;
+    state.currentDiffIdentity = buildDiffIdentity(item);
+    diff.onDidUpdateDiff(() => {
+      if (state.nativeDiff === diff) renderHunkSections();
+    });
+    renderNativeActions(item);
+    reportDebug("renderNativeDiffActionsReady");
+    restorePendingViewState(editor, "diff", item.path);
+    editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS, () => postMessage("saveRequest"));
+    editor.onDidChangeModelContent(() => {
+      const content = editor.getValue();
+      state.currentDiffIdentity = buildDiffIdentity(Object.assign({}, item, { modifiedText: content }));
+      renderNativeActions(Object.assign({}, item, { hunkControls: [] }));
+      postMessage("contentChanged", { path: item.path, content: encodeBase64(content) });
+    });
+    trimModelCache();
+    reportDebug("renderNativeDiffReady");
   }
 
   function renderSingleDiff(item) {
@@ -1439,6 +1605,12 @@
         const payload = JSON.parse(decodeBase64(encodedPayload));
         state.currentSourceID = typeof payload.sourceID === "string" ? payload.sourceID : "";
         applyTheme(payload.isDark);
+        if (payload.mode === "conflict" && payload.conflict) {
+          if (state.currentMode !== "conflict") { disposeAllEditors(); state.currentMode = "conflict"; }
+          window.gitnConflict.load(payload.conflict, state.currentSourceID);
+          return;
+        }
+        if (state.currentMode === "conflict") { window.gitnConflict.dispose(); state.currentMode = null; }
         if (payload.mode === "preview" && payload.preview) {
           reportDebug("loadPayloadPreview", {
             path: payload.preview.path,
@@ -1460,7 +1632,22 @@
           return;
         }
         if (payload.mode === "diff" && payload.items && payload.items.length > 0) {
+          const display = payload.diffDisplay === "split" || payload.diffDisplay === "hunk"
+            ? payload.diffDisplay : "inline";
+          if (display !== state.diffDisplay) {
+            resetRoot("diff");
+            state.diffDisplay = display;
+          }
           const item = payload.items[0];
+          if (display !== "inline") {
+            if (state.nativeDiff && sameIdentity(state.currentDiffIdentity, buildDiffIdentity(item))) {
+              renderNativeActions(item);
+            } else {
+              renderNativeDiff(item);
+            }
+            return;
+          }
+          // A preview/conflict transition may have disposed the native editor already.
           state.pendingHunkActions = {
             path: item.path,
             primaryHunkAction: item.primaryHunkAction || null,
@@ -1484,6 +1671,10 @@
       }
     },
     navigateDiff(direction) {
+      if (state.nativeDiff) {
+        state.nativeDiff.goToDiff(direction === "next" ? "next" : "previous");
+        return;
+      }
       navigateDiff(direction);
     },
   };

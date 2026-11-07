@@ -3690,7 +3690,7 @@ actor GitService {
         return result
     }
 
-    func readConflictSides(path: String) throws -> ConflictSides {
+    func readConflictSides(path: String) async throws -> ConflictSides {
         let oursLabel = conflictOursLabel()
         let theirsLabel = conflictTheirsLabel()
         let indexedBaseLines = try conflictStageLines(path: path, stage: 1)
@@ -3699,27 +3699,22 @@ actor GitService {
         let baseLines = indexedBaseLines ?? []
         let oursLines = indexedOursLines ?? []
         let theirsLines = indexedTheirsLines ?? []
-        let mergedText = try ThreeWayConflictResolver.mergeZDdiff3(
-            baseText: baseLines.joined(separator: "\n"),
-            oursText: oursLines.joined(separator: "\n"),
-            theirsText: theirsLines.joined(separator: "\n"),
-            filePath: path,
-            oursLabel: oursLabel,
-            theirsLabel: theirsLabel
-        )
-        return Self.buildConflictSides(
-            mergedText: mergedText,
-            baseLines: baseLines,
-            oursLines: oursLines,
-            theirsLines: theirsLines,
-            oursLabel: oursLabel,
-            theirsLabel: theirsLabel
-        )
+        // Keep the index reads actor-isolated, then compute the structural diff3
+        // off-actor so a large conflict does not stall other repo operations.
+        var sides = await Task.detached(priority: .userInitiated) {
+            StructuralDiff3.makeSides(
+                base: baseLines, ours: oursLines, theirs: theirsLines,
+                oursLabel: oursLabel, theirsLabel: theirsLabel
+            )
+        }.value
+        sides.missingCurrentStage = indexedBaseLines != nil && indexedOursLines == nil
+        sides.missingIncomingStage = indexedBaseLines != nil && indexedTheirsLines == nil
+        return sides
     }
 
-    func loadConflictSession(path: String) throws -> (sides: ConflictSides, snapshot: ConflictFileSnapshot) {
+    func loadConflictSession(path: String) async throws -> (sides: ConflictSides, snapshot: ConflictFileSnapshot) {
         let before = try conflictFileSnapshot(path: path)
-        let sides = try readConflictSides(path: path)
+        let sides = try await readConflictSides(path: path)
         guard before == (try conflictFileSnapshot(path: path)) else {
             throw ConflictSaveError.sourceChanged
         }
@@ -3752,7 +3747,11 @@ actor GitService {
 
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         let digest: String?
-        if FileManager.default.fileExists(atPath: fullPath) {
+        let linkTarget = try? FileManager.default.destinationOfSymbolicLink(atPath: fullPath)
+        if let linkTarget {
+            digest = SHA256.hash(data: Data(linkTarget.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        } else if FileManager.default.fileExists(atPath: fullPath) {
             let data = try Data(contentsOf: URL(fileURLWithPath: fullPath), options: [.mappedIfSafe])
             digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         } else {
@@ -3760,7 +3759,8 @@ actor GitService {
         }
         return ConflictFileSnapshot(
             ancestorOID: oid(ancestor), currentOID: oid(current),
-            incomingOID: oid(incoming), workingTreeSHA256: digest
+            incomingOID: oid(incoming), workingTreeSHA256: digest,
+            workingTreeIsSymlink: linkTarget != nil
         )
     }
 
@@ -3819,7 +3819,7 @@ actor GitService {
         guard let text = decoded.text else {
             throw GitError.operationFailed("Conflict base is not UTF-8 text")
         }
-        return text.components(separatedBy: "\n")
+        return text.isEmpty ? [] : text.components(separatedBy: "\n")
     }
 
     private static func nextLineMatchIndex(
@@ -4012,7 +4012,8 @@ actor GitService {
         // This also moves any existing conflict entries to REUC automatically.
         let fullPath = (repoPath as NSString).appendingPathComponent(path)
         let result: Int32
-        if FileManager.default.fileExists(atPath: fullPath) {
+        if FileManager.default.fileExists(atPath: fullPath) ||
+            (try? FileManager.default.destinationOfSymbolicLink(atPath: fullPath)) != nil {
             result = git_index_add_bypath(index, path)
         } else {
             result = git_index_remove_bypath(index, path)
@@ -4166,6 +4167,46 @@ actor GitService {
                 error.localizedDescription,
                 retrySnapshot: retrySnapshot?.workingTreeSHA256 == savedDigest ? retrySnapshot : nil
             )
+        }
+    }
+
+    func resolveDeleteModifyConflictUnqueued(
+        path: String, choice: DeleteModifyResolution, expectedSnapshot: ConflictFileSnapshot
+    ) async throws {
+        guard expectedSnapshot == (try conflictFileSnapshot(path: path)) else {
+            throw ConflictSaveError.sourceChanged
+        }
+        let currentMissing = expectedSnapshot.currentOID == nil
+        let incomingMissing = expectedSnapshot.incomingOID == nil
+        guard expectedSnapshot.ancestorOID != nil, currentMissing != incomingMissing else {
+            throw GitError.operationFailed("This is not a modify/delete conflict")
+        }
+
+        switch choice {
+        case .deleted:
+            let fullPath = (repoPath as NSString).appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: fullPath) ||
+                (try? FileManager.default.destinationOfSymbolicLink(atPath: fullPath)) != nil {
+                try FileManager.default.removeItem(atPath: fullPath)
+            }
+        case .modified, .ancestor:
+            let stage = choice == .ancestor ? 1 : (currentMissing ? 3 : 2)
+            // Git's checkout machinery keeps the selected blob's mode and filters.
+            try await runGit(["checkout-index", "-f", "--stage=\(stage)", "--", path])
+        }
+
+        let applied = try conflictFileSnapshot(path: path)
+        do {
+            try stageConflictResolved(path: path)
+        } catch {
+            let retry = try? conflictFileSnapshot(path: path)
+            let canRetry = retry?.ancestorOID == expectedSnapshot.ancestorOID &&
+                retry?.currentOID == expectedSnapshot.currentOID &&
+                retry?.incomingOID == expectedSnapshot.incomingOID &&
+                retry?.workingTreeSHA256 == applied.workingTreeSHA256 &&
+                retry?.workingTreeIsSymlink == applied.workingTreeIsSymlink
+            throw ConflictSaveError.stageFailed(error.localizedDescription,
+                retrySnapshot: canRetry ? retry : nil)
         }
     }
 
