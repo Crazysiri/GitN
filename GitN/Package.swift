@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "GitN", targets: ["GitN"]),
+        .executable(name: "GitNSessionRelay", targets: ["GitNSessionRelay"]),
     ],
     dependencies: [
         .package(url: "https://github.com/appstefan/highlightswift.git", exact: "1.1.0"),
@@ -127,6 +128,7 @@ let package = Package(
                 .linkedFramework("WebKit"),
             ]
         ),
+        .executableTarget(name: "GitNSessionRelay", path: "Sources/GitNSessionRelay"),
         .testTarget(
             name: "GitNTests",
             dependencies: ["GitN"],

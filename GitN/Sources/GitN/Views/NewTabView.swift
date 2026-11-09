@@ -60,6 +60,15 @@ struct NewTabView: View {
                         )
                     }
                     .buttonStyle(.plain)
+
+                    Button(action: { appModel.openWorkbench() }) {
+                        NewTabActionButtonLabel(
+                            title: "Workbench",
+                            systemImage: "square.stack.3d.up",
+                            role: .secondary
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.leading, 40)
                 .sheet(isPresented: $showClone) {
@@ -103,6 +112,14 @@ struct NewTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.windowBackgroundColor))
+        .alert("Cannot Open Workbench", isPresented: Binding(
+            get: { appModel.workbenchOpenError != nil },
+            set: { if !$0 { appModel.workbenchOpenError = nil } }
+        )) {
+            Button("OK") { appModel.workbenchOpenError = nil }
+        } message: {
+            Text(appModel.workbenchOpenError ?? "")
+        }
         .alert(
             "Not a Git Repository",
             isPresented: Binding(

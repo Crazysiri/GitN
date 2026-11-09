@@ -27,7 +27,13 @@ struct ContentView: View {
                     // 仅渲染已加载过的 tab（懒加载），加载后通过 opacity 缓存不销毁
                     ForEach(appModel.tabs.filter { shouldRender($0) }) { tab in
                         let isActive = !appModel.showNewTab && appModel.selectedTabID == tab.id
-                        RepoContainerView(tab: tab, isActive: isActive)
+                        Group {
+                            if tab.kind == .workbench {
+                                WorkbenchView(tab: tab, isActive: isActive)
+                            } else {
+                                RepoContainerView(tab: tab, isActive: isActive)
+                            }
+                        }
                             .opacity(isActive ? 1 : 0)
                             .disabled(!isActive)
                             .allowsHitTesting(isActive)

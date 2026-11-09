@@ -101,6 +101,8 @@ mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 mkdir -p "${BUNDLE_DIR}/Contents/Frameworks"
 
 cp "$BINARY" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
+mkdir -p "${BUNDLE_DIR}/Contents/Helpers"
+cp "${BUILD_DIR}/GitNSessionRelay" "${BUNDLE_DIR}/Contents/Helpers/GitNSessionRelay"
 cp "$ICNS_FILE" "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns"
 
 python3 - <<'PY' | while IFS= read -r bundle; do

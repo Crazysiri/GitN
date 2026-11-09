@@ -17,6 +17,9 @@ final class AppModel {
 
     private static let savedReposKey = "GitN.savedRepos"
     private static let recentReposKey = "GitN.recentRepos"
+    private static let savedTabsKey = "GitN.tabs.v1"
+    private let defaults: UserDefaults
+    var workbenchOpenError: String?
 
     var selectedTab: RepoTab? {
         tabs.first { $0.id == selectedTabID }
@@ -24,7 +27,8 @@ final class AppModel {
 
     var recentRepos: [SavedRepo] = []
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         restoreSavedRepos()
         restoreRecentRepos()
         // 如果有已保存的仓库，默认不显示 NewTab
@@ -78,9 +82,28 @@ final class AppModel {
         _addTab(path: destinationPath, name: name)
     }
 
-    private func _addTab(path: String, name: String) {
+    func openWorkbench() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Select a Git repository for the workbench"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openWorkbench(path: url.path, name: url.lastPathComponent)
+    }
+
+    func openWorkbench(path: String, name: String) {
+        guard let resolved = resolveRepositorySelection(path: path, fallbackName: name),
+              FileManager.default.fileExists(atPath: resolved.path + "/.git") else {
+            workbenchOpenError = "Choose an existing, non-bare Git working directory."
+            return
+        }
+        _addTab(path: resolved.path, name: resolved.name, kind: .workbench)
+    }
+
+    private func _addTab(path: String, name: String, kind: RepoTabKind = .git) {
         // 检查是否已存在
-        if let existing = tabs.first(where: { $0.path == path }) {
+        if let existing = tabs.first(where: { $0.path == path && $0.kind == kind }) {
             selectedTabID = existing.id
             showNewTab = false
             addToRecent(path: path, name: name)
@@ -88,7 +111,7 @@ final class AppModel {
         }
 
         // 不存在则创建新 tab
-        let tab = RepoTab(path: path, name: name)
+        let tab = RepoTab(path: path, name: name, kind: kind)
         tabs.append(tab)
         selectedTabID = tab.id
         showNewTab = false
@@ -159,12 +182,12 @@ final class AppModel {
 
     private func persistRecentRepos() {
         if let data = try? JSONEncoder().encode(recentRepos) {
-            UserDefaults.standard.set(data, forKey: Self.recentReposKey)
+            defaults.set(data, forKey: Self.recentReposKey)
         }
     }
 
     private func restoreRecentRepos() {
-        guard let data = UserDefaults.standard.data(forKey: Self.recentReposKey),
+        guard let data = defaults.data(forKey: Self.recentReposKey),
               let saved = try? JSONDecoder().decode([SavedRepo].self, from: data)
         else { return }
         
@@ -187,40 +210,26 @@ final class AppModel {
     // MARK: - Persistence
 
     private func persistRepos() {
-        let saved = tabs.map { SavedRepo(path: $0.path, name: $0.name) }
+        let saved = tabs.map { SavedTab(path: $0.path, name: $0.name, kind: $0.kind) }
         if let data = try? JSONEncoder().encode(saved) {
-            UserDefaults.standard.set(data, forKey: Self.savedReposKey)
+            defaults.set(data, forKey: Self.savedTabsKey)
         }
     }
 
     private func restoreSavedRepos() {
-        guard let data = UserDefaults.standard.data(forKey: Self.savedReposKey),
-              let saved = try? JSONDecoder().decode([SavedRepo].self, from: data),
-              !saved.isEmpty
-        else { return }
-
-        var restoredTabs: [RepoTab] = []
-        var seenPaths = Set<String>()
-
-        for repo in saved {
-            guard let resolved = resolveRepositorySelection(path: repo.path, fallbackName: repo.name) else {
-                continue
-            }
-
-            guard seenPaths.insert(resolved.path).inserted else {
-                continue
-            }
-
-            restoredTabs.append(RepoTab(path: resolved.path, name: resolved.name))
+        let saved = TabPersistence.decode(
+            current: defaults.data(forKey: Self.savedTabsKey),
+            legacy: defaults.data(forKey: Self.savedReposKey)
+        )
+        var seen = Set<String>()
+        tabs = saved.compactMap { item in
+            guard let resolved = resolveRepositorySelection(path: item.path, fallbackName: item.name),
+                  seen.insert(item.kind.rawValue + ":" + resolved.path).inserted else { return nil }
+            if item.kind == .workbench,
+               !FileManager.default.fileExists(atPath: resolved.path + "/.git") { return nil }
+            return RepoTab(path: resolved.path, name: resolved.name, kind: item.kind)
         }
-
-        tabs = restoredTabs
         selectedTabID = tabs.first?.id
-
-        let restoredRepos = tabs.map { SavedRepo(path: $0.path, name: $0.name) }
-        if restoredRepos != saved {
-            persistRepos()
-        }
     }
 
     private func resolveRepositorySelection(path: String, fallbackName: String) -> (path: String, name: String)? {

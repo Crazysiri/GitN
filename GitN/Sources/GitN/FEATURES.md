@@ -11,6 +11,7 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 | 功能 | 说明 |
 |------|------|
 | 多 Tab 管理 | 同时打开多个仓库 |
+| 独立工作台（首版） | 外部会话发现、任务与 Worktree 关联、Commit 变更比较，与 Git Tab 并存 |
 | 提交图 | 可视化分支拓扑，分页加载 |
 | Pull / Push / Fetch | 支持普通模式、多种 Pull 策略、Force Pull/Push |
 | 分支管理 | 创建、切换、重命名、删除、设置 Upstream |
@@ -33,6 +34,7 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 
 ## 最近新增功能
 
+- **独立 Workbench**：在 New Tab 页点击 **Workbench** 并选择仓库。任务默认创建专用 Worktree，也可使用已有目录；支持手动设置任务阶段、关联多个 Worktree、查看真实变更，以及通过 **Open in Git** 打开原有 Git 界面。手动新建任务中的 Codex / Kiro 选项记录预定使用的 Agent；会话发现和关联在 Sessions 页面操作，不会启动对话。
 - **GitHub Pull Request 支持**：Sidebar 会根据远程地址自动识别 GitLab / GitHub，并切换为对应的 MR / PR 列表；支持 `Open` / `Mine` 过滤、浏览器打开、复制标题/链接，以及 `Rebase & Merge`。
 - **AI 提交工具**：使用 `codex` 生成提交信息，Settings 中会显示安装/登录状态，并给出对应的错误提示和引导。
 - **新仓库初始化更完整**：新建仓库后，如果仓库里还没有本地分支，GitN 会自动创建 `README.md`、写入初始提交并设置 `HEAD`，避免出现空仓库无法继续操作的问题。
@@ -52,11 +54,26 @@ GitN 是一个 macOS 原生 Git 图形客户端，基于 SwiftUI 构建。界面
 
 **Tab 切换行为：**
 
-- 每个 Tab 独立持有一个 `RepoViewModel`，互不干扰
+- 每个 Git Tab 独立持有一个 `RepoViewModel`；Workbench Tab 使用独立的任务界面和状态
 - 采用**懒加载 + 缓存**策略：Tab 首次点击时才加载数据，之后切换不销毁（通过 `opacity` 隐藏），避免重复加载
-- 切换到已加载的 Tab 时，会触发一次**后台 Fetch** 更新远程状态
+- 切换到已加载的 Git Tab 时，会触发一次**后台 Fetch** 更新远程状态；Workbench 在激活时刷新任务和 Git 状态，也可点击刷新按钮
 - 关闭 Tab 后如无其他 Tab，自动回到 New Tab 页
 - 所有已打开的仓库在 App 重启后**自动恢复**
+
+**Workbench 数据与变更：**
+
+- 同一目录可以同时打开一个 Git Tab 和一个 Workbench Tab；关联 Worktree 的任务记录在同一仓库内共享。
+- 任务数据保存在本机 Application Support/GitN/Workbench 中，关闭 Tab 不会删除任务或 Worktree。
+- Changes 基于关联 Worktree 时的起始 Commit 比较，包含目录中原有的修改，不能视为某个 Agent 的准确修改归因。
+- 未跟踪文件会显示路径，不会自动把内容纳入 Patch。大 Patch 会截断预览，可在 Git 界面逐文件检查。
+- 删除任务只删除记录；移除 Worktree 需要单独确认，并受到 Git 的干净目录、锁定状态及已打开 Tab 检查保护。
+- 任务阶段由用户设置；默认进入 **Sessions**，不必先创建任务或选择 Worktree。
+- **Discover Codex** 通过本机 Codex CLI 的只读接口读取会话 ID、外部标题和目录，不读取聊天历史，也不启动或恢复对话。没有标题时显示工具名和会话 ID。
+- **Connect Hooks** 可显式安装本项目的 Codex / Kiro 会话事件上报配置；不会自动修改用户配置。Codex 安装后需通过 `/hooks` 审阅并信任，Kiro 配置面向当前 IDE / CLI V3 格式。
+- 会话可暂不关联 Worktree；多个同工具或不同工具的会话可使用同一 Worktree。目录历史会保留，不代表独占目录或精确代码归因。
+- 可从会话创建 Task，也可加入已有 Task。外部标题更新不会覆盖 Task 标题；比较基线在 GitN 关联目录时捕获。
+- 工作台激活时每 5 秒接收本地 Hook 事件并检查 Worktree 列表；界面关闭后 helper 可继续写入本地收件箱，重新打开后导入。完整 Diff 仍在激活或手动刷新时更新。
+- 会话 metadata 与原任务保存在同一版本化数据文件中；首次升级会保留 `.v1-backup`。Kiro 真实客户端及外部标题读取仍需在相应版本上验证。
 
 ---
 

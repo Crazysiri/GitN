@@ -184,7 +184,7 @@ struct TabBarView: View {
     private static let tabLabelFont = AppTypography.Chrome.tabLabelNS
 
     private func idealWidth(for tab: RepoTab) -> CGFloat {
-        let displayName = String(tab.name.prefix(Layout.maxVisibleCharacters))
+        let displayName = String(tab.displayName.prefix(Layout.maxVisibleCharacters))
         let textWidth = (displayName as NSString).size(withAttributes: [.font: Self.tabLabelFont]).width
         return min(Layout.maxTabWidth, Layout.tabChromeOverhead + ceil(textWidth))
     }
@@ -322,11 +322,11 @@ struct TabItemView: View {
             }
 
             HStack(spacing: 8) {
-                Image(systemName: "arrow.triangle.branch")
+                Image(systemName: tab.kind.symbol)
                     .font(AppTypography.Chrome.tabIcon)
                     .foregroundStyle(isSelected ? .primary : .secondary)
 
-                Text(tab.name)
+                Text(tab.displayName)
                     .font(AppTypography.Chrome.tabLabel)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -364,7 +364,7 @@ struct TabItemView: View {
     }
 
     private var tooltipText: String {
-        "\(tab.name)\n\(tab.path)"
+        "\(tab.displayName)\n\(tab.path)"
     }
 
     private var backgroundColor: Color {
